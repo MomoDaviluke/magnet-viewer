@@ -21,6 +21,9 @@ DEFAULTS: dict = {
     "default_concurrency": 3,      # 默认并发下载数
     "download_dir": "",            # 空 = 缓存目录/downloads
     "seed_after_complete": False,  # 任务完成后继续做种（MVP 默认不做种）
+    "download_rate_limit": 0,      # 下载限速 KB/s，0 = 不限（libtorrent 会话级）
+    "cache_limit_mb": 2048,        # 预览缓存上限 MB，0 = 不限；超限按 LRU 清最旧预览目录
+    "logging_enabled": True,       # 运行日志开关（core.logutil；关闭后全部记录降为空操作）
 }
 
 _TYPES: dict = {
@@ -30,6 +33,9 @@ _TYPES: dict = {
     "clear_cache_on_exit": bool,
     "default_concurrency": int,
     "seed_after_complete": bool,
+    "download_rate_limit": int,
+    "cache_limit_mb": int,
+    "logging_enabled": bool,
 }
 
 # libtorrent settings_pack::proxy_type_t 的整型值（2.1.x 仍是稳定枚举）

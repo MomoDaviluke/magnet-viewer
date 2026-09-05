@@ -209,6 +209,34 @@ class SessionManager:
         except Exception as e:
             log_warning("fetcher.apply_proxy", f"代理设置应用失败：{e}")
 
+    def apply_rate_limit(self, kbps: int) -> None:
+        """会话级下载限速（KB/s，0 = 不限）。热更新，无需重建会话。
+
+        底层能力已在验收 §9 实证（download_mgr_test）；此处接线应用层
+        配置项。libtorrent 单位为字节/秒，配置层用 KB/s 对用户友好。
+        """
+        if self._ses is None:
+            return
+        try:
+            self._ses.apply_settings(
+                {"download_rate_limit": max(0, int(kbps)) * 1024})
+        except Exception as e:
+            log_warning("fetcher.apply_rate_limit", f"限速设置应用失败：{e}")
+
+    def protected_dirs(self) -> set[str]:
+        """配额清理保护名单：所有已注册记录的落盘目录（含预览与下载）。
+
+        供 core.cache_quota 的 LRU 清理跳过活跃句柄目录——预览中的
+        文件被占用，且活跃任务的预览数据删除后句柄读盘会失败。
+        """
+        with self._lock:
+            out: set[str] = set()
+            for rec in self._torrents.values():
+                sp = getattr(rec, "save_path", "") or ""
+                if sp:
+                    out.add(sp)
+            return out
+
     def shutdown(self):
         """停会话：落盘任务清单与 fastresume，再清全部句柄，最后 join 线程。"""
         self.scheduler.stop()

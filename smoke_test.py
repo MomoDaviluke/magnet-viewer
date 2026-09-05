@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import libtorrent as lt  # noqa: E402
 
 from core.config import lt_proxy_settings  # noqa: E402
+from core import cache_quota, logutil  # noqa: E402
 from core.fetcher import SessionManager  # noqa: E402
 from core.models import (PieceMap, TorrentFile, contiguous_bytes,  # noqa: E402
                          disk_root, file_disk_path, human_size,
@@ -84,6 +85,15 @@ def main():
     # 把未下载的稀疏零数据喂给播放器（即此前修掉的 moov 问题会原样复发）。
     mgr_i = SessionManager(os.path.join(tmp, "cacheI"))
     mgr_i.start()
+    # 会话级限速接线：底层能力已在 download_mgr_test §9 实证，
+    # 此处验证应用层入口不抛异常，且 binding 支持读回时值正确
+    mgr_i.apply_rate_limit(512)
+    if hasattr(mgr_i._ses, "get_settings"):
+        _st = mgr_i._ses.get_settings()
+        assert int(_st.get("download_rate_limit") or 0) == 512 * 1024, \
+            f"限速未生效: {_st.get('download_rate_limit')}"
+    mgr_i.apply_rate_limit(0)   # 0 = 不限，同样不可抛
+    assert isinstance(mgr_i.protected_dirs(), set)
     got_i: list = []
     mgr_i.on_metadata = got_i.append
     mgr_i.resolve(torrent)
@@ -91,6 +101,13 @@ def main():
         if got_i:
             break
         time.sleep(0.05)
+    # 注册表仍持有该解析记录：保护名单非空（配额 LRU 的保护来源）
+    _pd = mgr_i.protected_dirs()
+    assert _pd, "protected_dirs 应包含已注册记录的落盘目录"
+    assert all(".preview" in os.path.normpath(p).replace("\\", "/")
+               or os.path.normpath(p) == os.path.normpath(
+                   os.path.join(tmp, "cacheI"))
+               for p in _pd), f"保护名单目录异常: {_pd}"
     mgr_i.shutdown()
     assert got_i, "本地 .torrent 未触发元数据回调"
     ri = got_i[0]
@@ -100,6 +117,61 @@ def main():
     assert os.path.isabs(disk_i), f"磁盘路径应为绝对路径: {disk_i}"
     assert _is_within(os.path.normpath(ri.cache_dir), os.path.normpath(disk_i))
     print(f"[2a] 本地 .torrent 注入 cache_dir 通过：{ri.cache_dir}")
+
+    # ---------------- [2d] 设置接线三处：限速 / 缓存配额 LRU / 日志开关 ----------------
+    # P2-18：logutil docstring 承诺由 logging_enabled 控制，但该键此前不在
+    # DEFAULTS 里——按文档调用 AppConfig.get 会 KeyError，且无任何接线。
+    from core.config import DEFAULTS as _DEF, _TYPES as _TTYPES
+    for _k, _v in (("download_rate_limit", 0), ("cache_limit_mb", 2048),
+                   ("logging_enabled", True)):
+        assert _k in _DEF and _DEF[_k] == _v, f"DEFAULTS 缺键或默认值错误: {_k}"
+    assert _TTYPES.get("logging_enabled") is bool
+    assert _TTYPES.get("download_rate_limit") is int
+    assert _TTYPES.get("cache_limit_mb") is int
+    logutil.set_enabled(False)
+    assert not logutil.is_enabled(), "日志开关关闭未生效"
+    logutil.set_enabled(True)
+    assert logutil.is_enabled(), "日志开关开启未生效"
+
+    # 配额 LRU 纯函数：只删未保护的旧目录、keep 绝不删、limit=0 只统计、
+    # 散落文件不属于任何任务故不清理
+    quota_root = os.path.join(tmp, "quota", ".preview")
+    os.makedirs(quota_root, exist_ok=True)
+
+    def _mk(ih: str, size: int, mtime: float) -> str:
+        d = os.path.join(quota_root, ih)
+        os.makedirs(d, exist_ok=True)
+        fp = os.path.join(d, "chunk.bin")
+        with open(fp, "wb") as fh:
+            fh.write(b"x" * size)
+        os.utime(fp, (mtime, mtime))
+        return d
+
+    old = _mk("a" * 40, 700 * 1024, 1_000_000_000)       # 最旧 → 应被清
+    keep_dir = _mk("b" * 40, 500 * 1024, 1_500_000_000)  # 活跃保护 → 绝不删
+    new = _mk("c" * 40, 900 * 1024, 2_000_000_000)       # 预算内 → 保留
+    total, freed = cache_quota.enforce_preview_limit(
+        quota_root, 2, keep_dirs={keep_dir}, warn=lambda m: None)
+    assert os.path.isdir(keep_dir), "受保护目录被删除"
+    assert not os.path.isdir(old), "最旧目录未被清理"
+    assert os.path.isdir(new), "预算内目录被误删"
+    assert freed == 700 * 1024 and total == 1400 * 1024, \
+        f"配额统计错误: total={total} freed={freed}"
+    t0, f0 = cache_quota.enforce_preview_limit(quota_root, 0, set(),
+                                               warn=lambda m: None)
+    assert f0 == 0 and os.path.isdir(keep_dir) and os.path.isdir(new), \
+        "limit=0（不限制）不应删除任何目录"
+    open(os.path.join(quota_root, "loose.txt"), "w").close()
+    _t2, freed2 = cache_quota.enforce_preview_limit(quota_root, 1, set(),
+                                                    warn=lambda m: None)
+    assert os.path.isfile(os.path.join(quota_root, "loose.txt")), \
+        "散落文件不应被配额清理"
+    assert not os.path.isdir(keep_dir) and os.path.isdir(new), \
+        "无保护时应按 LRU 删较旧的 keep_dir、保留较新的 new"
+    assert freed2 == 500 * 1024 and _t2 == 900 * 1024, \
+        f"删除后应恰好回到上限内: total={_t2} freed={freed2}"
+    print(f"[2d] 设置接线通过：限速/日志开关/配额 LRU（LRU 释放 "
+          f"{human_size(freed)}）")
 
     # ---------------- [2c] BEP-52 种子版本 ----------------
     # libtorrent 2.x 的 create_torrent() 默认产出 v1+v2 混合种子（meta version=2）。

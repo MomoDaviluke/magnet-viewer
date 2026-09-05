@@ -8,7 +8,7 @@
 - **文件树视图**：目录层级、单文件大小、占比，双击媒体文件直接预览。
 - **视频边下边播**：libtorrent 单文件锁定 + 分块顺序下载 + 索引块（moov）优先 → 本地 HTTP 流服务（仅监听 127.0.0.1，支持 Range）→ 内嵌 QMediaPlayer 播放，实时显示缓冲进度。播放器请求未就绪区间时自动「点播」调度器补拉并等待（moov 探测与任意拖动均可正常工作）。
 - **图片画廊**：图片文件按需下载到临时缓存，完成后自动载入缩略图，支持 Ctrl+滚轮缩放、翻页；画廊内切换未下载图片会自动切换下载目标。
-- **设置**（右上角「设置」按钮）：SOCKS5/HTTP 代理（含账号密码、Peer 连接走代理以保护 IP）、元数据获取超时、缓存目录、退出时清理缓存、立即清理缓存。代理与超时保存后立即生效（libtorrent `apply_settings` 热更新），缓存目录修改重启生效。设置持久化于 QSettings（Windows 注册表 `HKEY_CURRENT_USER\Software\Bitseed\MagnetViewer`）。
+- **设置**（右上角「设置」按钮）：SOCKS5/HTTP 代理（含账号密码、Peer 连接走代理以保护 IP）、元数据获取超时、**下载限速**（KB/s，会话级热更新）、**预览缓存上限**（超限按最久未活跃顺序自动清理旧预览数据，已下载文件不受影响）、**运行日志开关**、缓存目录、退出时清理缓存、立即清理缓存。代理、超时、限速与日志开关保存后立即生效（libtorrent `apply_settings` 热更新），缓存目录与并发数修改重启生效，缓存上限在下次切换预览文件时生效。设置持久化于 QSettings（Windows 注册表 `HKEY_CURRENT_USER\Software\Bitseed\MagnetViewer`）。
 - **拖放与输入历史**：可直接把 `.torrent` 文件或磁力链文本拖入窗口（落点即解析）；输入框带自动补全，保留最近 15 条解析记录（置顶去重，持久化到 QSettings）。
 - 预览可随时取消（自动释放下载配额）。
 
@@ -50,6 +50,7 @@ magnet-viewer/
 │   ├── scheduler.py      # 预览调度：单文件锁定 + 顺序分块 + 索引块优先 + 按需补拉
 │   ├── stream_server.py  # 本地 HTTP 流服务（127.0.0.1 + Range + token/Host 鉴权）
 │   ├── cache_guard.py    # 缓存目录守卫（防误删用户数据目录）
+│   ├── cache_quota.py    # 预览缓存配额（超限按 LRU 清理，仅动 .preview/）
 │   ├── logutil.py        # 统一日志（滚动 1MB×3，可关闭，绝不因日志抛异常）
 │   ├── models.py         # 数据模型
 │   └── config.py         # QSettings 持久化 + 代理/历史映射
@@ -77,7 +78,7 @@ magnet-viewer/
 
 | 验证项 | 结果 |
 |--------|------|
-| `smoke_test.py`：解析 / **本地种子注入 cache_dir** / **路径穿越防护** / **bencode 防御（深度炸弹·超长整数·超长长度字段）** / **鉴权（无 token·伪造 Host → 403）** / Range 流服务 / 前缀钳制 / **中文·特殊字符文件名往返** / 分块级可用性 / 尾部索引窗口 / **点播+等待** / **代理配置映射（含 tracker 重置）** / **会话启动参数** / 模块导入 | 通过 |
+| `smoke_test.py`：解析 / **本地种子注入 cache_dir** / 路径穿越防护 / bencode 防御（深度炸弹·超长整数·超长长度字段） / 鉴权（无 token·伪造 Host → 403） / Range 流服务 / 前缀钳制 / **中文·特殊字符文件名往返** / 分块级可用性 / 尾部索引窗口 / **点播+等待** / **代理配置映射（含 tracker 重置）** / **会话启动参数** / **限速与日志开关接线** / **缓存配额 LRU（保护名单·limit=0·散落文件）** / 模块导入 | 通过 |
 | `local_magnet_test.py`：磁力链 → 元数据 → 单文件顺序下载 | 通过（元数据 1.0s、info_hash 一致、900 KB 缓冲至 100%、磁盘字节数一致） |
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
 | `qt_stream_open_test.py`（QMediaPlayer FFmpeg 后端 offscreen 实测，依赖同上） | 通过：A 仅头部→`FormatError`（即用户遇到的 moov atom not found）；B 头+尾+按需补拉→`LoadedMedia` 成功开播；C 全量→成功 |

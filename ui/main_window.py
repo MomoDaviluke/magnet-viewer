@@ -14,11 +14,13 @@ from PySide6.QtWidgets import (QCompleter, QFileDialog, QHBoxLayout,
 
 from core.cache_guard import (clear_cache_contents, ensure_cache_dir,
                               guard_ok_for_cleanup)
+from core.cache_quota import dir_size_bytes, enforce_preview_limit
 from core.config import AppConfig
 from core.fetcher import SessionManager
+from core import logutil
 from core.logutil import log_warning
 from core.models import (ParseResult, PieceMap, TorrentFile, disk_root,
-                         file_disk_path)
+                         file_disk_path, human_size)
 from core.stream_server import StreamServer
 from ui.add_download_dialog import AddDownloadDialog
 from ui.downloads_pane import DownloadsPane
@@ -78,6 +80,13 @@ class MainWindow(QMainWindow):
             active_downloads=int(self.cfg.get("default_concurrency") or 3))
         self.session.start(proxy=self.cfg.proxy(),
                            metadata_timeout=self.cfg.get("metadata_timeout"))
+        # 会话级限速 + 日志开关：启动即按配置应用（P2-18 此前承诺了
+        # logging_enabled 但从未接线——docstring 与实现脱节）
+        self.session.apply_rate_limit(int(self.cfg.get("download_rate_limit") or 0))
+        _log_on = bool(self.cfg.get("logging_enabled"))
+        logutil.set_enabled(_log_on)
+        if _log_on:
+            logutil.setup()
         self.bridge = _Bridge()
         self.session.on_metadata = self.bridge.metadata_ready.emit
         self.session.on_error = self.bridge.resolve_failed.emit
@@ -130,6 +139,13 @@ class MainWindow(QMainWindow):
         self._status_timer.setInterval(700)
         self._status_timer.timeout.connect(self._refresh_status)
         self._status_timer.start()
+
+        # 缓存占用显示：低频刷新（预览目录文件数少，统计毫秒级）
+        self._cache_timer = QTimer(self)
+        self._cache_timer.setInterval(30_000)
+        self._cache_timer.timeout.connect(self._refresh_cache_usage)
+        self._cache_timer.start()
+        self._refresh_cache_usage()
 
     # ---------- 拖拽与历史 ----------
 
@@ -222,9 +238,13 @@ class MainWindow(QMainWindow):
             # 代理与超时立即生效（缓存目录重启生效）
             self.session.apply_proxy(self.cfg.proxy())
             self.session._metadata_timeout = float(self.cfg.get("metadata_timeout"))
+            # 限速与日志开关：保存即热更新，无需重启
+            self.session.apply_rate_limit(int(self.cfg.get("download_rate_limit") or 0))
+            logutil.set_enabled(bool(self.cfg.get("logging_enabled")))
             self.hint.setText(
                 self._hint_template.format(int(self.session.metadata_timeout)))
             self.status_panel.set_state("设置已保存")
+            self._refresh_cache_usage()
 
     def _clear_cache_now(self):
         """设置对话框「立即清理缓存」：先停预览，再只清预览缓存内容。
@@ -449,6 +469,7 @@ class MainWindow(QMainWindow):
     def _open_preview(self, f: TorrentFile):
         if self.result is None:
             return
+        self._enforce_cache_quota()
         try:
             self.session.start_preview(f)
         except Exception as e:
@@ -510,6 +531,49 @@ class MainWindow(QMainWindow):
             self._preview_file = f
         except Exception:
             pass
+
+    # ---------- 预览缓存配额（P2-2） ----------
+
+    def _enforce_cache_quota(self):
+        """切换预览前执行缓存配额：超限按 LRU 清最旧的预览目录。
+
+        只动 <cache>/.preview/<ih>/；保护名单来自 session.protected_dirs()
+        （活跃句柄的落盘目录），downloads/ 与任务持久化文件天然不在
+        扫描范围。limit<=0 表示用户关闭了配额。
+        """
+        limit = int(self.cfg.get("cache_limit_mb") or 0)
+        if limit <= 0:
+            return
+        preview_root = os.path.join(self.cache_dir, ".preview")
+        if not os.path.isdir(preview_root):
+            return
+        keep = {os.path.normcase(p)
+                for p in self.session.protected_dirs()}
+        keep.add(os.path.normcase(self.cache_dir))
+        try:
+            total, _freed = enforce_preview_limit(
+                preview_root, limit, keep,
+                warn=lambda m: log_warning("main.cache_quota", m))
+        except Exception as e:
+            log_warning("main.cache_quota", f"配额清理异常（已忽略）：{e}")
+            return
+        self._update_cache_usage(total)
+
+    def _refresh_cache_usage(self):
+        """刷新状态栏缓存占用显示（低频：30 秒定时器 + 打开设置后）。"""
+        preview_root = os.path.join(self.cache_dir, ".preview")
+        total = dir_size_bytes(preview_root) if os.path.isdir(preview_root) else 0
+        self._update_cache_usage(total)
+
+    def _update_cache_usage(self, total_bytes: int):
+        limit = int(self.cfg.get("cache_limit_mb") or 0)
+        if limit > 0:
+            self.status_panel.set_cache_usage(
+                f"缓存 {human_size(total_bytes)} / {human_size(limit * 1024 * 1024)}")
+        else:
+            # 不限制时仅在确有占用时提示，避免常驻噪音
+            self.status_panel.set_cache_usage(
+                f"缓存 {human_size(total_bytes)}" if total_bytes > 0 else "")
 
     def _pieces_map(self, disk_path: str):
         """流服务回调：返回该文件的分块映射（按已下载分块判定可读区间）。
