@@ -24,3 +24,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .workbuddy/
+
+# Hermes agent 工作目录（规划等临时产物）
+.hermes/
