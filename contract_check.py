@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from core import (cache_guard, cache_quota, models, parser, persist,
-                      scheduler, states, stream_server)
+                      scheduler, session, states, stream_server)
     from core import fetcher as fetcher_mod
     from core.fetcher import SessionManager
 except Exception as e:          # 依赖缺失：显式 SKIP，绝不假装通过
@@ -204,6 +204,30 @@ def main() -> int:
         # 目录工具只保留模块级纯函数（无状态，registry/taskops 直接取用），
         # 不在 TaskPersistence 上留一层同签名的实例包装，避免两套入口。
     })
+    # session（阶段 2 抽出）：同 persist 处理——后续阶段只能使用、不得改签名。
+    sig_check("session", session, {
+        "alert_category_mask": [],
+        "build_session_settings": [("listen_port", False),
+                                   ("active_downloads", False),
+                                   ("proxy", True)],
+    })
+    sig_check("session.SessionCore", session.SessionCore, {
+        "start": [("proxy", True), ("metadata_timeout", True)],
+        "apply_proxy": [("proxy", False)],
+        "apply_rate_limit": [("kbps", False)],
+        "shutdown": [],
+        "alert_loop": [],
+        "handle_alert": [("a", False)],
+        "metadata_watchdog": [("now", True)],
+        "resume_sweep": [("now", True)],
+    })
+    check(session.ALERT_POLL_INTERVAL == 0.15
+          and session.SHUTDOWN_JOIN_TIMEOUT == 2.0
+          and session.RESUME_SWEEP_INTERVAL == 60.0,
+          "session 三个节奏常量不变（0.15 / 2.0 / 60.0）")
+    check(all(hasattr(fetcher_mod, n) for n in ("SessionCore", "SessionDeps")),
+          "core.fetcher 仍再导出 SessionCore / SessionDeps")
+
     # states（阶段 1 下沉的常量层）：取值冻结——改状态名 = 破坏磁盘数据兼容
     for name, val in (("STATE_QUEUED", "QUEUED"),
                       ("STATE_META_FETCH", "META_FETCH"),

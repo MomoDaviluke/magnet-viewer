@@ -28,7 +28,6 @@ from dataclasses import dataclass
 import libtorrent as lt
 
 from .cache_guard import ensure_cache_dir
-from .config import lt_proxy_settings
 from .logutil import log_exception, log_warning
 from .models import ParseResult, PieceMap, TorrentFile, safe_rel_path
 from .parser import is_torrent_path, parse_torrent_file
@@ -38,6 +37,7 @@ from .persist import safe_task_save_path as persist_safe_task_save_path
 from .persist import save_subdir_of as persist_save_subdir_of
 from .persist import task_dir as persist_task_dir
 from .scheduler import PreviewScheduler
+from .session import SessionCore, SessionDeps
 # 再导出：历史写法 from core.fetcher import STATE_* 仍须可用（download_mgr_test
 # 在用）；常量本体已下沉到 core.states，避免 fetcher → persist → fetcher 环。
 from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES,  # noqa: F401
@@ -45,7 +45,7 @@ from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES,  # noqa: F401
                      STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
                      STATE_QUEUED, STATE_READY, STATE_SEEDING, STATE_STOPPED,
                      STATE_VALIDATE)
-from .taskstore import (load_tasks, normalize_info_hash, save_tasks,
+from .taskstore import (load_tasks, normalize_info_hash,
                         task_from_result, upsert_task)
 
 METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种
@@ -138,59 +138,55 @@ class SessionManager:
             result_from_torrent_info=self._result_from_torrent_info,
             activate_download=self._activate_download))
 
+        # 会话核心（阶段 2 抽出）：会话构造/热更新/退出清理/告警循环/看门狗。
+        # 与 persist 同一套注入约定：宿主成员（_ses/_running/_thread/…）经
+        # getter/setter 闭包读写，session 不反向依赖本类；_metadata_timeout 等
+        # UI/测试直访的属性仍留在宿主上（兼容决策）。
+        self._sess = SessionCore(SessionDeps(
+            listen_port=self.listen_port, active_downloads=self._active_downloads,
+            lock=self._lock,
+            ses_get=lambda: self._ses,
+            ses_set=lambda v: setattr(self, "_ses", v),
+            running_get=lambda: self._running,
+            running_set=lambda v: setattr(self, "_running", v),
+            thread_get=lambda: self._thread,
+            thread_set=lambda v: setattr(self, "_thread", v),
+            last_sweep_get=lambda: self._last_resume_sweep,
+            last_sweep_set=lambda v: setattr(self, "_last_resume_sweep", v),
+            metadata_timeout_get=lambda: self._metadata_timeout,
+            metadata_timeout_set=lambda v: setattr(self, "_metadata_timeout", v),
+            torrents_get=lambda: self._torrents,
+            tasks_get=lambda: self._tasks,
+            tasks_set=lambda v: setattr(self, "_tasks", v),
+            hash_key=self._hash_key, find_record=self._find_record,
+            current_record=self._current_record,
+            tasks_loader=lambda: load_tasks(
+                self.cache_dir,
+                warn=lambda m: log_warning("fetcher.restore.tasks", m)),
+            restore_task=self._restore_task,
+            thread_factory=lambda target: threading.Thread(
+                target=target, daemon=True),
+            scheduler_get=lambda: self.scheduler,
+            persist_tasks=self._persist_tasks,
+            write_resume_from_alert=self._write_resume_from_alert,
+            request_resume=self._request_resume,
+            drain_resume_alerts=self._drain_resume_alerts,
+            on_metadata_received=self._on_metadata_received,
+            on_download_finished=self._on_download_finished,
+            emit_error=self._emit_error,
+            clear_resolving=self._clear_resolving,
+            clear_runtime_state=self._clear_runtime_state))
+
     # ---------- 生命周期 ----------
 
     def start(self, proxy: dict | None = None,
               metadata_timeout: float | None = None):
-        """启动会话。proxy 见 core.config.lt_proxy_settings 的输入格式。"""
-        # libtorrent 2.1.x：settings_pack 已被 session_params / dict 配置取代
-        # UPnP/NAT-PMP 默认关闭：本应用只“收”不做种，端口映射徒增暴露面
-        settings = {
-            "listen_interfaces": f"0.0.0.0:{self.listen_port}",
-            "enable_dht": True,
-            "enable_lsd": True,
-            "enable_upnp": False,
-            "enable_natpmp": False,
-            "connections_limit": 300,
-            "alert_queue_size": 5000,
-            "active_downloads": self._active_downloads,
-        }
-        if metadata_timeout:
-            self._metadata_timeout = float(metadata_timeout)
-        settings.update(lt_proxy_settings(proxy))
-        # 显式订阅必要告警类别（默认掩码过窄可能漏掉 metadata / file_progress）
-        cat = lt.alert.category_t
-        mask = 0
-        for name in ("status_notification", "error_notification",
-                     "file_progress_notification", "storage_notification",
-                     "tracker_notification", "connect_notification"):
-            try:
-                mask |= int(getattr(cat, name))
-            except Exception:
-                pass
-        if mask:
-            settings["alert_mask"] = mask
-        try:
-            self._ses = lt.session(settings)
-        except Exception as e:
-            # 默认端口被占用（如 6881）会直接崩溃：回退随机端口再试一次
-            log_warning("fetcher.start",
-                        f"监听端口 {self.listen_port} 启动失败（{e}），回退随机端口")
-            settings["listen_interfaces"] = "0.0.0.0:0"
-            self._ses = lt.session(settings)
-        # 启动恢复：加载任务清单 + 逐任务恢复（损坏绝不阻断启动）
-        self._tasks = load_tasks(
-            self.cache_dir,
-            warn=lambda m: log_warning("fetcher.restore.tasks", m))
-        for t in self._tasks.values():
-            try:
-                self._restore_task(t)
-            except Exception as e:
-                log_exception("fetcher.restore", e)
-        self._last_resume_sweep = time.time()
-        self._running = True
-        self._thread = threading.Thread(target=self._alert_loop, daemon=True)
-        self._thread.start()
+        """启动会话。proxy 见 core.config.lt_proxy_settings 的输入格式。
+
+        实现见 core.session.SessionCore.start：会话配置构造 / 端口冲突回退 /
+        任务清单恢复 / 告警线程拉起。
+        """
+        self._sess.start(proxy, metadata_timeout)
 
     @property
     def metadata_timeout(self) -> float:
@@ -202,27 +198,17 @@ class SessionManager:
         return self._download_dir
 
     def apply_proxy(self, proxy: dict) -> None:
-        """运行时切换代理（无需重建会话）。"""
-        if self._ses is None:
-            return
-        try:
-            self._ses.apply_settings(lt_proxy_settings(proxy))
-        except Exception as e:
-            log_warning("fetcher.apply_proxy", f"代理设置应用失败：{e}")
+        """运行时切换代理（无需重建会话）。实现见 core.session。"""
+        self._sess.apply_proxy(proxy)
 
     def apply_rate_limit(self, kbps: int) -> None:
         """会话级下载限速（KB/s，0 = 不限）。热更新，无需重建会话。
 
         底层能力已在验收 §9 实证（download_mgr_test）；此处接线应用层
         配置项。libtorrent 单位为字节/秒，配置层用 KB/s 对用户友好。
+        实现见 core.session。
         """
-        if self._ses is None:
-            return
-        try:
-            self._ses.apply_settings(
-                {"download_rate_limit": max(0, int(kbps)) * 1024})
-        except Exception as e:
-            log_warning("fetcher.apply_rate_limit", f"限速设置应用失败：{e}")
+        self._sess.apply_rate_limit(kbps)
 
     def protected_dirs(self) -> set[str]:
         """配额清理保护名单：所有已注册记录的落盘目录（含预览与下载）。
@@ -239,49 +225,25 @@ class SessionManager:
             return out
 
     def shutdown(self):
-        """停会话：落盘任务清单与 fastresume，再清全部句柄，最后 join 线程。"""
-        self.scheduler.stop()
-        # 1) 落盘任务清单 + 请求全量 fastresume（异步告警，由 alert 循环消化）
-        with self._lock:
-            if self._tasks:
-                try:
-                    save_tasks(self.cache_dir, self._tasks)
-                except Exception as e:
-                    log_warning("fetcher.shutdown.save_tasks", f"{e}")
-            if self._ses is not None:
-                for rec in self._torrents.values():
-                    if (rec.download and rec.handle is not None
-                            and rec.result is not None):
-                        try:
-                            rec.handle.save_resume_data(
-                                lt.save_resume_flags_t.flush_disk_cache)
-                        except Exception as e:
-                            log_warning("fetcher.shutdown.save_resume", f"{e}")
-        # 2) 通知告警线程退出并等待其消化告警
-        self._running = False
-        if self._thread is not None:
-            try:
-                self._thread.join(timeout=2)
-            except Exception as e:
-                log_warning("fetcher.shutdown.join", f"{e}")
-        # 3) 残留 fastresume 告警直取（可能在线程退出后才到达）
-        self._drain_resume_alerts()
-        # 4) 移除全部句柄并复位（options=0：保留磁盘文件——下载任务是用户数据，
-        #    remove_torrent 的 delete_files=1 会异步删文件，shutdown 绝不可用）
-        with self._lock:
-            if self._ses is not None:
-                for rec in self._torrents.values():
-                    if rec.handle is not None:
-                        try:
-                            self._ses.remove_torrent(rec.handle, 0)
-                        except Exception as e:
-                            log_warning("fetcher.shutdown.remove_torrent", f"{e}")
-            self._tasks.clear()
-            self._torrents.clear()
-            self._current_ih = None
-            self._handle = None
-            self._result = None
-            self._ses = None
+        """停会话：落盘任务清单与 fastresume，再清全部句柄，最后 join 线程。
+
+        实现见 core.session.SessionCore.shutdown。
+        """
+        self._sess.shutdown()
+
+    def _clear_resolving(self):
+        """清「当前解析」别名（须持锁，供 session 看门狗调用）。"""
+        self._resolving = False
+        self._resolve_started = 0.0
+
+    def _clear_runtime_state(self):
+        """复位全部运行时状态（须持锁，供 session shutdown 调用）。"""
+        self._tasks.clear()
+        self._torrents.clear()
+        self._current_ih = None
+        self._handle = None
+        self._result = None
+        self._clear_resolving()
 
     # ---------- 解析入口（预览/查看清单，落盘 .preview/<ih>） ----------
 
@@ -1194,110 +1156,6 @@ class SessionManager:
         实现见 core.persist.TaskPersistence.restore_task。
         """
         return self._persist.restore_task(t)
-
-    # ---------- alert 循环（后台线程） ----------
-
-    def _alert_loop(self):
-        while self._running and self._ses is not None:
-            try:
-                for a in self._ses.pop_alerts():
-                    # 单条告警处理失败不得中断整批，否则 metadata_received_alert 会被丢弃
-                    try:
-                        if isinstance(a, lt.metadata_received_alert):
-                            # 归属校验：按 info_hash 查任务注册表；
-                            # 查不到 = 已移除任务的迟到告警，丢弃
-                            rec = self._find_record(a.handle)
-                            if rec is not None:
-                                self._on_metadata_received(rec)
-                        elif isinstance(a, lt.file_completed_alert):
-                            # 同样按任务归属：只服务当前任务（预览）的文件完成事件
-                            rec = self._find_record(a.handle)
-                            if (rec is not None
-                                    and rec is self._current_record()
-                                    and self.scheduler.on_file_completed):
-                                self.scheduler.on_file_completed(a.index)
-                        elif isinstance(a, lt.torrent_finished_alert):
-                            rec = self._find_record(a.handle)
-                            if rec is not None and rec.download:
-                                self._on_download_finished(rec)
-                        elif isinstance(a, lt.save_resume_data_alert):
-                            self._write_resume_from_alert(a)
-                        elif isinstance(a, lt.save_resume_data_failed_alert):
-                            log_warning("fetcher.resume.failed",
-                                        f"{self._hash_key(a.handle)[:12]}…")
-                    except Exception as e:
-                        # 此处历史上吞掉过整批告警处理异常，导致元数据永不回调
-                        log_exception("fetcher.alert.handle", e)
-            except Exception as e:
-                log_exception("fetcher.alert.pop", e)
-            # 元数据超时看门狗：per-task（替代全局单计时）。
-            # 遍历注册表里仍 resolving 的任务，各自对照自己的 resolve_started 与
-            # 超时（默认可配：记录级 timeout 覆盖，否则用会话级 _metadata_timeout），
-            # 超时任务独立 pause + 任务 FAILED，互不影响；暂停/停止/完成/失败态
-            # 任务不看门（用户暂停元数据获取是合法动作）。
-            now = time.time()
-            expired = []
-            with self._lock:
-                for rec in self._torrents.values():
-                    if not rec.resolving or rec.resolve_started <= 0:
-                        continue
-                    if rec.state in (STATE_PAUSED, STATE_STOPPED,
-                                     STATE_COMPLETED, STATE_FAILED):
-                        continue
-                    limit = (rec.timeout if rec.timeout is not None
-                             else self._metadata_timeout)
-                    if now - rec.resolve_started > limit:
-                        expired.append(rec)
-            for rec in expired:
-                with self._lock:
-                    if not (rec.resolving and rec.resolve_started > 0):
-                        continue   # 已被其他路径处理（如元数据刚到达）
-                    rec.resolving = False
-                    rec.resolve_started = 0.0
-                    rec.state = STATE_FAILED
-                    is_current = rec is self._current_record()
-                    if is_current:
-                        self._resolving = False
-                        self._resolve_started = 0.0
-                if not rec.download:
-                    if is_current:
-                        msg = (f"获取元数据超时（>{int(self._metadata_timeout)} 秒）："
-                               f"该资源可能已无做种/无在线 Peer")
-                    else:
-                        key = self._hash_key(rec.handle) \
-                            if rec.handle is not None else "?"
-                        msg = (f"[{key[:12]}…] 获取元数据超时"
-                               f"（>{int(self._metadata_timeout)} 秒）："
-                               f"该资源可能已无做种/无在线 Peer")
-                    self._emit_error(msg)
-                with self._lock:
-                    if rec.handle is not None:
-                        try:
-                            rec.handle.pause()
-                        except Exception as e:
-                            log_warning("fetcher.timeout.pause", f"{e}")
-                if rec.download:
-                    with self._lock:
-                        if rec.priority and rec.priority > 0:
-                            pass
-                        rec.error = (f"获取元数据超时"
-                                     f"（>{int(self._metadata_timeout)} 秒）："
-                                     f"该资源可能已无做种/无在线 Peer")
-                        key = self._hash_key(rec.handle) \
-                            if rec.handle is not None else ""
-                        if key in self._tasks:
-                            self._tasks[key]["state"] = STATE_FAILED
-                            self._tasks[key]["error"] = rec.error
-                    self._persist_tasks()
-            # fastresume 60s 周期脏写（仅下载中的任务；libtorrent 建议 ≥1min）
-            if now - self._last_resume_sweep >= 60.0:
-                self._last_resume_sweep = now
-                with self._lock:
-                    for rec in self._torrents.values():
-                        if rec.download and rec.handle is not None \
-                                and rec.state == STATE_DOWNLOADING:
-                            self._request_resume(rec)
-            time.sleep(0.15)
 
     def _on_download_finished(self, rec: TaskRecord):
         """torrent_finished_alert：任务完成；默认自动停止（D3），seed 则做种。"""

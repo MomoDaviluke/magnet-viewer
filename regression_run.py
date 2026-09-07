@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 SUITES = [
     "contract_check",
     "persist_test",       # 阶段 1 持久化专项（假依赖，秒级，先跑最便宜的失败信号）
+    "session_test",       # 阶段 2 会话核心专项（假依赖，秒级）
     "smoke_test",
     "local_magnet_test",
     "local_torrent_test",
