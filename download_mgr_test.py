@@ -188,15 +188,32 @@ def section_pause_resume(ck: ts.Checker) -> None:
             ck.check(_task(mgr, ih)["progress"] == pp,
                      "暂停期间进度不再推进")
 
-            ck.section("§4 恢复（MVP #4）：字节续增、已有 piece 不重下")
+            ck.section("§4 恢复（MVP #4）：进度续增、已有 piece 不重下")
             ck.check(mgr.resume_task(ih) is True, "resume_task 返回 True")
             tr = _wait_task_state(mgr, ih, {STATE_DOWNLOADING, STATE_COMPLETED})
             ck.check(tr["state"] in (STATE_DOWNLOADING, STATE_COMPLETED),
                      f"恢复后回到下载（{tr['state']}）")
+            # 主判据用「进度续增」而非「磁盘字节续增」：libtorrent 稀疏写把文件
+            # 长度直接撑到**已写入的最大分块偏移**，分块乱序到达时（实测暂停前
+            # 仅 7/128 块，最大块号可达 127）快照可能已等于全长，之后不可能再
+            # 增长——旧断言因此有约 20~25% 的偶发误报，与恢复功能本身无关。
+            # 落盘字节的正确性由 §3（暂停态冻结）与 §7（完成后全量=声明值）保证。
+            pp = _task(mgr, ih)["progress"]
             grew = ts.wait_until(
-                lambda: ts.dir_byte_snapshot(dl) > snap2 + 64 * 1024,
-                TIMEOUT_DATA, desc="恢复后字节续增")
-            ck.check(grew, "恢复后磁盘字节续增（> 暂停时快照）")
+                lambda: _task(mgr, ih)["progress"] > pp + 0.05,
+                TIMEOUT_DATA, desc="恢复后进度续增")
+            ck.check(grew, f"恢复后进度续增（{pp:.2f} → "
+                           f"{_task(mgr, ih)['progress']:.2f}）")
+            # 辅助判据：暂停快照离全长还有余量时，仍校验磁盘字节确实续增
+            full = int(tr.get("total_size") or 0)
+            if full and snap2 < full - 64 * 1024:
+                grew_b = ts.wait_until(
+                    lambda: ts.dir_byte_snapshot(dl) > snap2 + 64 * 1024,
+                    TIMEOUT_DATA, desc="恢复后字节续增")
+                ck.check(grew_b, "恢复后磁盘字节续增（> 暂停时快照）")
+            else:
+                print("  [NOTE] 暂停快照已接近全长（稀疏写最大块偏移），"
+                      "本轮不适用字节续增判据")
 
             # 进度单调不回退：多次采样只升不降（piece 下载序不回退）
             seq = [tr["progress"]]

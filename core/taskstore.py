@@ -17,9 +17,9 @@
 ``files``（TorrentFile 序列化，含 .pad，供 file_progress 索引对齐）/
 ``selected``（勾选文件路径集，MVP 默认全选）/ ``state`` / ``priority`` /
 ``save_path`` / ``error`` / ``retries`` / ``created_at`` / ``finished_at``。
-状态取值与 core.fetcher 的 STATE_* 常量保持一致（resolving/ready/downloading/
-paused/completed/stopped/failed/seeding/deleted），此处不导入 fetcher 以避免
-把 libtorrent 拉进纯函数模块。
+状态取值与 core.states 的 STATE_* 常量保持一致（resolving/ready/downloading/
+paused/completed/stopped/failed/seeding/deleted），此处不导入 fetcher/states
+以避免把 libtorrent 拉进纯函数模块（常量本体已在 core.states，改名须同步）。
 """
 from __future__ import annotations
 

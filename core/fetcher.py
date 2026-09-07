@@ -11,6 +11,11 @@ alert 归属按 info_hash 查注册表，元数据看门狗按任务独立计时
 ``cache_dir/.preview/<ih>/``；任务清单 ``.tasks.json`` 与 fastresume
 ``.resume/<ih>.fastresume`` 原子写，启动恢复注入 resume data + 隐式校验，
 损坏静默降级全新加入，绝不阻断启动。
+
+重构阶段 1：任务持久化已整体迁入 ``core.persist``（``TaskPersistence``，
+依赖以 getter/回调注入，不反向依赖本模块），本类对应方法降级为薄委托；
+任务生命周期常量与 bootstrap tracker 下沉到 ``core.states``（本模块再导出，
+``from core.fetcher import STATE_*`` 的历史写法不受影响）。
 """
 from __future__ import annotations
 
@@ -27,34 +32,23 @@ from .config import lt_proxy_settings
 from .logutil import log_exception, log_warning
 from .models import ParseResult, PieceMap, TorrentFile, safe_rel_path
 from .parser import is_torrent_path, parse_torrent_file
-from .resume import resume_path, write_resume
+from .persist import PersistDeps, TaskPersistence
+from .persist import is_within as persist_is_within
+from .persist import task_dir as persist_task_dir
 from .scheduler import PreviewScheduler
+# 再导出：历史写法 from core.fetcher import STATE_* 仍须可用（download_mgr_test
+# 在用）；常量本体已下沉到 core.states，避免 fetcher → persist → fetcher 环。
+from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES,  # noqa: F401
+                     STATE_COMPLETED, STATE_DELETED, STATE_DOWNLOADING,
+                     STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
+                     STATE_QUEUED, STATE_READY, STATE_SEEDING, STATE_STOPPED,
+                     STATE_VALIDATE)
 from .taskstore import (load_tasks, normalize_info_hash, save_tasks,
                         task_from_result, upsert_task)
 
 METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种
 
-# 任务生命周期状态机（对齐 plan/t1 §3 与 downloads_pane 的 STATE_META 命名）：
-# QUEUED → META_FETCH → VALIDATE → DOWNLOADING ⇄ PAUSED → COMPLETED → STOPPED；
-# FAILED / DELETED 为终态；默认完成后自动停止（不做种，决策 D3）。
-STATE_QUEUED = "QUEUED"
-STATE_META_FETCH = "META_FETCH"
-STATE_VALIDATE = "VALIDATE"
-STATE_DOWNLOADING = "DOWNLOADING"
-STATE_PAUSED = "PAUSED"
-STATE_COMPLETED = "COMPLETED"
-STATE_STOPPED = "STOPPED"
-STATE_FAILED = "FAILED"
-STATE_SEEDING = "SEEDING"
-STATE_DELETED = "DELETED"
-STATE_READY = "READY"        # 内部态：仅查看清单/预览（review 记录专用，
-                             # 不持久化、不进入 tasks() 快照）
-
-DOWNLOAD_STATES = {STATE_QUEUED, STATE_META_FETCH, STATE_VALIDATE,
-                   STATE_DOWNLOADING, STATE_PAUSED, STATE_COMPLETED,
-                   STATE_STOPPED, STATE_FAILED, STATE_SEEDING, STATE_DELETED}
-
-# 节目目录名：下载任务根与预览缓存根（决策 D7）
+# 目录常量：下载任务根与预览缓存根（决策 D7）
 DOWNLOADS_SUBDIR = "downloads"
 PREVIEW_SUBDIR = ".preview"
 
@@ -76,15 +70,6 @@ class TaskRecord:
     source: str = ""                       # 来源（磁力链或 .torrent 路径）
     error: str = ""                        # 最近错误（UI 可见）
 
-
-# 公共 tracker，提升冷门磁力链的 peer 发现率
-BOOTSTRAP_TRACKERS = [
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://open.tracker.cl:1337/announce",
-    "udp://tracker.openbittorrent.com:6969/announce",
-    "udp://exodus.desync.com:6969/announce",
-    "udp://tracker.torrent.eu.org:451/announce",
-]
 
 STATE_NAMES = {
     getattr(lt.torrent_status, k, None): k.replace("_", " ")
@@ -136,6 +121,20 @@ class SessionManager:
         self._resolve_started = 0.0
 
         self.scheduler = PreviewScheduler()
+
+        # 持久化服务（阶段 1 抽出）：依赖以 getter/回调注入，persist 不反向依赖
+        # 本类——因此 _tasks/_torrents/_ses 的重绑与置空都能实时反映。
+        self._persist = TaskPersistence(PersistDeps(
+            cache_dir=self.cache_dir, download_dir=self._download_dir,
+            lock=self._lock,
+            tasks_get=lambda: self._tasks,
+            torrents_get=lambda: self._torrents,
+            gen_get=lambda: self._gen,
+            ses_get=lambda: self._ses,
+            hash_key=self._hash_key, find_record=self._find_record,
+            put_record=self._put_record, record_cls=TaskRecord,
+            result_from_torrent_info=self._result_from_torrent_info,
+            activate_download=self._activate_download))
 
     # ---------- 生命周期 ----------
 
@@ -578,11 +577,9 @@ class SessionManager:
         """下载任务落盘目录：``<下载根>/<子目录>``（默认子目录 = info_hash）。
 
         save_subdir 只允许单层干净相对段（防穿越）；不在 cache_dir 内时
-        由 tasks() 以绝对路径暴露。
+        由 tasks() 以绝对路径暴露。实现见 core.persist.task_dir。
         """
-        sub = (save_subdir or ih or "").strip().strip("/\\")
-        sub = safe_rel_path(sub) if sub else (ih or "")
-        return os.path.join(self._download_dir, sub) if sub else self._download_dir
+        return persist_task_dir(self._download_dir, ih, save_subdir)
 
     def _add_magnet_task(self, source: str, p, ih: str | None,
                          save_subdir: str | None, priority: int,
@@ -1149,208 +1146,51 @@ class SessionManager:
                     return r
             return None
 
-    # ---------- 目录与持久化辅助 ----------
+    # ---------- 目录与持久化辅助（实现在 core.persist） ----------
 
     @staticmethod
     def _is_within(root: str, path: str) -> bool:
-        """path 是否位于 root 内（normcase + commonpath 前缀防护）。"""
-        root_n = os.path.normcase(os.path.normpath(os.path.abspath(root)))
-        path_n = os.path.normcase(os.path.normpath(os.path.abspath(path)))
-        try:
-            return os.path.commonpath([root_n, path_n]) == root_n
-        except ValueError:
-            return False
+        """path 是否位于 root 内（normcase + commonpath 前缀防护，契约 #9）。"""
+        return persist_is_within(root, path)
 
     def _save_subdir_of(self, path: str) -> str:
         """落盘目录 -> tasks()['save_subdir']：cache_dir 内给相对路径，否则绝对。"""
-        ap = os.path.abspath(path or "")
-        if ap and self._is_within(self.cache_dir, ap):
-            return os.path.relpath(ap, self.cache_dir).replace(os.sep, "/")
-        return ap
+        return self._persist.save_subdir_of(path)
 
     def _safe_task_save_path(self, ih: str, save_path: str) -> str:
         """磁盘任务记录的 save_path 消毒：逃出受管范围则回退默认目录。"""
-        ap = os.path.abspath(str(save_path or ""))
-        if ap and (self._is_within(self.cache_dir, ap)
-                   or self._is_within(self._download_dir, ap)):
-            return ap
-        return self._task_dir(ih)
+        return self._persist.safe_task_save_path(ih, save_path)
 
     def _persist_tasks(self) -> None:
         """原子写 .tasks.json（失败仅告警，不阻断任务操作）。"""
-        try:
-            save_tasks(self.cache_dir, self._tasks)
-        except Exception as e:
-            log_warning("fetcher.persist_tasks", f"{e}")
+        self._persist.persist_tasks()
 
     def _read_resume(self, ih: str) -> bytes | None:
-        try:
-            with open(resume_path(self.cache_dir, ih), "rb") as f:
-                return f.read()
-        except OSError:
-            return None
+        """读单任务 fastresume 字节；不存在返回 None。"""
+        return self._persist.read_resume(ih)
 
     def _request_resume(self, rec: TaskRecord) -> None:
         """请求写 fastresume（异步：save_resume_data_alert 落盘）。"""
-        if rec is None or rec.handle is None or not rec.download \
-                or rec.result is None:
-            return
-        try:
-            rec.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
-        except Exception as e:
-            log_warning("fetcher.request_resume", f"{e}")
+        self._persist.request_resume(rec)
 
     def _write_resume_from_alert(self, a) -> None:
-        rec = self._find_record(a.handle)
-        if rec is None:
-            return
-        try:
-            # 2.1.x：alert.resume_data 为 dict（bytes 键），libtorrent 官方格式
-            write_resume(self.cache_dir, self._hash_key(a.handle), a.resume_data)
-        except Exception as e:
-            log_warning("fetcher.resume.write", f"{e}")
+        """消费 save_resume_data_alert 落盘（归属校验由注册表完成）。"""
+        self._persist.write_resume_from_alert(a)
 
     def _drain_resume_alerts(self, timeout: float = 3.0) -> None:
         """清理阶段直取残留告警，等待全部下载任务 fastresume 落盘（有界）。
 
-        竞态背景：save_resume_data(flush_disk_cache) 是异步请求，alert 在线程
-        退出后仍可能晚到；单次 pop 会丢失。此处循环 pop + 检查落盘完成度，
-        全部写完或超时才返回（超时仅告警，不阻断退出）。
+        竞态背景与超时策略见 core.persist.TaskPersistence.drain_resume_alerts。
         """
-        if self._ses is None:
-            return
-        deadline = time.time() + max(0.0, timeout)
-        while time.time() < deadline:
-            handled = False
-            try:
-                for a in self._ses.pop_alerts():
-                    try:
-                        if isinstance(a, lt.save_resume_data_alert):
-                            self._write_resume_from_alert(a)
-                            handled = True
-                        elif isinstance(a, lt.save_resume_data_failed_alert):
-                            log_warning("fetcher.resume.failed",
-                                        f"{self._hash_key(a.handle)[:12]}…")
-                    except Exception as e:
-                        log_exception("fetcher.drain_resume", e)
-            except Exception as e:
-                log_exception("fetcher.drain_resume.pop", e)
-            with self._lock:
-                pending = [k for k, r in self._torrents.items()
-                           if r.download and r.handle is not None
-                           and r.result is not None
-                           and not os.path.isfile(resume_path(self.cache_dir, k))]
-            if not pending:
-                return
-            # 仍有未落盘任务：重发请求（幂等），等 flush/告警后下一轮再检查
-            for k in pending:
-                r = self._torrents.get(k)
-                if r is not None and r.handle is not None:
-                    try:
-                        r.handle.save_resume_data(
-                            lt.save_resume_flags_t.flush_disk_cache)
-                    except Exception:
-                        pass
-            time.sleep(0.2)   # 等待 flush 完成/告警到达后重试
-        pending = [k[:12] for k in self._torrents if os.path.isfile(
-            resume_path(self.cache_dir, k)) is False]
-        if pending:
-            log_warning("fetcher.drain_resume.timeout",
-                        f"fastresume 未在 {timeout}s 内全部落盘：{pending}")
+        self._persist.drain_resume_alerts(timeout)
 
     def _restore_task(self, t: dict) -> bool:
         """启动恢复单个下载任务：resume_data 注入 + 隐式校验，损坏静默全新加入。
 
-        任何失败只标记该任务 FAILED（不抛异常、绝不阻断启动）。
+        任何失败只标记该任务 FAILED（不抛异常、绝不阻断启动）；
+        实现见 core.persist.TaskPersistence.restore_task。
         """
-        ih = t.get("info_hash") or ""
-        save_path = self._safe_task_save_path(ih, t.get("save_path") or "")
-        t["save_path"] = save_path
-        os.makedirs(save_path, exist_ok=True)
-        source = t.get("source") or ""
-        rd = self._read_resume(ih)
-        if rd is not None:
-            # B3 语义：fastresume 损坏（bencode 解析失败/结构非法）静默降级
-            # 为全新加入（丢弃 resume data 从头校验），绝不阻断启动、不误判
-            # 任务失败——与模块 docstring「损坏静默降级全新加入」一致。
-            try:
-                rd = lt.read_resume_data(rd)
-            except Exception as e:
-                log_warning("fetcher.restore.resume",
-                            f"{ih[:12]}… fastresume 损坏，静默全新加入：{e}")
-                rd = None
-        try:
-            if source.startswith("magnet:"):
-                p = lt.parse_magnet_uri(source)
-                if rd:
-                    atp = rd                       # 官方装载：含 info-hash + pieces
-                    atp.save_path = save_path
-                    atp.url = source
-                else:
-                    atp = p
-                    atp.save_path = save_path
-                    if hasattr(atp, "trackers") and not atp.trackers:
-                        atp.trackers = BOOTSTRAP_TRACKERS
-            elif is_torrent_path(source) and os.path.isfile(source):
-                ti = lt.torrent_info(source)
-                atp = rd if rd else lt.add_torrent_params()
-                atp.ti = ti
-                atp.save_path = save_path
-            else:
-                t["state"] = STATE_FAILED
-                t["error"] = "重启恢复失败：来源不可用"
-                self._persist_tasks()
-                return False
-        except Exception as e:
-            log_warning("fetcher.restore.source", f"{ih[:12]}… {e}")
-            t["state"] = STATE_FAILED
-            t["error"] = f"重启恢复失败：{e}"
-            self._persist_tasks()
-            return False
-        try:
-            handle = self._ses.add_torrent(atp)
-        except Exception as e:
-            log_warning("fetcher.restore.add", f"{ih[:12]}… {e}")
-            t["state"] = STATE_FAILED
-            t["error"] = f"重启恢复失败：{e}"
-            self._persist_tasks()
-            return False
-        st = str(t.get("state") or "").upper()
-        if st in (STATE_PAUSED, STATE_STOPPED, STATE_COMPLETED):
-            try:
-                handle.pause()
-                handle.unset_flags(lt.torrent_flags.auto_managed)
-            except Exception as e:
-                log_warning("fetcher.restore.pause", f"{e}")
-        has_meta = handle.torrent_file() is not None
-        if not has_meta and st not in (STATE_PAUSED, STATE_STOPPED):
-            try:
-                handle.resume()
-            except Exception as e:
-                log_warning("fetcher.restore.resume", f"{e}")
-        rec = TaskRecord(
-            handle=handle, result=None, gen=self._gen,
-            resolving=not has_meta,
-            resolve_started=time.time() if not has_meta else 0.0,
-            state=(st if st in DOWNLOAD_STATES
-                   else (STATE_DOWNLOADING if has_meta else STATE_META_FETCH)),
-            timeout=None, download=True,
-            seed=bool(t.get("seed")), priority=int(t.get("priority") or 0),
-            save_path=save_path, source=source)
-        if has_meta:
-            try:
-                rec.result = self._result_from_torrent_info(
-                    handle.torrent_file(), ih)
-            except Exception as e:
-                log_warning("fetcher.restore.result", f"{ih[:12]}… {e}")
-            if rec.state in (STATE_META_FETCH, STATE_QUEUED, STATE_VALIDATE):
-                rec.state = STATE_DOWNLOADING
-            if rec.result is not None \
-                    and st not in (STATE_PAUSED, STATE_STOPPED, STATE_COMPLETED):
-                self._activate_download(rec)
-        with self._lock:
-            self._put_record(ih, rec, make_current=False)
-        return True
+        return self._persist.restore_task(t)
 
     # ---------- alert 循环（后台线程） ----------
 

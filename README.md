@@ -51,6 +51,8 @@ magnet-viewer/
 │   ├── stream_server.py  # 本地 HTTP 流服务（127.0.0.1 + Range + token/Host 鉴权）
 │   ├── cache_guard.py    # 缓存目录守卫（防误删用户数据目录）
 │   ├── cache_quota.py    # 预览缓存配额（超限按 LRU 清理，仅动 .preview/）
+│   ├── persist.py        # 任务持久化：.tasks.json 原子写 / fastresume 读写与退出落盘 / 启动恢复（依赖注入，不反向依赖 fetcher）
+│   ├── states.py         # 任务生命周期常量层（STATE_* / DOWNLOAD_STATES / BOOTSTRAP_TRACKERS）
 │   ├── logutil.py        # 统一日志（滚动 1MB×3，可关闭，绝不因日志抛异常）
 │   ├── models.py         # 数据模型
 │   └── config.py         # QSettings 持久化 + 代理/历史映射
@@ -64,6 +66,7 @@ magnet-viewer/
 │   └── settings_dialog.py# 设置对话框（代理 / 超时 / 缓存）
 ├── REVIEW.md             # 上一轮全面审查报告（含修复记录）
 ├── audit_report.md       # 本轮团队全面审查报告与修复进度
+├── contract_check.py     # 对外契约自检（秒级，重构 fetcher 的安全网）
 ├── smoke_test.py         # 无 GUI 冒烟测试（python smoke_test.py）
 ├── local_magnet_test.py  # 本机闭环验证：做种端 + 磁力链解析 + 边下边播（无需外网）
 ├── moov_stream_test.py   # moov 尾部优先端到端验证（ffprobe/ffmpeg 实际探测，无 GUI）
@@ -78,6 +81,7 @@ magnet-viewer/
 
 | 验证项 | 结果 |
 |--------|------|
+| `contract_check.py`：对外契约自检（25 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist 签名 / states 常量取值 / CACHE_MARKER 常量）—— **92 项通过** | 通过（秒级，不启会话） |
 | `smoke_test.py`：解析 / **本地种子注入 cache_dir** / 路径穿越防护 / bencode 防御（深度炸弹·超长整数·超长长度字段） / 鉴权（无 token·伪造 Host → 403） / Range 流服务 / 前缀钳制 / **中文·特殊字符文件名往返** / 分块级可用性 / 尾部索引窗口 / **点播+等待** / **代理配置映射（含 tracker 重置）** / **会话启动参数** / **限速与日志开关接线** / **缓存配额 LRU（保护名单·limit=0·散落文件）** / 模块导入 | 通过 |
 | `local_magnet_test.py`：磁力链 → 元数据 → 单文件顺序下载 | 通过（元数据 1.0s、info_hash 一致、900 KB 缓冲至 100%、磁盘字节数一致） |
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
@@ -90,7 +94,7 @@ magnet-viewer/
 | `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python live_test.py` 复核。 |
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
-> 一键回归：`python regression_run.py`（7 套旧测试全量汇总退出码；下载管理模块验收单独跑 `python download_mgr_test.py`）。
+> 一键回归：`python regression_run.py`（9 套：`contract_check` 契约自检 + 7 套旧测试 + 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
 > 测试覆盖策略：按**数据入口路径**（本地种子 / 磁力链；单文件 / 多文件 / 混合 v2）铺排，而非仅按功能模块——历史上三个缺陷都源于同一功能的不同入口未各自覆盖。详见 `REVIEW.md`。
 
 ## 已修复问题
