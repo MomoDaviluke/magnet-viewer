@@ -23,7 +23,6 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import dataclass
 
 import libtorrent as lt
 
@@ -38,6 +37,13 @@ from .persist import save_subdir_of as persist_save_subdir_of
 from .persist import task_dir as persist_task_dir
 from .scheduler import PreviewScheduler
 from .session import SessionCore, SessionDeps
+# 再导出：历史写法 from core.fetcher import TaskRecord / METADATA_TIMEOUT /
+# *_SUBDIR 仍须可用（persist_test/session_test/registry_test 在用）；本体已
+# 下沉 core.registry（R-2：TaskRecord 是注册表行结构，寄居 fetcher 是历史债）。
+from .registry import (DOWNLOADS_SUBDIR, METADATA_TIMEOUT,  # noqa: F401
+                       PREVIEW_SUBDIR, TaskRecord, TaskRegistry)
+from .registry import hash_key as registry_hash_key
+from .registry import ih_from_params as registry_ih_from_params
 # 再导出：历史写法 from core.fetcher import STATE_* 仍须可用（download_mgr_test
 # 在用）；常量本体已下沉到 core.states，避免 fetcher → persist → fetcher 环。
 from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES,  # noqa: F401
@@ -45,33 +51,7 @@ from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES,  # noqa: F401
                      STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
                      STATE_QUEUED, STATE_READY, STATE_SEEDING, STATE_STOPPED,
                      STATE_VALIDATE)
-from .taskstore import (load_tasks, normalize_info_hash,
-                        task_from_result, upsert_task)
-
-METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种
-
-# 目录常量：下载任务根与预览缓存根（决策 D7）
-DOWNLOADS_SUBDIR = "downloads"
-PREVIEW_SUBDIR = ".preview"
-
-
-@dataclass
-class TaskRecord:
-    """任务注册表条目：一个 info_hash 唯一对应一个 libtorrent 句柄。"""
-    handle: lt.torrent_handle | None = None
-    result: ParseResult | None = None      # 元数据就绪后的解析结果
-    gen: int = 0                           # 创建代次（防旧解析覆盖新会话）
-    resolving: bool = False                # 是否仍在等待元数据
-    resolve_started: float = 0.0           # 本次解析开始时间（per-task 看门狗）
-    state: str = STATE_META_FETCH
-    timeout: float | None = None           # 覆盖默认元数据超时（None=会话级）
-    download: bool = False                 # 是否为持久化下载任务（add_task 系）
-    seed: bool = False                     # 完成后是否做种（D3 默认否）
-    priority: int = 0                      # 任务优先级（0~3，0=默认）
-    save_path: str = ""                    # 任务落盘目录（绝对路径）
-    source: str = ""                       # 来源（磁力链或 .torrent 路径）
-    error: str = ""                        # 最近错误（UI 可见）
-
+from .taskstore import load_tasks, task_from_result, upsert_task
 
 STATE_NAMES = {
     getattr(lt.torrent_status, k, None): k.replace("_", " ")
@@ -104,23 +84,17 @@ class SessionManager:
         self._ses: lt.session | None = None
         self._thread: threading.Thread | None = None
         self._running = False
-        self._lock = threading.Lock()
-
-        # 任务注册表：info_hash_hex -> TaskRecord（权威数据）
-        self._torrents: dict[str, TaskRecord] = {}
-        self._current_ih: str | None = None   # 当前任务/当前预览的注册表键
-
-        # 持久化下载任务清单：info_hash -> task dict（.tasks.json 内存镜像）
-        self._tasks: dict[str, dict] = {}
         self._last_resume_sweep = 0.0         # 60s 周期 fastresume 脏写
 
-        # 「当前任务」别名（预览与状态路径继续使用，语义不变）
-        self._handle: lt.torrent_handle | None = None
-        self._gen = 0              # 解析代次：后台解析完成后校验，防旧任务覆盖新会话
-        self._metadata_timeout = METADATA_TIMEOUT
-        self._result: ParseResult | None = None
-        self._resolving = False
-        self._resolve_started = 0.0
+        # 任务注册表（阶段 3 抽出）：**单锁归属**（R1 决策）。本类历史成员
+        # _lock/_torrents/_tasks/_current_ih/_handle/_result/_resolving/
+        # _resolve_started/_gen/_metadata_timeout 全部改为 property 代理，
+        # 本体唯一存于 registry——UI/测试的直访语义不变（兼容决策），而
+        # _emit_error 裸写 _resolving 的 R-1 缺陷经由 clear_resolving_safe
+        # 收编进锁段。property 读写一律**不持锁**（复合临界区由调用方
+        # with self._lock 包裹；自持锁入口见 registry 的 *_safe/snapshot）。
+        self._registry = TaskRegistry(cache_dir=self.cache_dir,
+                                      ses_get=lambda: self._ses)
 
         self.scheduler = PreviewScheduler()
 
@@ -133,7 +107,7 @@ class SessionManager:
             torrents_get=lambda: self._torrents,
             gen_get=lambda: self._gen,
             ses_get=lambda: self._ses,
-            hash_key=self._hash_key, find_record=self._find_record,
+            hash_key=registry_hash_key, find_record=self._find_record,
             put_record=self._put_record, record_cls=TaskRecord,
             result_from_torrent_info=self._result_from_torrent_info,
             activate_download=self._activate_download))
@@ -158,8 +132,8 @@ class SessionManager:
             torrents_get=lambda: self._torrents,
             tasks_get=lambda: self._tasks,
             tasks_set=lambda v: setattr(self, "_tasks", v),
-            hash_key=self._hash_key, find_record=self._find_record,
-            current_record=self._current_record,
+            hash_key=registry_hash_key, find_record=self._registry.find_record,
+            current_record=self._registry.current_record,
             tasks_loader=lambda: load_tasks(
                 self.cache_dir,
                 warn=lambda m: log_warning("fetcher.restore.tasks", m)),
@@ -176,6 +150,82 @@ class SessionManager:
             emit_error=self._emit_error,
             clear_resolving=self._clear_resolving,
             clear_runtime_state=self._clear_runtime_state))
+
+    # ---------- 注册表别名（property 代理，本体在 self._registry） ----------
+    # 读写不带锁：与迁移前的裸成员语义逐字节一致；需要原子性的复合操作
+    # 必须在 with self._lock: 段内使用（既有调用点全部如此）。
+
+    @property
+    def _lock(self):
+        return self._registry.lock
+
+    @property
+    def _torrents(self):
+        return self._registry.torrents
+
+    @property
+    def _tasks(self):
+        return self._registry.tasks
+
+    @_tasks.setter
+    def _tasks(self, v):
+        self._registry.tasks = v
+
+    @property
+    def _current_ih(self):
+        return self._registry.current_ih
+
+    @_current_ih.setter
+    def _current_ih(self, v):
+        self._registry.current_ih = v
+
+    @property
+    def _handle(self):
+        return self._registry.handle
+
+    @_handle.setter
+    def _handle(self, v):
+        self._registry.handle = v
+
+    @property
+    def _result(self):
+        return self._registry.result
+
+    @_result.setter
+    def _result(self, v):
+        self._registry.result = v
+
+    @property
+    def _resolving(self):
+        return self._registry.resolving
+
+    @_resolving.setter
+    def _resolving(self, v):
+        self._registry.resolving = v
+
+    @property
+    def _resolve_started(self):
+        return self._registry.resolve_started
+
+    @_resolve_started.setter
+    def _resolve_started(self, v):
+        self._registry.resolve_started = v
+
+    @property
+    def _gen(self):
+        return self._registry.gen
+
+    @_gen.setter
+    def _gen(self, v):
+        self._registry.gen = v
+
+    @property
+    def _metadata_timeout(self):
+        return self._registry.metadata_timeout
+
+    @_metadata_timeout.setter
+    def _metadata_timeout(self, v):
+        self._registry.metadata_timeout = v
 
     # ---------- 生命周期 ----------
 
@@ -215,14 +265,9 @@ class SessionManager:
 
         供 core.cache_quota 的 LRU 清理跳过活跃句柄目录——预览中的
         文件被占用，且活跃任务的预览数据删除后句柄读盘会失败。
+        实现见 core.registry.TaskRegistry.protected_dirs。
         """
-        with self._lock:
-            out: set[str] = set()
-            for rec in self._torrents.values():
-                sp = getattr(rec, "save_path", "") or ""
-                if sp:
-                    out.add(sp)
-            return out
+        return self._registry.protected_dirs()
 
     def shutdown(self):
         """停会话：落盘任务清单与 fastresume，再清全部句柄，最后 join 线程。
@@ -232,18 +277,12 @@ class SessionManager:
         self._sess.shutdown()
 
     def _clear_resolving(self):
-        """清「当前解析」别名（须持锁，供 session 看门狗调用）。"""
-        self._resolving = False
-        self._resolve_started = 0.0
+        """清「当前解析」别名（须持锁，供 session 看门狗调用）。实现见 core.registry。"""
+        self._registry.clear_resolving_locked()
 
     def _clear_runtime_state(self):
-        """复位全部运行时状态（须持锁，供 session shutdown 调用）。"""
-        self._tasks.clear()
-        self._torrents.clear()
-        self._current_ih = None
-        self._handle = None
-        self._result = None
-        self._clear_resolving()
+        """复位全部运行时状态（须持锁，供 session shutdown 调用）。实现见 core.registry。"""
+        self._registry.clear_runtime_state_locked()
 
     # ---------- 解析入口（预览/查看清单，落盘 .preview/<ih>） ----------
 
@@ -300,86 +339,32 @@ class SessionManager:
             self._current_ih = None
 
     def _detach_record(self, rec: TaskRecord) -> None:
-        """把任务降级为「仅查看清单」：暂停 + upload_mode，保留在注册表。
-
-        调用方须已持有 self._lock。scheduler.stop() 已撤 deadline/优先级/
-        auto_managed，这里补回 upload_mode，确保不再有数据网络活动。
-        """
-        if rec.handle is None:
-            return
-        try:
-            rec.handle.pause()
-            rec.handle.set_flags(lt.torrent_flags.upload_mode)
-            rec.handle.unset_flags(lt.torrent_flags.auto_managed)
-        except Exception as e:
-            log_warning("fetcher.detach_record", f"{e}")
+        """把任务降级为「仅查看清单」（须持锁）。实现见 core.registry。"""
+        self._registry.detach_record_locked(rec)
 
     def _preview_dir(self, ih: str) -> str:
-        """review/预览任务的落盘目录：``cache_dir/.preview/<ih>``（D7）。"""
-        if not ih or ih.startswith("tmp-"):
-            return self.cache_dir   # 无 btih 磁力链兜底：平铺
-        return os.path.join(self.cache_dir,
-                            *safe_rel_path(PREVIEW_SUBDIR, ih).split("/"))
+        """review/预览落盘目录 ``cache_dir/.preview/<ih>``。见 core.registry。"""
+        return self._registry.preview_dir(ih)
 
     def _put_record(self, ih: str, rec: TaskRecord,
                     make_current: bool = False) -> None:
-        """写入注册表；同 ih 旧句柄（不同对象）让位移除。
-
-        调用方须已持有 self._lock。make_current=True 时同步「当前」别名。
-        """
-        old = self._torrents.get(ih)
-        try:
-            replace = (old is not None and old.handle is not None
-                       and rec.handle is not None and self._ses is not None
-                       and old.handle != rec.handle)
-        except Exception:
-            replace = False   # 句柄比较异常（失效句柄）按不替换处理
-        if replace:
-            try:
-                self._ses.remove_torrent(old.handle, 1)
-            except Exception as e:
-                log_warning("fetcher.register.replace", f"{e}")
-        self._torrents[ih] = rec
-        if make_current:
-            self._current_ih = ih
-            self._handle = rec.handle
-            self._result = rec.result
-            self._resolving = rec.resolving
-            self._resolve_started = rec.resolve_started
+        """写入注册表（须持锁）。实现见 core.registry.put_record_locked。"""
+        self._registry.put_record_locked(ih, rec, make_current)
 
     def _register_current(self, handle, result: ParseResult | None,
                           gen: int) -> TaskRecord:
-        """把新解析（review）的句柄登记为「当前任务」并写入注册表。"""
-        ih = self._hash_key(handle)
-        rec = TaskRecord(handle=handle, result=result, gen=gen,
-                         resolving=result is None,
-                         resolve_started=time.time() if result is None else 0.0,
-                         state=STATE_META_FETCH if result is None else STATE_READY,
-                         save_path=self._preview_dir(ih))
-        self._put_record(ih, rec, make_current=True)
-        if result is not None:
-            self._resolving = False
-            self._resolve_started = 0.0
-        return rec
+        """登记新解析句柄为「当前任务」（须持锁）。见 core.registry。"""
+        return self._registry.register_current_locked(handle, result, gen)
 
     def _focus_existing_download(self, ih: str) -> TaskRecord | None:
         """resolve() 命中了已是下载任务的 ih：不重复添加句柄，焦点切到该任务。
 
         旧 UI 语义保持：有结果则把文件树/预览指向它（重新发射 on_metadata）；
         无结果（仍在 META_FETCH）则仅切换焦点。返回记录（未命中返回 None）。
+        焦点切换本身（含换代）由 registry.focus_current 自持锁完成。
         """
-        with self._lock:
-            rec = self._torrents.get(ih)
-            if rec is None or not rec.download:
-                return None
-            self._current_ih = ih
-            self._handle = rec.handle
-            self._result = rec.result
-            self._resolving = rec.resolving
-            self._resolve_started = rec.resolve_started
-            self._gen += 1   # 焦点切换即换代：让路中的陈旧解析自弃
-            has_result = rec.result is not None
-        if has_result:
+        rec = self._registry.focus_current(ih)
+        if rec is not None and rec.result is not None:
             self._emit_metadata(rec.result)
         return rec
 
@@ -1038,8 +1023,9 @@ class SessionManager:
         st["contiguous"] = contig
         st["tail_ready"] = self.scheduler.tail_ready() if self.scheduler.active else True
         st["preview_file"] = pf
-        st["resolving"] = self._resolving
-        st["elapsed"] = time.time() - self._resolve_started if self._resolving else 0.0
+        # R-1 家族（D4）：resolving/elapsed 成对读走 registry 一致快照，
+        # 不再锁外分两次读别名（撕裂窗口）。
+        st["resolving"], st["elapsed"] = self._registry.resolving_snapshot()
         try:
             st["file_progress"] = list(handle.file_progress())
         except Exception as e:
@@ -1056,59 +1042,21 @@ class SessionManager:
 
     @staticmethod
     def _hash_key(handle) -> str:
-        """句柄的注册表键：info_hash 十六进制（v1 为 40 位 / v2 为 64 位）。
-
-        元数据未就绪时磁力链的 info_hash 同样有效（取自磁力链 btih 参数，
-        libtorrent 在 add_torrent 后立即可用）。
-        """
-        try:
-            ih = str(handle.info_hash())
-        except Exception:
-            ih = ""
-        ih = ih.strip().lower()
-        if len(ih) not in (40, 64) or any(c not in "0123456789abcdef"
-                                          for c in ih):
-            # 兜底：纯 v2 / 无 btih 磁力链（增强期用临时 task_id 匹配，见 t2 规划）
-            return f"tmp-{id(handle)}"
-        return ih
+        """句柄的注册表键。实现见 core.registry.hash_key。"""
+        return registry_hash_key(handle)
 
     @staticmethod
     def _ih_from_params(p) -> str | None:
-        """从 parse_magnet_uri 的 add_torrent_params 提取 info_hash 键（未 add 前）。"""
-        try:
-            ih = str(p.info_hash)
-        except Exception:
-            return None
-        ih = ih.strip().lower()
-        if len(ih) not in (40, 64) or any(c not in "0123456789abcdef"
-                                          for c in ih):
-            return None
-        if set(ih) == {"0"}:
-            return None   # 全零 = 无有效 info-hash（libtorrent 会拒绝）
-        return ih
+        """add_torrent_params 的 info_hash 键提取。见 core.registry.ih_from_params。"""
+        return registry_ih_from_params(p)
 
     def _current_record(self) -> TaskRecord | None:
-        """当前任务注册表记录（调用方自行决定是否持锁）。"""
-        if self._current_ih is None:
-            return None
-        return self._torrents.get(self._current_ih)
+        """当前任务注册表记录（调用方自行决定是否持锁）。实现见 core.registry。"""
+        return self._registry.current_record()
 
     def _find_record(self, handle) -> TaskRecord | None:
-        """按句柄查注册表（alert 归属校验用）。
-
-        查不到 = 已移除任务的迟到告警，调用方据此丢弃。
-        """
-        if handle is None:
-            return None
-        with self._lock:
-            rec = self._torrents.get(self._hash_key(handle))
-            if rec is not None:
-                return rec
-            # 兜底：临时键（纯 v2 磁力链）或 Python 包装对象差异时按句柄身份匹配
-            for r in self._torrents.values():
-                if r.handle is not None and r.handle == handle:
-                    return r
-            return None
+        """按句柄查注册表（alert 归属校验用，自持锁）。实现见 core.registry。"""
+        return self._registry.find_record(handle)
 
     # ---------- 目录与持久化辅助（实现在 core.persist） ----------
 
@@ -1301,7 +1249,9 @@ class SessionManager:
                 log_exception("fetcher.emit_metadata", e)
 
     def _emit_error(self, msg: str):
-        self._resolving = False
+        # R-1：裸写 _resolving（不持锁）的旧缺陷——经 registry 自持锁入口
+        # 清除（告警线程与主线程交错的根治点，registry_test §G/§I 双向断言）。
+        self._registry.clear_resolving_safe()
         if self.on_error:
             try:
                 self.on_error(msg)

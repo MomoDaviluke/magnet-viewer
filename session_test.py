@@ -542,6 +542,8 @@ def section_watchdog(ck):
     host["torrents"][IH] = r2
     core.metadata_watchdog()
     ck.check(r2.state == STATE_FAILED, "记录级 timeout=10 覆盖会话级 90（age=20 命中）")
+    ck.check(calls["errors"] and ">10" in calls["errors"][0],
+             "D5：超时文案取记录级有效超时（>10），不是会话级（>90）")
 
     # F3 未到点不触发；暂停/停止/完成/失败态不看门
     r3 = _mk_rec(IH2, age=10.0)

@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from core import (cache_guard, cache_quota, models, parser, persist,
-                      scheduler, session, states, stream_server)
+                      registry, scheduler, session, states, stream_server)
     from core import fetcher as fetcher_mod
     from core.fetcher import SessionManager
 except Exception as e:          # 依赖缺失：显式 SKIP，绝不假装通过
@@ -204,6 +204,52 @@ def main() -> int:
         # 目录工具只保留模块级纯函数（无状态，registry/taskops 直接取用），
         # 不在 TaskPersistence 上留一层同签名的实例包装，避免两套入口。
     })
+    # registry（阶段 3 抽出）：单锁归属 + 注册表 + TaskRecord 本体（R-2）。
+    # 后续 taskops/resolver/preview 都建在它上面，签名与别名集冻结。
+    sig_check("registry", registry, {
+        "hash_key": [("handle", False)],
+        "ih_from_params": [("p", False)],
+    })
+    sig_check("registry.TaskRegistry", registry.TaskRegistry, {
+        "find_record": [("handle", False)],
+        "find_record_by_ih": [("ih", False)],
+        "current_record": [],
+        "current": [],
+        "resolving_snapshot": [],
+        "protected_dirs": [],
+        "put_record_locked": [("ih", False), ("rec", False),
+                              ("make_current", True)],
+        "apply_current_locked": [("rec", False), ("ih", False)],
+        "register_current_locked": [("handle", False), ("result", False),
+                                    ("gen", False)],
+        "detach_record_locked": [("rec", False)],
+        "clear_resolving_locked": [],
+        "clear_runtime_state_locked": [],
+        "focus_current": [("ih", False)],
+        "bump_gen": [],
+        "clear_resolving_safe": [],
+        "set_resolving": [("v", False), ("started", True)],
+        "preview_dir": [("ih", False)],
+    })
+    check(registry.METADATA_TIMEOUT == 90.0
+          and registry.DOWNLOADS_SUBDIR == "downloads"
+          and registry.PREVIEW_SUBDIR == ".preview",
+          "registry 常量取值不变（90.0/downloads/.preview）")
+    _tnames = {f.name for f in __import__("dataclasses").fields(
+        registry.TaskRecord)}
+    check(_tnames == {"handle", "result", "gen", "resolving", "resolve_started",
+                      "state", "timeout", "download", "seed", "priority",
+                      "save_path", "source", "error"},
+          "TaskRecord 字段集不变（13 项，持久化/UI 快照按名取值）")
+    check(all(isinstance(getattr(SessionManager, a), property) for a in
+              ("_lock", "_torrents", "_tasks", "_current_ih", "_handle",
+               "_result", "_resolving", "_resolve_started", "_gen",
+               "_metadata_timeout")),
+          "fetcher 10 个注册表别名全为 property 代理（单源，无第二份数据）")
+    check(all(hasattr(fetcher_mod, n) for n in
+              ("TaskRecord", "TaskRegistry", "METADATA_TIMEOUT",
+               "DOWNLOADS_SUBDIR", "PREVIEW_SUBDIR")),
+          "core.fetcher 仍再导出 TaskRecord/TaskRegistry/常量（历史 import 不破）")
     # session（阶段 2 抽出）：同 persist 处理——后续阶段只能使用、不得改签名。
     sig_check("session", session, {
         "alert_category_mask": [],

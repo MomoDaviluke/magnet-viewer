@@ -285,6 +285,9 @@ class SessionCore:
         遍历注册表里仍 ``resolving`` 的任务，各自对照自己的 ``resolve_started``
         与超时（记录级 ``timeout`` 覆盖会话级），超时任务独立 pause + FAILED，
         互不影响；暂停/停止/完成/失败态任务不看门（用户暂停元数据获取是合法动作）。
+
+        文案取数与判定同源：用命中记录的**有效超时**（rec.timeout 优先，
+        否则会话级），D5 修复——旧实现恒用会话级，记录级超时任务会弹错秒数。
         """
         d = self.deps
         now = time.time() if now is None else now
@@ -299,8 +302,8 @@ class SessionCore:
                 limit = (rec.timeout if rec.timeout is not None
                          else d.metadata_timeout_get())
                 if now - rec.resolve_started > limit:
-                    expired.append(rec)
-        for rec in expired:
+                    expired.append((rec, limit))
+        for rec, limit in expired:
             with d.lock:
                 if not (rec.resolving and rec.resolve_started > 0):
                     continue   # 已被其他路径处理（如元数据刚到达）
@@ -311,15 +314,14 @@ class SessionCore:
                 if is_current:
                     d.clear_resolving()
             if not rec.download:
-                timeout = d.metadata_timeout_get()
                 if is_current:
-                    msg = (f"获取元数据超时（>{int(timeout)} 秒）："
+                    msg = (f"获取元数据超时（>{int(limit)} 秒）："
                            f"该资源可能已无做种/无在线 Peer")
                 else:
                     key = d.hash_key(rec.handle) \
                         if rec.handle is not None else "?"
                     msg = (f"[{key[:12]}…] 获取元数据超时"
-                           f"（>{int(timeout)} 秒）："
+                           f"（>{int(limit)} 秒）："
                            f"该资源可能已无做种/无在线 Peer")
                 d.emit_error(msg)
             with d.lock:
@@ -330,9 +332,8 @@ class SessionCore:
                         log_warning("fetcher.timeout.pause", f"{e}")
             if rec.download:
                 with d.lock:
-                    timeout = d.metadata_timeout_get()
                     rec.error = (f"获取元数据超时"
-                                 f"（>{int(timeout)} 秒）："
+                                 f"（>{int(limit)} 秒）："
                                  f"该资源可能已无做种/无在线 Peer")
                     key = d.hash_key(rec.handle) \
                         if rec.handle is not None else ""
