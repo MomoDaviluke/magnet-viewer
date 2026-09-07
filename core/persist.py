@@ -26,11 +26,21 @@ from .resume import resume_path, write_resume
 from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES, STATE_COMPLETED,
                      STATE_DOWNLOADING, STATE_FAILED, STATE_META_FETCH,
                      STATE_PAUSED, STATE_QUEUED, STATE_STOPPED, STATE_VALIDATE)
-from .taskstore import save_tasks
+from .taskstore import normalize_info_hash, save_tasks
 
 
 # ---------------------------------------------------------------- 纯函数层
 # 不依赖会话/注册表，任何模块都可安全调用（后续 registry / taskops 复用）。
+
+def is_resume_key(key: str) -> bool:
+    """该注册表键能否作为 fastresume 文件名（40/64 位 hex）。
+
+    临时键（``tmp-<id>``：纯 v2 / 无 btih 磁力链在元数据到达前的占位主键）
+    不是合法 info_hash，交给 ``resume_path`` 会 ValueError——凡是拼 resume
+    路径的地方都要先过这一关，否则一个临时键能掀翻整个退出清理。
+    """
+    return bool(normalize_info_hash(key, raise_invalid=False))
+
 
 def is_within(root: str, path: str) -> bool:
     """path 是否位于 root 内（normcase + commonpath 前缀防护）。
@@ -53,7 +63,11 @@ def task_dir(download_dir: str, ih: str, save_subdir: str | None = None) -> str:
     """
     sub = (save_subdir or ih or "").strip().strip("/\\")
     sub = safe_rel_path(sub) if sub else (ih or "")
-    return os.path.join(download_dir, sub) if sub else download_dir
+    if not sub:
+        return download_dir
+    # safe_rel_path 以正斜杠拼接（保证跨平台一致），此处归一到系统分隔符，
+    # 让返回值可直接与 os.path.join 的结果做字符串比较（省得各处再 normpath）。
+    return os.path.normpath(os.path.join(download_dir, sub))
 
 
 def save_subdir_of(cache_dir: str, path: str) -> str:
@@ -80,6 +94,36 @@ def read_resume(cache_dir: str, ih: str) -> bytes | None:
             return f.read()
     except OSError:
         return None
+
+
+def missing_resume_keys(cache_dir: str, torrents: dict) -> list:
+    """注册表中「键合法 + fastresume 尚未落盘」的任务键（逾时告警用）。"""
+    out = []
+    for k in (torrents or {}):
+        if not is_resume_key(k):
+            continue
+        try:
+            if os.path.isfile(resume_path(cache_dir, k)):
+                continue
+        except Exception:
+            continue
+        out.append(k)
+    return out
+
+
+def pending_resume_keys(cache_dir: str, torrents: dict) -> list:
+    """待落盘且``确实该有`` fastresume 的任务键（下载 + 句柄 + 结果皆就绪）。
+
+    排除预览/纯解析记录：它们本就不写 fastresume，不该被当成「未落盘」。
+    """
+    torrents = torrents or {}
+    out = []
+    for k in missing_resume_keys(cache_dir, torrents):
+        r = torrents.get(k)
+        if r is not None and r.download and r.handle is not None \
+                and r.result is not None:
+            out.append(k)
+    return out
 
 
 # ---------------------------------------------------------------- 依赖注入
@@ -113,21 +157,6 @@ class TaskPersistence:
     def __init__(self, deps: PersistDeps):
         self.deps = deps
 
-    # ---------- 目录工具（委托纯函数，保持宿主的调用习惯） ----------
-
-    def task_dir(self, ih: str, save_subdir: str | None = None) -> str:
-        return task_dir(self.deps.download_dir, ih, save_subdir)
-
-    def is_within(self, root: str, path: str) -> bool:
-        return is_within(root, path)
-
-    def save_subdir_of(self, path: str) -> str:
-        return save_subdir_of(self.deps.cache_dir, path)
-
-    def safe_task_save_path(self, ih: str, save_path: str) -> str:
-        return safe_task_save_path(self.deps.cache_dir, self.deps.download_dir,
-                                   ih, save_path)
-
     # ---------- 任务清单 ----------
 
     def persist_tasks(self) -> None:
@@ -141,6 +170,10 @@ class TaskPersistence:
     # ---------- fastresume ----------
 
     def read_resume(self, ih: str) -> bytes | None:
+        # 非法键（空串 / 临时键 tmp-<id>）没有 fastresume 语义，直接按「没有」
+        # 处理——拼路径会 ValueError，而本类的约定是失败不向上抛。
+        if not is_resume_key(ih):
+            return None
         return read_resume(self.deps.cache_dir, ih)
 
     def request_resume(self, rec) -> None:
@@ -155,7 +188,11 @@ class TaskPersistence:
 
     def write_resume_from_alert(self, a) -> None:
         d = self.deps
-        rec = d.find_record(a.handle)
+        try:
+            rec = d.find_record(a.handle)      # 畸形告警（无 handle）也在此兜住
+        except Exception as e:
+            log_warning("fetcher.resume.find", f"{e}")
+            return
         if rec is None:
             return
         try:
@@ -190,15 +227,11 @@ class TaskPersistence:
             except Exception as e:
                 log_exception("fetcher.drain_resume.pop", e)
             with d.lock:
-                pending = [k for k, r in d.torrents_get().items()
-                           if r.download and r.handle is not None
-                           and r.result is not None
-                           and not os.path.isfile(
-                               resume_path(d.cache_dir, k))]
+                torrents = dict(d.torrents_get())
+            pending = pending_resume_keys(d.cache_dir, torrents)
             if not pending:
                 return
             # 仍有未落盘任务：重发请求（幂等），等 flush/告警后下一轮再检查
-            torrents = d.torrents_get()
             for k in pending:
                 r = torrents.get(k)
                 if r is not None and r.handle is not None:
@@ -209,8 +242,8 @@ class TaskPersistence:
                         pass
             time.sleep(0.2)   # 等待 flush 完成/告警到达后重试
         # 超时兜底：只告警，绝不阻断退出（下次启动按损坏/缺失重建）
-        pending = [k[:12] for k in d.torrents_get() if os.path.isfile(
-            resume_path(d.cache_dir, k)) is False]
+        pending = [k[:12] for k in pending_resume_keys(
+            d.cache_dir, d.torrents_get())]
         if pending:
             log_warning("fetcher.drain_resume.timeout",
                         f"fastresume 未在 {timeout}s 内全部落盘：{pending}")
@@ -222,9 +255,28 @@ class TaskPersistence:
         """
         d = self.deps
         ih = t.get("info_hash") or ""
-        save_path = self.safe_task_save_path(ih, t.get("save_path") or "")
+        if not is_resume_key(ih):
+            # 清单被外部改坏 / 键丢失：留可见状态比让异常冒到调用方更好
+            t["state"] = STATE_FAILED
+            t["error"] = "重启恢复失败：任务缺少合法 info_hash"
+            self.persist_tasks()
+            return False
+        # 落盘目录创建失败（同名文件占位 / 权限 / 非法盘符）必须按
+        # 「该任务 FAILED」处理而非向上抛：否则会打破本方法「任何失败都不
+        # 阻断启动、且一定留下可见状态」的契约（调用方虽有兜底 except，
+        # 但那样任务既不会 FAILED、下次启动还会重试同一个坏路径）。
+        try:
+            save_path = safe_task_save_path(self.deps.cache_dir,
+                                            self.deps.download_dir, ih,
+                                            t.get("save_path") or "")
+            os.makedirs(save_path, exist_ok=True)
+        except Exception as e:
+            log_warning("fetcher.restore.save_path", f"{ih[:12]}… {e}")
+            t["state"] = STATE_FAILED
+            t["error"] = f"重启恢复失败：{e}"
+            self.persist_tasks()
+            return False
         t["save_path"] = save_path
-        os.makedirs(save_path, exist_ok=True)
         source = t.get("source") or ""
         rd = self.read_resume(ih)
         if rd is not None:

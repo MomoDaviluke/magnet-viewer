@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # 其后 7 套 = 旧测试兼容契约；末套 = 下载管理模块验收
 SUITES = [
     "contract_check",
+    "persist_test",       # 阶段 1 持久化专项（假依赖，秒级，先跑最便宜的失败信号）
     "smoke_test",
     "local_magnet_test",
     "local_torrent_test",

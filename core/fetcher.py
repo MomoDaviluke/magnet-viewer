@@ -34,6 +34,8 @@ from .models import ParseResult, PieceMap, TorrentFile, safe_rel_path
 from .parser import is_torrent_path, parse_torrent_file
 from .persist import PersistDeps, TaskPersistence
 from .persist import is_within as persist_is_within
+from .persist import safe_task_save_path as persist_safe_task_save_path
+from .persist import save_subdir_of as persist_save_subdir_of
 from .persist import task_dir as persist_task_dir
 from .scheduler import PreviewScheduler
 # 再导出：历史写法 from core.fetcher import STATE_* 仍须可用（download_mgr_test
@@ -1155,11 +1157,12 @@ class SessionManager:
 
     def _save_subdir_of(self, path: str) -> str:
         """落盘目录 -> tasks()['save_subdir']：cache_dir 内给相对路径，否则绝对。"""
-        return self._persist.save_subdir_of(path)
+        return persist_save_subdir_of(self.cache_dir, path)
 
     def _safe_task_save_path(self, ih: str, save_path: str) -> str:
         """磁盘任务记录的 save_path 消毒：逃出受管范围则回退默认目录。"""
-        return self._persist.safe_task_save_path(ih, save_path)
+        return persist_safe_task_save_path(self.cache_dir, self._download_dir,
+                                           ih, save_path)
 
     def _persist_tasks(self) -> None:
         """原子写 .tasks.json（失败仅告警，不阻断任务操作）。"""

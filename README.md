@@ -81,7 +81,8 @@ magnet-viewer/
 
 | 验证项 | 结果 |
 |--------|------|
-| `contract_check.py`：对外契约自检（25 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist 签名 / states 常量取值 / CACHE_MARKER 常量）—— **92 项通过** | 通过（秒级，不启会话） |
+| `contract_check.py`：对外契约自检（25 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist 签名 / states 常量取值 / CACHE_MARKER 常量）—— **91 项通过** | 通过（秒级，不启会话） |
+| `persist_test.py`：**第一阶段持久化专项**（假依赖，不启会话/不联网）——纯函数路径卫生、任务清单原子写与失败不扩散、fastresume 请求/归属、退出清理（有界等待·幂等重发·临时键 tmp-<id> 不再掀翻 drain）、启动恢复九组（无 resume / resume 有效 / resume 损坏 / .torrent / 来源失效 / add 失败 / 暂停·停止·完成 / 元数据就绪 / 目录冲突）、Facade 委托接线 —— **91 项通过** | 通过（1.6s） |
 | `smoke_test.py`：解析 / **本地种子注入 cache_dir** / 路径穿越防护 / bencode 防御（深度炸弹·超长整数·超长长度字段） / 鉴权（无 token·伪造 Host → 403） / Range 流服务 / 前缀钳制 / **中文·特殊字符文件名往返** / 分块级可用性 / 尾部索引窗口 / **点播+等待** / **代理配置映射（含 tracker 重置）** / **会话启动参数** / **限速与日志开关接线** / **缓存配额 LRU（保护名单·limit=0·散落文件）** / 模块导入 | 通过 |
 | `local_magnet_test.py`：磁力链 → 元数据 → 单文件顺序下载 | 通过（元数据 1.0s、info_hash 一致、900 KB 缓冲至 100%、磁盘字节数一致） |
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
@@ -90,11 +91,11 @@ magnet-viewer/
 | `gui_feature_test.py`（offscreen 实测 40 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** |
 | `single_file_test.py`：单文件种子 × 本地种子/磁力链两条入口 | 通过（12/12）：路径层级、`file_disk_path` 落点、流服务按 `f.path` 供给 206（目录隔离后断言随 `.preview/<ih>/` 布局更新，接口未变） |
 | `local_torrent_test.py`：本地 .torrent 闭环 | 通过（9/9）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
-| `download_mgr_test.py`：下载管理模块验收（MVP 7 + 增强 2 + 边界 5 + 流服务安全） | **通过（79/79，退出码 0）**：添加磁力链→下载中 / 暂停（5s 磁盘字节快照不变）/ 恢复（字节续增、进度单调）/ 删除任务（目录释放、重添无残留）/ 退出重启续传（`.tasks.json`+fastresume 读回、上传增量证不重下）/ 完成（落盘=声明值）/ 双任务并发 100% / 限速 ±20% / 边界（重复 hash·per-task 看门狗·防穿越·resume 损坏重建·缓存被清不崩溃）/ 下载中任务流服务安全（分块级可用性，绝不整文件喂零数据） |
+| `download_mgr_test.py`：下载管理模块验收（MVP 7 + 增强 2 + 边界 5 + 流服务安全） | **通过（80/80，退出码 0）**：添加磁力链→下载中 / 暂停（5s 磁盘字节快照不变）/ 恢复（**进度续增**为主判据——暂停快照可能已因分块乱序到达而等于全长，此时字节数本就无法再增，故字节续增降级为条件断言）/ 删除任务（目录释放、重添无残留）/ 退出重启续传（`.tasks.json`+fastresume 读回、上传增量证不重下）/ 完成（落盘=声明值）/ 双任务并发 100% / 限速 ±20% / 边界（重复 hash·per-task 看门狗·防穿越·resume 损坏重建·缓存被清不崩溃）/ 下载中任务流服务安全（分块级可用性，绝不整文件喂零数据） |
 | `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python live_test.py` 复核。 |
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
-> 一键回归：`python regression_run.py`（9 套：`contract_check` 契约自检 + 7 套旧测试 + 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
+> 一键回归：`python regression_run.py`（10 套：`contract_check` 契约自检 + `persist_test` 持久化专项 + 7 套旧测试 + 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
 > 测试覆盖策略：按**数据入口路径**（本地种子 / 磁力链；单文件 / 多文件 / 混合 v2）铺排，而非仅按功能模块——历史上三个缺陷都源于同一功能的不同入口未各自覆盖。详见 `REVIEW.md`。
 
 ## 已修复问题

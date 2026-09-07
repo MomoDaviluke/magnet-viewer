@@ -188,6 +188,11 @@ def main() -> int:
         "safe_task_save_path": [("cache_dir", False), ("download_dir", False),
                                 ("ih", False), ("save_path", False)],
         "read_resume": [("cache_dir", False), ("ih", False)],
+        # 键/待落盘筛选：临时键 tmp-<id> 必须在这里被拦掉，否则 resume_path 的
+        # ValueError 会掀翻退出清理——三个阶段（registry/taskops）都会用到。
+        "is_resume_key": [("key", False)],
+        "missing_resume_keys": [("cache_dir", False), ("torrents", False)],
+        "pending_resume_keys": [("cache_dir", False), ("torrents", False)],
     })
     sig_check("persist.TaskPersistence", persist.TaskPersistence, {
         "persist_tasks": [],
@@ -196,10 +201,8 @@ def main() -> int:
         "write_resume_from_alert": [("a", False)],
         "drain_resume_alerts": [("timeout", True)],
         "restore_task": [("t", False)],
-        "task_dir": [("ih", False), ("save_subdir", True)],
-        "is_within": [("root", False), ("path", False)],
-        "save_subdir_of": [("path", False)],
-        "safe_task_save_path": [("ih", False), ("save_path", False)],
+        # 目录工具只保留模块级纯函数（无状态，registry/taskops 直接取用），
+        # 不在 TaskPersistence 上留一层同签名的实例包装，避免两套入口。
     })
     # states（阶段 1 下沉的常量层）：取值冻结——改状态名 = 破坏磁盘数据兼容
     for name, val in (("STATE_QUEUED", "QUEUED"),
