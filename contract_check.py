@@ -35,7 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from core import (cache_guard, cache_quota, models, parser, persist,
-                      registry, scheduler, session, states, stream_server)
+                      registry, scheduler, session, states, stream_server,
+                      taskops)
     from core import fetcher as fetcher_mod
     from core.fetcher import SessionManager
 except Exception as e:          # 依赖缺失：显式 SKIP，绝不假装通过
@@ -250,6 +251,24 @@ def main() -> int:
               ("TaskRecord", "TaskRegistry", "METADATA_TIMEOUT",
                "DOWNLOADS_SUBDIR", "PREVIEW_SUBDIR")),
           "core.fetcher 仍再导出 TaskRecord/TaskRegistry/常量（历史 import 不破）")
+    # taskops（阶段 4 抽出）：任务 CRUD 全量签名冻结。fetcher 的 7 个任务
+    # 公开方法从此只是薄委托；download_mgr_test 是它的端到端对账方。
+    sig_check("taskops", taskops, {
+        "lt_priority": [("p", False)],
+    })
+    sig_check("taskops.TaskOps", taskops.TaskOps, {
+        "add_task": [("source", False), ("save_subdir", True),
+                     ("priority", True), ("seed", True)],
+        "task_dir": [("ih", False), ("save_subdir", True)],
+        "activate_download": [("rec", False)],
+        "set_priority": [("task_id", False), ("priority", False)],
+        "pause_task": [("task_id", False)],
+        "resume_task": [("task_id", False)],
+        "remove_task": [("task_id", False), ("delete_files", True)],
+        "delete_task_files": [("key", False), ("path", False)],
+        "focus_task": [("task_id", False)],
+        "tasks": [],
+    })
     # session（阶段 2 抽出）：同 persist 处理——后续阶段只能使用、不得改签名。
     sig_check("session", session, {
         "alert_category_mask": [],
