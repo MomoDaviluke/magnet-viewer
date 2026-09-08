@@ -44,6 +44,22 @@ def find_ffmpeg_exe() -> str | None:
         return None
 
 
+def _subprocess_env() -> dict:
+    """子进程环境：剥掉代理变量。
+
+    FFmpeg 对 127.0.0.1 流服务的请求绝不应走代理——沙箱/公司网络设了
+    HTTP_PROXY 时，FFmpeg 会把 localhost 请求转给代理，代理断连后报
+    「Error reading HTTP response: End of file」（D 用例假失败的根因，
+    2026-09-08 实测：verbose 日志显示连接的是代理端口而非流服务端口）。
+    """
+    env = dict(os.environ)
+    for k in list(env):
+        if k.lower() in ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy"):
+            env.pop(k, None)
+    env["NO_PROXY"] = "127.0.0.1,localhost"
+    return env
+
+
 def find_probe_tool() -> tuple[str, str] | None:
     """返回 (类型, 可执行路径)：优先 ffprobe，其次 ffmpeg。"""
     env = os.environ.get("MV_FFMPEG")
@@ -72,7 +88,8 @@ def make_tail_moov_mp4(path: str) -> bool:
            "-minrate", "2500k", "-maxrate", "2500k", "-bufsize", "5000k",
            "-an", path]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+                           env=_subprocess_env())
     except subprocess.TimeoutExpired:
         return False
     return (r.returncode == 0
@@ -95,10 +112,69 @@ def probe(url: str, timeout: float = 20.0) -> tuple[int, str]:
         cmd = [exe, "-v", "error", "-i", url,
                "-f", "null", "-frames:v", "0", "-"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=_subprocess_env())
         return r.returncode, (r.stdout + r.stderr).strip()
     except subprocess.TimeoutExpired:
         return -1, "probe timeout"
+
+
+def probe_seek(url: str, seek_sec: float, timeout: float = 60.0) -> tuple[int, str]:
+    """模拟「拖动进度条」：从 seek_sec 处开始解码 1 帧。
+
+    客户端（FFmpeg）发起 seek 后，服务端必须**渐进**服务就绪前缀，否则剩余
+    区间不可能在超时前下完。
+
+    定位说明：**正向验证**（渐进服务下 seek 能解码成功），不是旧行为的回归
+    判据 —— 实测命令行 FFmpeg 收到 416 后会回退为顺序读取，因此关闭渐进
+    服务本用例仍会通过。真实差异取决于下载速度与文件大小（见 qt 用例说明）。
+    """
+    exe = find_ffmpeg_exe()
+    if exe is None:
+        return -1, "no ffmpeg available"
+    cmd = [exe, "-v", "error", "-ss", f"{seek_sec}", "-i", url,
+           "-frames:v", "1", "-f", "null", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=_subprocess_env())
+        return r.returncode, (r.stdout + r.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return -1, "seek probe timeout"
+
+
+def run_seek_case(tmp: str, name: str, have: set[int], seek_sec: float,
+                  expect_ok: bool, demand_max: int = 60) -> tuple[bool, str]:
+    """拖动到未下载位置：点播按真实调度器语义**有块数上限**。
+
+    上限很关键：若 demand 一次把请求区间（到文件尾）全部补上，旧实现
+    「等整个区间就绪」也能通过，用例就失去区分度；真实
+    PreviewScheduler.request_range 单次最多预约 LOOKAHEAD_PIECES 块。
+    """
+    disk = os.path.join(tmp, "demo.mp4")
+    size = os.path.getsize(disk)
+    pm = PieceMap(PL, 0, 0, (size - 1) // PL, size, have.__contains__)
+
+    def demand(path, start, end_excl):
+        first = start // PL
+        last = min(max(0, end_excl - 1) // PL, first + demand_max - 1)
+
+        def fill():
+            time.sleep(0.15)          # 模拟分块陆续到达
+            have.update(range(first, last + 1))
+        threading.Thread(target=fill, daemon=True).start()
+
+    srv = StreamServer(tmp, pieces_cb=lambda p: pm if p == disk else None,
+                       demand_cb=demand, wait_timeout=8.0)
+    srv.start()
+    try:
+        rc, out = probe_seek(srv.url_for("demo.mp4"), seek_sec)
+    finally:
+        srv.shutdown()
+    ok = (rc == 0) == expect_ok
+    tag = "通过" if ok else "失败"
+    print(f"[{name}] {'期望可解码' if expect_ok else '期望失败'} → "
+          f"退出码 {rc}：{out[:120]}  [{tag}]")
+    return ok, out
 
 
 def run_case(tmp: str, name: str, have: set[int],
@@ -175,7 +251,20 @@ def main():
         all_pieces = set(range(0, (size - 1) // PL + 1))
         ok_c, _ = run_case(tmp, "C 全部下载", all_pieces, expect_ok=True)
 
-        ok = ok_a and ok_b and ok_c
+        # 任务 D：拖动进度条到**未下载**位置 → 必须能继续解码。
+        # seek 目标落在「头部 64KB」与「尾部 4MB 窗口」之间的空洞里；
+        # FFmpeg 会发 `bytes=X-`（到文件尾），服务端只能渐进服务就绪前缀，
+        # 点播还受 60 块上限约束 —— 旧实现等整个区间就绪必然超时 416。
+        have_d = set(range(0, HEAD_BYTES // PL))
+        have_d |= set(range(tail_first, (size - 1) // PL + 1))
+        hole_mid = (HEAD_BYTES + max(0, size - TAIL_BYTES)) // 2
+        seek_sec = hole_mid / size * 30.0
+        print(f"[D] 空洞中段 {hole_mid} B（约 {seek_sec:.1f}s），"
+              f"点播上限 60 块 = {60 * PL // 1024} KB")
+        ok_d, _ = run_seek_case(tmp, "D 拖动到未下载位置", have_d,
+                                seek_sec, expect_ok=True)
+
+        ok = ok_a and ok_b and ok_c and ok_d
         print("\n=== moov 尾部优先验证" + ("全部通过" if ok else "未通过") + " ===")
         return 0 if ok else 1
     finally:

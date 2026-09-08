@@ -23,9 +23,22 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .logutil import log_warning
-from .models import contiguous_bytes, range_available
+from .models import contiguous_bytes, range_available, ready_until
 
 CHUNK = 256 * 1024
+
+# 渐进服务：拖动进度条后 FFmpeg 发 `bytes=X-`（X 到文件尾），要求整个区间
+# 就绪必然超时（20s 下不完几百 MB）→ 416 被 FFmpeg 判为致命错误、播放器
+# 进入 ErrorState（症状：拖动后卡死、进度条失灵）。因此只要 start 起就绪了
+# PROGRESSIVE_MIN 字节就立即回 206，由 FFmpeg 读尽后续发 Range 补齐。
+# 渐进阈值取 256KB：seek 目标落在已缓存区边缘时（就绪前缀 <1MB）不必
+# 多等一整块 piece（真实种子 1~4MB/块），FFmpeg 读尽后自动续拉。
+PROGRESSIVE_MIN = 256 * 1024
+DEMAND_RENEW_SECS = 2.0              # 等待期间重新「点播」的间隔（幂等续期）
+# 就绪前缀连续多少次轮询不再增长就提前返回（约 1.5s）：分块粒度较小时，
+# 单次点播（有块数上限）能补到的数据本就不足 PROGRESSIVE_MIN，再等也不会
+# 更多，空耗到超时只会让播放器读超时。
+STALL_POLLS = 10
 
 TOKEN_PARAM = "t"          # URL 鉴权参数名（每会话随机，防 DNS rebinding/同机进程）
 ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -46,6 +59,12 @@ def _is_within(root: str, path: str) -> bool:
 
 
 class _StreamHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 keep-alive：播放器（FFmpeg/QMediaPlayer）一次播放会对同一
+    # URL 连续发起多个 Range 请求（探测 moov → 读头部 → seek 目标渐进段…）。
+    # 短连接模式下每段一个 TCP 连接，高频开合会被网络防护软件判为扫描
+    # 而中止连接（实测 -10053，FFmpeg 报 'Error reading HTTP response'）；
+    # 复用连接从根上规避。所有响应都带精确 Content-Length，满足 1.1 要求。
+    protocol_version = "HTTP/1.1"
     base_dir = ""       # 由 StreamServer 注入：第一根目录（相对路径落点）
     base_dirs = ()      # 由 StreamServer 注入：全部根目录（规范化的元组）
     avail_cb = None     # 由 StreamServer 注入：path -> 已下载前缀字节数（可选）
@@ -137,7 +156,6 @@ class _StreamHandler(BaseHTTPRequestHandler):
         # 数据尚未就绪（或并发超限）：返回 503 让客户端稍后重试，而不是吐零数据
         self.send_response(503, "Buffering")
         self._security_headers()
-        self.send_header("Retry-After", "1")
         self.send_header("Retry-After", "1")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -264,15 +282,16 @@ class _StreamHandler(BaseHTTPRequestHandler):
         # 再挂起等待数据到达。直接回 416/503 会被 FFmpeg 判为致命错误
         # （典型症状：moov atom not found）。
         self._demand(start, end)
-        if self._wait_ready(fp, start, end + 1):
-            self._respond_range(fp, start, end, logical, send_body)
+        ready = self._wait_ready(fp, start, end + 1)
+        if ready > start:
+            # 渐进服务：就绪多少发多少。Content-Range 总长仍是逻辑大小，
+            # FFmpeg 读尽 Content-Length 后会自动续发下一段 Range 请求
+            # （与「无 Range 请求只发连续前缀」的顺序播放机制一致）。
+            self._respond_range(fp, start, ready - 1, logical, send_body)
             return
-
-        # 等待超时：能给出前缀就给前缀，否则告知客户端稍后重试
-        contig_now, pm2, avail2, _ = self._availability(fp, logical)
-        if start < contig_now:
-            self._respond_range(fp, start, min(end, contig_now - 1), logical, send_body)
-        elif contig_now <= 0:
+        # 一个就绪字节都没有：连文件头都还没数据 → 503 让客户端稍后重试
+        contig_now, _pm2, _avail2, _ = self._availability(fp, logical)
+        if contig_now <= 0:
             self._respond_503()
         else:
             self._respond_416(logical)
@@ -288,23 +307,55 @@ class _StreamHandler(BaseHTTPRequestHandler):
         except Exception as e:
             log_warning("stream.demand", f"{self._current_path} {start}-{end}: {e}")
 
-    def _wait_ready(self, fp: str, start: int, end_excl: int) -> bool:
-        """轮询等待区间就绪，最长 wait_timeout 秒（0 表示不等待，便于测试）。"""
+    def _progressive_ready(self, pm, avail, start: int, end_excl: int) -> int:
+        """从 start 起连续就绪的字节末端（开区间）。
+
+        有分块信息时按 piece 精确延伸；退化到旧接口（已下载前缀）时按前缀计；
+        无可用性信息时视为整文件可读。
+        """
+        if pm is not None:
+            return ready_until(pm, start, end_excl)
+        if avail is not None:
+            return max(start, min(end_excl, avail))
+        return end_excl
+
+    def _wait_ready(self, fp: str, start: int, end_excl: int) -> int:
+        """轮询等待，返回从 start 起的**就绪前缀末端**（开区间）。
+
+        与「整个区间就绪才返回」不同：只要 start 起就绪了 PROGRESSIVE_MIN
+        字节就立即返回，让无上界请求（`bytes=X-`）也能渐进服务，避免
+        seek 后必然超时 416、播放器进入 ErrorState。
+        等待期间每 DEMAND_RENEW_SECS 重新向调度器点播一次（幂等续期），
+        防止 ASAP 预约被中途清除。wait_timeout=0（测试用）时不阻塞，
+        按当时的可用性立即返回 —— 保持「未就绪立即退化」的既有行为。
+        """
         budget = max(0.0, float(self.wait_timeout))
-        if budget <= 0:
-            return False
         deadline = time.time() + budget
+        next_demand = time.time() + DEMAND_RENEW_SECS
+        last_ready, stall = start, 0
         while True:
             logical = os.path.getsize(fp)
             _, pm, avail, ok = self._availability(fp, logical)
-            # ok 必须参与判定：等待期间回调可能开始抛异常/反查失效，
-            # 此时 (pm, avail) 双 None 若被 _range_available 当「全量可用」，
-            # 等待结束反而吐出稀疏零数据（2026-09-08 审计 P0-4 第二触发点）
-            if ok and self._range_available(pm, avail, start, end_excl):
-                return True
-            if time.time() >= deadline:
-                return False
-            time.sleep(0.15)
+            if not ok:
+                return start
+            if self._range_available(pm, avail, start, end_excl):
+                return end_excl
+            ready = self._progressive_ready(pm, avail, start, end_excl)
+            if ready - start >= PROGRESSIVE_MIN:
+                return ready
+            if ready > start:
+                # 停滞检测：就绪前缀已不再增长（点播区间补完或补不动了），
+                # 提前把已就绪的部分交给播放器，避免空等整个超时周期。
+                stall = stall + 1 if ready == last_ready else 0
+                if stall >= STALL_POLLS:
+                    return ready
+            last_ready = ready
+            if budget <= 0 or time.time() >= deadline:
+                return ready
+            if time.time() >= next_demand:
+                self._demand(start, end_excl - 1)
+                next_demand = time.time() + DEMAND_RENEW_SECS
+            time.sleep(0.05)
 
 
 class _QuietHTTPServer(ThreadingHTTPServer):

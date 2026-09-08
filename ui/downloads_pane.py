@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QApplication, QLabel, QMenu, QMessageBox,
                                QStyledItemDelegate, QStyleOptionProgressBar,
                                QTreeView, QVBoxLayout, QWidget)
 
+from ui.theme import (ACCENT, BG_PANEL, DANGER, OK, TEXT_DIM, TEXT_MUTED)
 from core.models import human_size
 
 COL_NAME, COL_SIZE, COL_PROGRESS, COL_SPEED = 0, 1, 2, 3
@@ -26,18 +27,18 @@ COLUMNS = ["名称", "大小", "进度", "速度·ETA"]
 
 # 状态 -> (emoji, 中文名, 前景色)：⏳白 / ⏸灰 / ✅绿 / ❌红 / 🌱做种蓝
 STATE_META: dict = {
-    "QUEUED":      ("⏳", "排队中", "#8a8a8a"),
-    "META_FETCH":  ("⏳", "获取元数据", "#8a8a8a"),
-    "VALIDATE":    ("⏳", "校验中", "#8a8a8a"),
-    "DOWNLOADING": ("⏬", "下载中", "#1976d2"),
-    "PAUSED":      ("⏸", "已暂停", "#757575"),
-    "STOPPED":     ("⏹", "已停止", "#757575"),
-    "COMPLETED":   ("✅", "已完成", "#2e7d32"),
-    "SEEDING":     ("🌱", "做种中", "#1976d2"),
-    "FAILED":      ("❌", "失败", "#c62828"),
-    "DELETED":     ("🗑️", "已删除", "#9e9e9e"),
+    "QUEUED":      ("⏳", "排队中", TEXT_MUTED),
+    "META_FETCH":  ("⏳", "获取元数据", TEXT_MUTED),
+    "VALIDATE":    ("⏳", "校验中", TEXT_MUTED),
+    "DOWNLOADING": ("⏬", "下载中", ACCENT),
+    "PAUSED":      ("⏸", "已暂停", TEXT_DIM),
+    "STOPPED":     ("⏹", "已停止", TEXT_DIM),
+    "COMPLETED":   ("✅", "已完成", OK),
+    "SEEDING":     ("🌱", "做种中", ACCENT),
+    "FAILED":      ("❌", "失败", DANGER),
+    "DELETED":     ("🗑️", "已删除", TEXT_MUTED),
 }
-UNKNOWN_STATE = ("⏳", "未知", "#8a8a8a")
+UNKNOWN_STATE = ("⏳", "未知", TEXT_MUTED)
 
 
 def _state_meta(state: str) -> tuple:
@@ -99,13 +100,13 @@ class ProgressDelegate(QStyledItemDelegate):
         opt.state = QStyle.State_Enabled
         pal = QPalette(option.palette)
         if state == "COMPLETED":
-            pal.setBrush(QPalette.Highlight, QColor("#2e7d32"))
+            pal.setBrush(QPalette.Highlight, QColor(OK))
         elif state in ("PAUSED", "STOPPED"):
-            pal.setBrush(QPalette.Highlight, QColor("#9e9e9e"))
+            pal.setBrush(QPalette.Highlight, QColor(TEXT_DIM))
         elif state == "FAILED":
-            pal.setBrush(QPalette.Highlight, QColor("#c62828"))
+            pal.setBrush(QPalette.Highlight, QColor(DANGER))
         else:
-            pal.setBrush(QPalette.Highlight, QColor("#1976d2"))
+            pal.setBrush(QPalette.Highlight, QColor(ACCENT))
         opt.palette = pal
         QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter,
                                          self.parent())
@@ -151,7 +152,7 @@ class DownloadsPane(QWidget):
         self.details.setWordWrap(True)
         self.details.setMinimumHeight(90)
         self.details.setStyleSheet(
-            "color:#555; font-size:12px; background:#fafafa; padding:6px;")
+            f"color:{TEXT_MUTED}; font-size:12px; background:{BG_PANEL}; padding:6px;")
 
         split = QSplitter(Qt.Vertical, self)
         split.addWidget(self.tree)
@@ -165,7 +166,7 @@ class DownloadsPane(QWidget):
             "或在文件树右键「添加下载」开始管理下载任务")
         self._placeholder.setAlignment(Qt.AlignCenter)
         self._placeholder.setStyleSheet(
-            "color:#777; font-size:12px; line-height:1.6;")
+            f"color:{TEXT_MUTED}; font-size:12px; line-height:1.6;")
 
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self._placeholder)   # 0：空态引导
@@ -212,8 +213,9 @@ class DownloadsPane(QWidget):
                         idx, QItemSelectionModel.SelectionFlag.Select
                         | QItemSelectionModel.SelectionFlag.Rows)
                     break
-        if scroll_pos:
-            bar.setValue(scroll_pos)
+        # 无条件恢复：0 也是合法目标位置（顶部）——用 if scroll_pos 会在
+        # 「用户本来就停在顶部」时跳过，重建后残留的非 0 位置就不被归位了
+        bar.setValue(scroll_pos)
         self._update_details()
 
     def tasks(self) -> list[dict]:

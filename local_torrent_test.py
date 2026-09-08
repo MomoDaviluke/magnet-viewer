@@ -160,6 +160,14 @@ def main() -> int:
     check(os.path.isfile(vid_disk) and os.path.getsize(vid_disk) == vid.size,
           f"磁盘文件一致（{os.path.basename(vid_disk)}）")
 
+    # ---- 缓冲分段（进度条着色数据源）：全部下载后应覆盖 ≥99% ----
+    segs = mgr.buffered_segments_of_preview()
+    check(bool(segs), "预览缓冲分段非空（buffered_segments_of_preview）")
+    covered = sum(e - s for s, e in (segs or []))
+    check(covered >= vid.size * 0.99,
+          f"分段覆盖 ≥99%（{human_size(covered)}/{human_size(vid.size)}，"
+          f"{len(segs or [])} 段）")
+
     # ---- 流服务按分块供给：证明 _pieces_map 链路打通 ----
     print("\n[7] 流服务 + 路径映射联动")
     hits = []
