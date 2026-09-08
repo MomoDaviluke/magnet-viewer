@@ -6,6 +6,8 @@ import os
 
 from PySide6.QtCore import QSettings
 
+from core import secretbox
+
 RECENT_LIMIT = 15
 
 DEFAULTS: dict = {
@@ -21,6 +23,9 @@ DEFAULTS: dict = {
     "default_concurrency": 3,      # 默认并发下载数
     "download_dir": "",            # 空 = 缓存目录/downloads
     "seed_after_complete": False,  # 任务完成后继续做种（MVP 默认不做种）
+    "download_rate_limit": 0,      # 下载限速 KB/s，0 = 不限（libtorrent 会话级）
+    "cache_limit_mb": 2048,        # 预览缓存上限 MB，0 = 不限；超限按 LRU 清最旧预览目录
+    "logging_enabled": True,       # 运行日志开关（core.logutil；关闭后全部记录降为空操作）
 }
 
 _TYPES: dict = {
@@ -30,6 +35,9 @@ _TYPES: dict = {
     "clear_cache_on_exit": bool,
     "default_concurrency": int,
     "seed_after_complete": bool,
+    "download_rate_limit": int,
+    "cache_limit_mb": int,
+    "logging_enabled": bool,
 }
 
 # libtorrent settings_pack::proxy_type_t 的整型值（2.1.x 仍是稳定枚举）
@@ -47,11 +55,18 @@ class AppConfig:
         default = DEFAULTS[key]
         t = _TYPES.get(key, str)
         try:
-            return self.q.value(key, default, type=t)
+            v = self.q.value(key, default, type=t)
         except TypeError:
             return default
+        if key == "proxy_pass":
+            # 注册表里存的是 DPAPI 密文（dpapi:v1:…），旧明文原样返回
+            return secretbox.unprotect(str(v or ""))
+        return v
 
     def set(self, key: str, value):
+        if key == "proxy_pass":
+            # 凭据不明文落注册表（REVIEW-2026-09 P1-3）；空串不加密
+            value = secretbox.protect(str(value or ""))
         self.q.setValue(key, value)
         self.q.sync()
 

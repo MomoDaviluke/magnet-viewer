@@ -76,10 +76,27 @@ class SettingsDialog(QDialog):
         self.clear_on_exit.setChecked(bool(cfg.get("clear_cache_on_exit")))
         form.addRow("", self.clear_on_exit)
 
+        self.cache_limit = QSpinBox()
+        self.cache_limit.setRange(0, 1048576)
+        self.cache_limit.setSuffix(" MB")
+        self.cache_limit.setSpecialValueText("不限制")
+        self.cache_limit.setValue(int(cfg.get("cache_limit_mb") or 0))
+        self.cache_limit.setToolTip(
+            "预览缓存超过此值时，自动按最久未活跃顺序清理旧预览数据；\n"
+            "已下载文件（downloads/）不受影响。切换预览文件时生效。")
+        form.addRow("预览缓存上限", self.cache_limit)
+
         self.concurrency = QSpinBox()
         self.concurrency.setRange(1, 16)
         self.concurrency.setValue(int(cfg.get("default_concurrency")))
         form.addRow("默认并发下载数", self.concurrency)
+
+        self.rate_limit = QSpinBox()
+        self.rate_limit.setRange(0, 1048576)
+        self.rate_limit.setSuffix(" KB/s")
+        self.rate_limit.setSpecialValueText("不限")
+        self.rate_limit.setValue(int(cfg.get("download_rate_limit") or 0))
+        form.addRow("下载限速", self.rate_limit)
 
         row_dl = QHBoxLayout()
         self.download_edit = QLineEdit(str(cfg.get("download_dir")))
@@ -94,8 +111,17 @@ class SettingsDialog(QDialog):
         self.seed_after.setChecked(bool(cfg.get("seed_after_complete")))
         form.addRow("", self.seed_after)
 
-        note = QLabel("提示：代理与超时保存后立即生效；缓存目录、默认下载目录"
-                      "与并发数修改需重启程序。设置持久化于本机"
+        self.logging_enabled = QCheckBox(
+            "启用运行日志（写入系统临时目录，用于排查问题）")
+        self.logging_enabled.setChecked(bool(cfg.get("logging_enabled")))
+        self.logging_enabled.setToolTip(
+            "日志文件：%TEMP%\\magnet_viewer_logs\\magnet-viewer.log\n"
+            "（单文件 1 MB，保留 3 份）。开关保存后立即生效。")
+        form.addRow("", self.logging_enabled)
+
+        note = QLabel("提示：代理、超时、限速与日志开关保存后立即生效；"
+                      "缓存目录、默认下载目录与并发数修改需重启程序；"
+                      "预览缓存上限在下次切换预览文件时生效。设置持久化于本机"
                       "（Windows 注册表 Bitseed\\MagnetViewer）。")
         note.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
         note.setWordWrap(True)
@@ -181,4 +207,7 @@ class SettingsDialog(QDialog):
         self.cfg.set("default_concurrency", self.concurrency.value())
         self.cfg.set("download_dir", self.download_edit.text().strip())
         self.cfg.set("seed_after_complete", self.seed_after.isChecked())
+        self.cfg.set("download_rate_limit", self.rate_limit.value())
+        self.cfg.set("cache_limit_mb", self.cache_limit.value())
+        self.cfg.set("logging_enabled", self.logging_enabled.isChecked())
         self.accept()

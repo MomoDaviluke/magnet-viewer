@@ -110,7 +110,12 @@ class _StreamHandler(BaseHTTPRequestHandler):
                 return 0, None, None, False
             if pm is not None:
                 return contiguous_bytes(pm), pm, None, True
-            # pm 为 None：非预览文件，继续走旧接口/静态全量
+            # pieces_cb 在场但不认识该文件：交给 avail_cb 兜底；两路都给不出
+            # 可判定依据时必须判「不可用」——「反查不命中」不等于「已下载完」，
+            # 下载中文件反查失败后被当整文件服务，就是稀疏零数据（2026-09-08
+            # 实证：pieces_cb 恒返 None 时，旧逻辑对未下载文件回 206+全零）。
+            if self.avail_cb is None:
+                return 0, None, None, False
         if self.avail_cb is not None:
             try:
                 avail = max(0, min(int(self.avail_cb(fp)), logical))
@@ -118,7 +123,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
                 log_warning("stream.availability.avail_cb", f"{fp}: {e}")
                 return 0, None, None, False
             return avail, None, avail, True
-        return logical, None, None, True
+        return logical, None, None, True   # 纯静态服务：两个回调都未提供
 
     def _range_available(self, pm, avail, start: int, end_excl: int) -> bool:
         """[start, end_excl) 是否全部可读。"""
@@ -142,9 +147,10 @@ class _StreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _respond_503(self):
-        # 数据尚未就绪：返回 503 让客户端稍后重试，而不是吐零数据
+        # 数据尚未就绪（或并发超限）：返回 503 让客户端稍后重试，而不是吐零数据
         self.send_response(503, "Buffering")
         self._security_headers()
+        self.send_header("Retry-After", "1")
         self.send_header("Retry-After", "1")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -200,6 +206,19 @@ class _StreamHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._respond_forbidden()
             return
+        # 并发上限：ThreadingHTTPServer 每请求一线程，播放器/扫描器打过来
+        # 会无界堆线程（REVIEW-2026-09 P1-1）。超限立即 503 让客户端稍后
+        # 重试，绝不排队堆积。鉴权不占坑（403 洪泛不消耗并发额度）。
+        sem = type(self).limiter
+        if not sem.acquire(blocking=False):
+            self._respond_503()
+            return
+        try:
+            self._serve_inner(send_body)
+        finally:
+            sem.release()
+
+    def _serve_inner(self, send_body: bool):
         rel = urllib.parse.unquote(urllib.parse.urlparse(self.path).path).lstrip("/")
         roots = self.base_dirs or (os.path.normpath(self.base_dir),)
         # 绝对路径（download_dir 在缓存目录外时，url_for 携带绝对落盘路径）
@@ -356,7 +375,7 @@ class StreamServer:
 
     def __init__(self, base_dir: str, avail_cb=None, pieces_cb=None,
                  demand_cb=None, wait_timeout: float = 20.0,
-                 bases: list | None = None):
+                 bases: list | None = None, max_concurrency: int = 16):
         # 注意：直接把函数放进类字典会触发描述符协议（实例访问得到绑定方法，
         # 回调会被多传一个 self 参数）。staticmethod 的实例访问返回原函数，无此问题；
         # Python 3.13 起 functools.partial 放类字典也会有同样隐患。
@@ -367,7 +386,8 @@ class StreamServer:
                 roots.append(nb)
         attrs = {"base_dir": base_dir, "base_dirs": tuple(roots),
                  "wait_timeout": wait_timeout,
-                 "token": secrets.token_urlsafe(16)}
+                 "token": secrets.token_urlsafe(16),
+                 "limiter": threading.BoundedSemaphore(max(1, max_concurrency))}
         if avail_cb is not None:
             attrs["avail_cb"] = staticmethod(avail_cb)
         if pieces_cb is not None:

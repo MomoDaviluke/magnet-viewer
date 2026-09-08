@@ -122,6 +122,13 @@ alert 归属 `a.handle == self._handle`（:348/:351）。
 
 ## 9. 改造后不允许变化的契约断言清单（download_mgr_test 契约自检段）
 
+> **状态（2026-09-07，fetcher 重构阶段 0~6 收口）**：本节 10 条契约已全部
+> 由 `contract_check.py` 固化为可执行断言（156 项），并纳入回归首套；
+> 七阶段重构完成，SessionManager 降级为 Facade（1607 → ~560 行），
+> 注册表/锁归 core.registry，会话生命周期归 core.session，任务 CRUD 归
+> core.taskops，解析编排归 core.resolver，预览桥归 core.preview，持久化归
+> core.persist。全程 15 套回归无行为回归。
+
 | # | 契约 | 依赖测试 |
 |---|------|---------|
 | 1 | `resolve(source)` + on_metadata 回调（含 info_hash/src/cache_dir 注入） | smoke:84-93, local_magnet:82-117, local_torrent:93-136, single_file:77-103 |

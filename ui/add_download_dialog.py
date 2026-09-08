@@ -52,11 +52,14 @@ class AddDownloadDialog(QDialog):
         row.addWidget(btn_browse)
         form.addRow("保存子目录", row)
 
-        self.priority = QSpinBox()
-        self.priority.setRange(0, 3)
-        self.priority.setValue(1)
-        self.priority.setToolTip("0 = 不下载，3 = 最高；预览始终为最高优先级")
-        form.addRow("优先级", self.priority)
+        # 注意：控件名不能叫 self.priority —— 那会遮蔽下方 priority() 方法，
+        # 调用方 dlg.priority() 变成调用 QSpinBox 实例 → TypeError
+        # （「添加下载」100% 失败，REVIEW-2026-09 P0-1）
+        self.priority_spin = QSpinBox()
+        self.priority_spin.setRange(0, 3)
+        self.priority_spin.setValue(1)
+        self.priority_spin.setToolTip("0 = 不下载，3 = 最高；预览始终为最高优先级")
+        form.addRow("优先级", self.priority_spin)
 
         self.seed_check = QCheckBox("完成后继续做种（保持上传）")
         self.seed_check.setChecked(bool(cfg.get("seed_after_complete")))
@@ -85,7 +88,7 @@ class AddDownloadDialog(QDialog):
         return self.save_edit.text().strip().strip("/\\")
 
     def priority(self) -> int:
-        return self.priority.value()
+        return self.priority_spin.value()
 
     def seed_after_complete(self) -> bool:
         return self.seed_check.isChecked()

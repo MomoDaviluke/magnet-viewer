@@ -157,6 +157,29 @@ class PieceMap:
     have: Callable[[int], bool]
 
 
+def have_from_bitmap(pieces) -> Callable[[int], bool]:
+    """从 torrent_status.pieces 位图生成 have 回调（P2-1 批量位图）。
+
+    替代逐块 `handle.have_piece()`：每块一次 libtorrent 绑定调用
+    （实测 ≈3.76 µs，20000 块大文件播放期每请求 ≈75ms → 单核饱和）降为
+    一次 `handle.status()` 快照 + Python 侧 O(1) 索引。
+    越界/非整数索引一律 False——与 have_piece 语义一致（不可判定按不可用，
+    绝不误判可读）。位图与 have_piece 的一致性已在 lt 2.1.1 实测验证。
+    """
+    bits = list(pieces)
+    n = len(bits)
+
+    def have(p) -> bool:
+        try:
+            p = int(p)
+        except (TypeError, ValueError):
+            return False
+        if p < 0 or p >= n:
+            return False
+        return bool(bits[p])
+    return have
+
+
 def contiguous_bytes(pm: PieceMap, limit: int | None = None) -> int:
     """文件头部连续可读字节数（从 0 开始、中途无缺失块的连续区间）。
 

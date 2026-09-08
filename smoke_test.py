@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import libtorrent as lt  # noqa: E402
 
 from core.config import lt_proxy_settings  # noqa: E402
+from core import cache_quota, logutil  # noqa: E402
 from core.fetcher import SessionManager  # noqa: E402
 from core.models import (PieceMap, TorrentFile, contiguous_bytes,  # noqa: E402
                          disk_root, file_disk_path, human_size,
@@ -84,6 +85,15 @@ def main():
     # 把未下载的稀疏零数据喂给播放器（即此前修掉的 moov 问题会原样复发）。
     mgr_i = SessionManager(os.path.join(tmp, "cacheI"))
     mgr_i.start()
+    # 会话级限速接线：底层能力已在 download_mgr_test §9 实证，
+    # 此处验证应用层入口不抛异常，且 binding 支持读回时值正确
+    mgr_i.apply_rate_limit(512)
+    if hasattr(mgr_i._ses, "get_settings"):
+        _st = mgr_i._ses.get_settings()
+        assert int(_st.get("download_rate_limit") or 0) == 512 * 1024, \
+            f"限速未生效: {_st.get('download_rate_limit')}"
+    mgr_i.apply_rate_limit(0)   # 0 = 不限，同样不可抛
+    assert isinstance(mgr_i.protected_dirs(), set)
     got_i: list = []
     mgr_i.on_metadata = got_i.append
     mgr_i.resolve(torrent)
@@ -91,6 +101,13 @@ def main():
         if got_i:
             break
         time.sleep(0.05)
+    # 注册表仍持有该解析记录：保护名单非空（配额 LRU 的保护来源）
+    _pd = mgr_i.protected_dirs()
+    assert _pd, "protected_dirs 应包含已注册记录的落盘目录"
+    assert all(".preview" in os.path.normpath(p).replace("\\", "/")
+               or os.path.normpath(p) == os.path.normpath(
+                   os.path.join(tmp, "cacheI"))
+               for p in _pd), f"保护名单目录异常: {_pd}"
     mgr_i.shutdown()
     assert got_i, "本地 .torrent 未触发元数据回调"
     ri = got_i[0]
@@ -100,6 +117,61 @@ def main():
     assert os.path.isabs(disk_i), f"磁盘路径应为绝对路径: {disk_i}"
     assert _is_within(os.path.normpath(ri.cache_dir), os.path.normpath(disk_i))
     print(f"[2a] 本地 .torrent 注入 cache_dir 通过：{ri.cache_dir}")
+
+    # ---------------- [2d] 设置接线三处：限速 / 缓存配额 LRU / 日志开关 ----------------
+    # P2-18：logutil docstring 承诺由 logging_enabled 控制，但该键此前不在
+    # DEFAULTS 里——按文档调用 AppConfig.get 会 KeyError，且无任何接线。
+    from core.config import DEFAULTS as _DEF, _TYPES as _TTYPES
+    for _k, _v in (("download_rate_limit", 0), ("cache_limit_mb", 2048),
+                   ("logging_enabled", True)):
+        assert _k in _DEF and _DEF[_k] == _v, f"DEFAULTS 缺键或默认值错误: {_k}"
+    assert _TTYPES.get("logging_enabled") is bool
+    assert _TTYPES.get("download_rate_limit") is int
+    assert _TTYPES.get("cache_limit_mb") is int
+    logutil.set_enabled(False)
+    assert not logutil.is_enabled(), "日志开关关闭未生效"
+    logutil.set_enabled(True)
+    assert logutil.is_enabled(), "日志开关开启未生效"
+
+    # 配额 LRU 纯函数：只删未保护的旧目录、keep 绝不删、limit=0 只统计、
+    # 散落文件不属于任何任务故不清理
+    quota_root = os.path.join(tmp, "quota", ".preview")
+    os.makedirs(quota_root, exist_ok=True)
+
+    def _mk(ih: str, size: int, mtime: float) -> str:
+        d = os.path.join(quota_root, ih)
+        os.makedirs(d, exist_ok=True)
+        fp = os.path.join(d, "chunk.bin")
+        with open(fp, "wb") as fh:
+            fh.write(b"x" * size)
+        os.utime(fp, (mtime, mtime))
+        return d
+
+    old = _mk("a" * 40, 700 * 1024, 1_000_000_000)       # 最旧 → 应被清
+    keep_dir = _mk("b" * 40, 500 * 1024, 1_500_000_000)  # 活跃保护 → 绝不删
+    new = _mk("c" * 40, 900 * 1024, 2_000_000_000)       # 预算内 → 保留
+    total, freed = cache_quota.enforce_preview_limit(
+        quota_root, 2, keep_dirs={keep_dir}, warn=lambda m: None)
+    assert os.path.isdir(keep_dir), "受保护目录被删除"
+    assert not os.path.isdir(old), "最旧目录未被清理"
+    assert os.path.isdir(new), "预算内目录被误删"
+    assert freed == 700 * 1024 and total == 1400 * 1024, \
+        f"配额统计错误: total={total} freed={freed}"
+    t0, f0 = cache_quota.enforce_preview_limit(quota_root, 0, set(),
+                                               warn=lambda m: None)
+    assert f0 == 0 and os.path.isdir(keep_dir) and os.path.isdir(new), \
+        "limit=0（不限制）不应删除任何目录"
+    open(os.path.join(quota_root, "loose.txt"), "w").close()
+    _t2, freed2 = cache_quota.enforce_preview_limit(quota_root, 1, set(),
+                                                    warn=lambda m: None)
+    assert os.path.isfile(os.path.join(quota_root, "loose.txt")), \
+        "散落文件不应被配额清理"
+    assert not os.path.isdir(keep_dir) and os.path.isdir(new), \
+        "无保护时应按 LRU 删较旧的 keep_dir、保留较新的 new"
+    assert freed2 == 500 * 1024 and _t2 == 900 * 1024, \
+        f"删除后应恰好回到上限内: total={_t2} freed={freed2}"
+    print(f"[2d] 设置接线通过：限速/日志开关/配额 LRU（LRU 释放 "
+          f"{human_size(freed)}）")
 
     # ---------------- [2c] BEP-52 种子版本 ----------------
     # libtorrent 2.x 的 create_torrent() 默认产出 v1+v2 混合种子（meta version=2）。
@@ -458,6 +530,20 @@ def main():
     srv2.shutdown()
     print("[3b] 前缀钳制通过：200 钳制 / 206 前缀内 / 416 超界 / 503 未就绪")
 
+    # 可用性「不可判定」绝不降级为整文件服务（REVIEW-2026-09 P0-4 防回归）：
+    # pieces_cb 在场但反查不命中（恒返 None）→ 必须 503，而不是 206+稀疏零数据
+    srv_nd = StreamServer(cache, pieces_cb=lambda p: None, wait_timeout=0.2)
+    srv_nd.start()
+    url_nd = srv_nd.url_for(rel)
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            url_nd, headers={"Range": "bytes=0-1023"}), timeout=5)
+        raise AssertionError("pieces_cb 不可判定时应当返回 503，而不是吐零数据")
+    except urllib.error.HTTPError as e:
+        assert e.code == 503, e.code
+    srv_nd.shutdown()
+    print("[3b1] 不可判定不降级通过：pieces_cb 未命中 → 503（绝不喂稀疏零数据）")
+
     # 中文 / 特殊字符文件名端到端往返（真实种子极常见）
     cache_cn = os.path.join(tmp, "cacheCN")
     os.makedirs(os.path.join(cache_cn, "剧集 第一季"), exist_ok=True)
@@ -480,6 +566,25 @@ def main():
         assert e.code == 404, e.code
     srv_cn.shutdown()
     print("[3b2] 中文/特殊字符文件名往返通过：编码、读取一致，且仍受穿越防护约束")
+
+    # 并发上限：超限立即 503（带 Retry-After），不排队堆积线程（P1-1 防回归）
+    srv_lim = StreamServer(cache, max_concurrency=1)
+    srv_lim.start()
+    lim = srv_lim._httpd.RequestHandlerClass.limiter
+    lim.acquire()                                  # 人为占满唯一名额
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            srv_lim.url_for(rel), headers={"Range": "bytes=0-1023"}), timeout=5)
+        raise AssertionError("并发占满时应当返回 503")
+    except urllib.error.HTTPError as e:
+        assert e.code == 503 and e.headers.get("Retry-After"), (e.code, e.headers)
+    finally:
+        lim.release()
+    with urllib.request.urlopen(urllib.request.Request(
+            srv_lim.url_for(rel), headers={"Range": "bytes=0-1023"}), timeout=5) as resp:
+        assert resp.status == 206, resp.status     # 释放后恢复正常
+    srv_lim.shutdown()
+    print("[3b3] 并发上限通过：占满 → 503+Retry-After，释放 → 206 恢复")
 
     # 尾部索引窗口（moov 优先）纯逻辑测试
     mp4 = TorrentFile(0, "root/demo.mp4", 100 * 1024 * 1024, 0, 0, 6399)
@@ -743,6 +848,18 @@ def main():
     assert mp["proxy_type"] == 5 and mp["proxy_username"] == "u"   # http + 账号 → http_pw
     assert lt_proxy_settings({"type": "socks5", "host": ""})["proxy_type"] == 0  # 空主机回落直连
     print("[3g] 代理配置映射通过：直连/socks5/http_pw/空主机回落（含 tracker 重置）")
+
+    # 凭据保护：DPAPI 加密往返（P1-3 防回归；纯函数，不碰注册表）
+    from core import secretbox
+    enc = secretbox.protect("s3cret-PW")
+    if os.name == "nt":
+        assert enc.startswith("dpapi:v1:") and "s3cret" not in enc, enc
+        assert secretbox.unprotect(enc) == "s3cret-PW"
+    else:
+        assert enc == "s3cret-PW"      # 非 Windows 退化直通
+    assert secretbox.unprotect("plain-old") == "plain-old"   # 旧明文兼容直读
+    assert secretbox.unprotect("dpapi:v1:AAAA") == ""        # 损坏密文 → 空，不崩
+    print("[3g2] 凭据保护通过：DPAPI 往返 / 旧明文兼容 / 损坏密文不崩")
 
     # 会话启动参数：代理 + 自定义元数据超时
     mgr = SessionManager(os.path.join(tmp, "px_cache"), listen_port=6893)

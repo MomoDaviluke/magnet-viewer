@@ -1,13 +1,19 @@
-"""8 套测试回归运行器：一键全量回归，汇总退出码。
+"""16 套测试回归运行器：一键全量回归，汇总退出码。
 
 依据 README.md 退出码约定与 t4_acceptance_plan.md 回归契约（D4）：
-下载管理模块改造后必须保证 7 套旧测试全绿（0=通过 / 1=失败 / 2=SKIP）。
+下载管理模块改造后必须保证 8 套旧测试全绿（0=通过 / 1=失败 / 2=SKIP）。
 
-套件构成：前 7 套为旧测试兼容契约（解析/流媒体/GUI），
-第 8 套 `download_mgr_test` 为下载管理模块验收（约 2 分钟，含本机做种闭环）。
+套件构成：第 1 套 `contract_check` 为对外契约自检（秒级，不启会话；
+拆分 `core/fetcher.py` 期间用它守住 23 个公开接口与协作模块签名）；
+其后 8 套为旧测试兼容契约（解析/流媒体/GUI，含混合 v2 入口矩阵）；
+末套 `download_mgr_test` 为下载管理模块验收（约 2 分钟，含本机做种闭环）。
+
+SKIP 判定（REVIEW-2026-09 P0-3）：部分套件因依赖缺失显式跳过（退出码 2）
+不视为失败，但 **全部跳过 = 失败**——那意味着环境崩坏或导入段被误吞，
+绝不能打印「回归全绿」。
 
 用法：
-    python regression_run.py            # 全量 8 套
+    python regression_run.py            # 全量 16 套
     python regression_run.py smoke      # 单套（按名字前缀匹配）
 
 退出码：任一测试 FAIL(1) → 本脚本退出 1；全部通过(0) → 0；
@@ -22,12 +28,21 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 前 7 套 = 旧测试兼容契约；末套 = 下载管理模块验收（纳入以保证「全量回归」不漏新功能）
+# 首套 = 对外契约自检（秒级，fetcher 重构期间的安全网，须最先跑）；
+# 其后 7 套 = 旧测试兼容契约；末套 = 下载管理模块验收
 SUITES = [
+    "contract_check",
+    "persist_test",       # 阶段 1 持久化专项（假依赖，秒级，先跑最便宜的失败信号）
+    "session_test",       # 阶段 2 会话核心专项（假依赖，秒级）
+    "registry_test",      # 阶段 3 注册表与锁归属专项（假句柄，秒级）
+    "taskops_test",       # 阶段 4 任务 CRUD 专项（假句柄+真注册表，秒级）
+    "resolver_test",      # 阶段 5 解析与元数据编排专项（假会话，秒级）
+    "preview_test",       # 阶段 5 预览桥与状态专项（假句柄，秒级）
     "smoke_test",
     "local_magnet_test",
     "local_torrent_test",
     "single_file_test",
+    "hybrid_v2_test",     # 入口矩阵补齐：混合 v2 × 本地种子/磁力链两入口
     "gui_feature_test",
     "moov_stream_test",
     "qt_stream_open_test",
@@ -71,7 +86,13 @@ def main() -> int:
         print(f"\nX 回归失败：{failed}（修复后重跑本脚本）")
         return 1
     if skipped:
-        print(f"\n- 依赖缺失显式跳过：{skipped}（不视为失败）")
+        if len(skipped) == len(results):
+            # 全 SKIP = 环境崩坏或导入段被误吞，绝不能算绿灯
+            # （REVIEW-2026-09 P0-3：旧逻辑全 SKIP 也打印「回归全绿」）
+            print(f"\nX 全部 {len(skipped)} 套被跳过——按失败处理"
+                  f"（全跳过 = 环境或代码出了系统性问题）")
+            return 1
+        print(f"\n- 依赖缺失显式跳过：{skipped}（部分跳过不视为失败）")
     print("\n=== 回归全绿（契约未破）===")
     return 0
 

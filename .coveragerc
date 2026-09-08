@@ -1,0 +1,19 @@
+# coverage.py 配置（由 coverage_run.py 以 `-m coverage run --rcfile` 方式
+# 作为测试进程入口加载——不用 COVERAGE_PROCESS_START 钩子：regression_run
+# 全部经 subprocess 拉新解释器，进程内钩子易漏采）。只报告，不设门禁。
+[run]
+source = core, ui
+parallel = true
+branch = true
+relative_files = true
+
+[paths]
+source =
+    core/
+    .\core\
+    */core/
+
+[report]
+omit =
+    */__pycache__/*
+    main.py

@@ -15,14 +15,17 @@ class StatusPanel(QWidget):
         self.speed = QLabel("速度 0 B/s")
         self.total_speed = QLabel("")
         self.buffer = QLabel("")
+        self.cache = QLabel("")
 
         for lbl in (self.peers, self.speed, self.total_speed, self.buffer):
             lbl.setStyleSheet(f"color:{TEXT_MUTED};")
         self.total_speed.hide()  # 无任务时不占位
+        self.cache.hide()        # 无占用信息时不占位
 
         row = QHBoxLayout(self)
         row.setContentsMargins(8, 4, 8, 4)
         row.addWidget(self.state, 1)
+        row.addWidget(self.cache)
         row.addWidget(self.buffer)
         row.addWidget(self.total_speed)
         row.addWidget(self.speed)
@@ -53,3 +56,11 @@ class StatusPanel(QWidget):
 
     def set_state(self, text: str):
         self.state.setText(text)
+
+    def set_cache_usage(self, text: str):
+        """预览缓存占用显示；空串时隐藏标签。"""
+        if text:
+            self.cache.setText(text)
+            self.cache.show()
+        else:
+            self.cache.hide()

@@ -12,7 +12,7 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import (QModelIndex, QMimeData,  # noqa: E402
+from PySide6.QtCore import (QModelIndex, QItemSelectionModel, QMimeData,  # noqa: E402
                             QStringListModel, QUrl)
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.config import RECENT_LIMIT, AppConfig, DEFAULTS  # noqa: E402
 from core.parser import parse_torrent_file  # noqa: E402
+from ui.add_download_dialog import AddDownloadDialog  # noqa: E402
+from ui.downloads_pane import COL_NAME, DownloadsPane  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 
 OK, FAIL = [], []
@@ -44,6 +46,9 @@ def main() -> int:
     os.makedirs(dl_out, exist_ok=True)
     cfg0.set("download_dir", dl_out)
     cfg0.set("default_concurrency", 5)
+    cfg0.set("download_rate_limit", 777)
+    cfg0.set("logging_enabled", False)
+    cfg0.set("cache_limit_mb", 8)
     w = None
     try:
         w = MainWindow()
@@ -54,6 +59,15 @@ def main() -> int:
         bases = w.server._httpd.RequestHandlerClass.base_dirs
         check(any(os.path.normpath(b) == os.path.normpath(dl_out) for b in bases),
               "StreamServer base_dirs 含 download_dir（多根）")
+        from core import logutil
+        check(not logutil.is_enabled(),
+              "logging_enabled=False 启动接线生效（P2-18）")
+        if hasattr(w.session._ses, "get_settings"):
+            _rl = int(w.session._ses.get_settings().get("download_rate_limit") or 0)
+            check(_rl == 777 * 1024,
+                  f"download_rate_limit 启动接线生效（{_rl // 1024} KB/s）")
+        check("8.0 MB" in w.status_panel.cache.text(),
+              "cache_limit_mb 状态栏占用显示已接入")
     finally:
         for k, v in _orig_all.items():
             cfg0.set(k, v)
