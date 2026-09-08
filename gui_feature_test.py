@@ -295,6 +295,33 @@ def main() -> int:
     check(gal.viewer.pixmap() is not None,
           "大图区已渲染 pixmap（不再停留「下载中…」）")
 
+    # ---------------------------------------------------------------- [4d] 评审 P0 防回归
+    print("\n[4d] 评审 P0 防回归（添加下载 / 下载页选中保持）")
+    dlg = AddDownloadDialog({}, "防回归.bin", 1024)
+    check(isinstance(dlg.priority(), int),
+          "AddDownloadDialog.priority() 可调用并返回 int"
+          "（P0-1：方法不再被同名 QSpinBox 控件遮蔽）")
+    dlg.priority_spin.setValue(3)
+    check(dlg.priority() == 3, "priority() 读回 spin 值（3）")
+
+    def mk_task(h: str, name: str) -> dict:
+        return {"info_hash": h, "name": name, "state": "DOWNLOADING",
+                "progress": 0.1, "down_rate": 0, "eta": None,
+                "priority": 1, "save_path": "", "selected_files": []}
+
+    pane = DownloadsPane()
+    pane.set_tasks([mk_task("a" * 40, "task-A"), mk_task("b" * 40, "task-B")])
+    idx0 = pane.tree.model().index(0, COL_NAME)
+    pane.tree.selectionModel().select(
+        idx0, QItemSelectionModel.SelectionFlag.Select
+        | QItemSelectionModel.SelectionFlag.Rows)
+    pane.set_tasks([mk_task("a" * 40, "task-A"),
+                    mk_task("b" * 40, "task-B")])   # 模拟 700ms 状态轮询刷新
+    sel = pane.selected_task() or {}
+    check(sel.get("name") == "task-A",
+          "set_tasks 全量刷新后选中保持（P0-2：700ms 轮询不再清掉选中）")
+    check("task-A" in pane.details.text(),
+          "刷新后详情区显示选中任务（不再退回「选择任务查看详情」）")
     # ------------------------------------------------- [4b] 进度条 seek 防抖
     # 回归「拖动进度条后无法播放 + 进度条失灵」的 UI 侧成因：
     # ① 双重 seek —— sliderReleased 已跳转，释放引发的 valueChanged 又启动

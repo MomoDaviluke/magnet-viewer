@@ -44,6 +44,22 @@ def find_ffmpeg_exe() -> str | None:
         return None
 
 
+def _subprocess_env() -> dict:
+    """子进程环境：剥掉代理变量。
+
+    FFmpeg 对 127.0.0.1 流服务的请求绝不应走代理——沙箱/公司网络设了
+    HTTP_PROXY 时，FFmpeg 会把 localhost 请求转给代理，代理断连后报
+    「Error reading HTTP response: End of file」（D 用例假失败的根因，
+    2026-09-08 实测：verbose 日志显示连接的是代理端口而非流服务端口）。
+    """
+    env = dict(os.environ)
+    for k in list(env):
+        if k.lower() in ("http_proxy", "https_proxy", "all_proxy", "ftp_proxy"):
+            env.pop(k, None)
+    env["NO_PROXY"] = "127.0.0.1,localhost"
+    return env
+
+
 def find_probe_tool() -> tuple[str, str] | None:
     """返回 (类型, 可执行路径)：优先 ffprobe，其次 ffmpeg。"""
     env = os.environ.get("MV_FFMPEG")
@@ -72,7 +88,8 @@ def make_tail_moov_mp4(path: str) -> bool:
            "-minrate", "2500k", "-maxrate", "2500k", "-bufsize", "5000k",
            "-an", path]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180,
+                           env=_subprocess_env())
     except subprocess.TimeoutExpired:
         return False
     return (r.returncode == 0
@@ -95,7 +112,8 @@ def probe(url: str, timeout: float = 20.0) -> tuple[int, str]:
         cmd = [exe, "-v", "error", "-i", url,
                "-f", "null", "-frames:v", "0", "-"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=_subprocess_env())
         return r.returncode, (r.stdout + r.stderr).strip()
     except subprocess.TimeoutExpired:
         return -1, "probe timeout"
@@ -117,7 +135,8 @@ def probe_seek(url: str, seek_sec: float, timeout: float = 60.0) -> tuple[int, s
     cmd = [exe, "-v", "error", "-ss", f"{seek_sec}", "-i", url,
            "-frames:v", "1", "-f", "null", "-"]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=_subprocess_env())
         return r.returncode, (r.stdout + r.stderr).strip()
     except subprocess.TimeoutExpired:
         return -1, "seek probe timeout"

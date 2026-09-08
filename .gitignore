@@ -33,3 +33,8 @@ dist/
 
 # 根目录单文件 exe（打包产物）
 /MagnetViewer.exe
+
+.workbuddy/
+
+# Hermes agent 工作目录（规划等临时产物）
+.hermes/
