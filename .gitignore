@@ -23,3 +23,11 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# PyInstaller 产物
+build/
+dist/
+*.spec
+
+# 根目录单文件 exe（打包产物）
+/MagnetViewer.exe

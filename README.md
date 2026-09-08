@@ -10,6 +10,7 @@
 - **图片画廊**：图片文件按需下载到临时缓存，完成后自动载入缩略图，支持 Ctrl+滚轮缩放、翻页；画廊内切换未下载图片会自动切换下载目标。
 - **设置**（右上角「设置」按钮）：SOCKS5/HTTP 代理（含账号密码、Peer 连接走代理以保护 IP）、元数据获取超时、缓存目录、退出时清理缓存、立即清理缓存。代理与超时保存后立即生效（libtorrent `apply_settings` 热更新），缓存目录修改重启生效。设置持久化于 QSettings（Windows 注册表 `HKEY_CURRENT_USER\Software\Bitseed\MagnetViewer`）。
 - **拖放与输入历史**：可直接把 `.torrent` 文件或磁力链文本拖入窗口（落点即解析）；输入框带自动补全，保留最近 15 条解析记录（置顶去重，持久化到 QSettings）。
+- **暗色主题与缓冲可视化**：全局暗色界面（集中式主题，`ui/theme.py`）；播放进度条按分块落盘位图**分段着色**已缓存区域，拖动过程中即预取目标区间（不等松手），跳转后缓冲栏明确提示「跳转中，正在缓冲目标位置」。
 - 预览可随时取消（自动释放下载配额）。
 
 ## 运行
@@ -27,6 +28,14 @@ python -m venv .venv
 ```
 
 依赖：Python 3.10+（已在 3.13 验证）、`libtorrent`、`PySide6`。
+
+### 打包 exe
+
+```bash
+.venv\Scripts\python -m PyInstaller --noconfirm --onefile --windowed --name MagnetViewer --collect-all libtorrent main.py
+```
+
+单文件产物 `dist\MagnetViewer.exe`（约 60 MB，首次启动需解压数秒）；去掉 `--onefile` 即目录版（启动更快，需整文件夹分发）。
 
 ## 使用步骤
 
@@ -82,14 +91,14 @@ magnet-viewer/
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
 | `qt_stream_open_test.py`（QMediaPlayer FFmpeg 后端 offscreen 实测，依赖同上） | 通过：A 仅头部→`FormatError`（即用户遇到的 moov atom not found）；B 头+尾+按需补拉→`LoadedMedia` 成功开播；C 全量→成功 |
 | GUI 无头启动 | 通过（主窗口构造、会话与流服务启动、退出码 0） |
-| `gui_feature_test.py`（offscreen 实测 40 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** |
+| `gui_feature_test.py`（offscreen 实测 63 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** |
 | `single_file_test.py`：单文件种子 × 本地种子/磁力链两条入口 | 通过（12/12）：路径层级、`file_disk_path` 落点、流服务按 `f.path` 供给 206（目录隔离后断言随 `.preview/<ih>/` 布局更新，接口未变） |
-| `local_torrent_test.py`：本地 .torrent 闭环 | 通过（9/9）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
+| `local_torrent_test.py`：本地 .torrent 闭环 | 通过（12/12）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
 | `download_mgr_test.py`：下载管理模块验收（MVP 7 + 增强 2 + 边界 5 + 流服务安全） | **通过（79/79，退出码 0）**：添加磁力链→下载中 / 暂停（5s 磁盘字节快照不变）/ 恢复（字节续增、进度单调）/ 删除任务（目录释放、重添无残留）/ 退出重启续传（`.tasks.json`+fastresume 读回、上传增量证不重下）/ 完成（落盘=声明值）/ 双任务并发 100% / 限速 ±20% / 边界（重复 hash·per-task 看门狗·防穿越·resume 损坏重建·缓存被清不崩溃）/ 下载中任务流服务安全（分块级可用性，绝不整文件喂零数据） |
 | `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python live_test.py` 复核。 |
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
-> 一键回归：`python regression_run.py`（7 套旧测试全量汇总退出码；下载管理模块验收单独跑 `python download_mgr_test.py`）。
+> 一键回归：`python regression_run.py`（8 套全量汇总退出码，`download_mgr_test` 偶发下载超时属沙箱抖动，复跑判定）。
 > 测试覆盖策略：按**数据入口路径**（本地种子 / 磁力链；单文件 / 多文件 / 混合 v2）铺排，而非仅按功能模块——历史上三个缺陷都源于同一功能的不同入口未各自覆盖。详见 `REVIEW.md`。
 
 ## 已修复问题
@@ -106,6 +115,11 @@ magnet-viewer/
 8. **画廊图片在任务隔离布局下永不显示（功能失效修复）**。目录隔离改造后任务落盘 `cache_dir/.preview/<ih>/` 或 `downloads/<ih>/`，而 `ui/gallery.py` 仍按 `cache_dir` 平铺拼路径 → 已下载图片永远显示"下载中…"。修复：新增 `core.models.disk_root()`（`save_subdir` 相对时拼接、绝对时原样使用），画廊与主窗口的磁盘键、流服务路径统一经它计算。
 9. **设置项「默认下载目录」「默认并发下载数」保存后不生效（设置接线修复）**。`SessionManager` 构造只传了 cache_dir，两个设置项从未接入。修复：主窗口按配置传入 `download_dir`/`active_downloads`；流服务支持多根目录（`bases`），`download_dir` 配置在缓存目录之外时任务文件的预览/分块级可用性仍可服务（修改需重启生效，设置面板已注明）。
 
+10. **拖动进度条后卡死 / 进度条失灵（用户实测复现，多因叠加）**。修复组合：
+    - 流服务对 seek 的无上界请求（`bytes=X-`）改为**渐进服务**——start 起就绪前缀 ≥256KB（或 1.5s 无增长）即回 206，FFmpeg 读尽后自动续发下一段，不再等待整个剩余区间就绪而超时 416；
+    - 调度器：跳转**立即**预约目标窗口（60 块）、单次点播加上限、滚动窗口改以播放位置为锚并接入 700ms 定时器（旧实现从不滚动，seek 点零预约）、**跳转前清理残留 deadline**（旧跳转窗口的 ASAP 分块会与新位置争带宽，导致拖回已缓存区反而卡顿）；
+    - 播放器：拖动/点击统一防抖消除**双重 seek**，跳转生效前不回写滑块（防「拖了又弹回」），出错自动重试回到出错位置而非从头重播，错误态禁用滑块并明确提示，**拖动中预取**目标区间（体感卡顿 2~3s → 0.5~1.5s）；
+    - 进度条按 piece 落盘位图**分段着色**已缓存区域（`status().pieces` 一次批量取位图，替代逐块 `have_piece` 扫描）。
 已验证环境：Python 3.13.12 + libtorrent 2.1.1 + PySide6 6.11.2（Windows）。
 
 > 注意：libtorrent 2.1.x 已移除 `settings_pack`，改用 `lt.session(dict)` 配置（本项目已适配，2.0.x 同样兼容）。磁力链元数据依赖 `metadata_received_alert`，本项目显式设置了 `alert_mask` 订阅必要告警类别，并做到「单条告警处理异常不中断整批处理」。
