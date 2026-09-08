@@ -35,11 +35,21 @@ python -m venv .venv
 
 ### 打包为免安装 exe（Windows）
 
+```bat
+build.bat          :: 一键：清旧产物 -> PyInstaller 构建 -> pack_check 自检
+```
+
+或手动两步（等价）：
+
 ```bash
 .venv\Scripts\pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --clean magnet-viewer.spec
+.venv\Scripts\python -m PyInstaller --noconfirm magnet-viewer.spec
+.venv\Scripts\python pack_check.py        :: 产物自检（退出码 0/1/2，同测试约定）
 # 产物：dist\MagnetViewer\MagnetViewer.exe（整个目录拷走即可运行）
 ```
+
+> 不用 `pyinstaller --clean`：它清 build 缓存（>50 个文件）会被本环境的安全
+> 删除守卫拦下直接 exit 1，`build.bat` 改为先手工删目录再构建，效果等价。
 
 onedir + windowed（无控制台）；不压 UPX（杀软误报头号诱因）。打包机与
 目标机均需 Windows x64；首次运行会自建缓存目录（%TEMP%\magnet_viewer_cache，
@@ -49,13 +59,30 @@ onedir + windowed（无控制台）；不压 UPX（杀软误报头号诱因）�
 与 `avcodec/avformat/avutil-*.dll`）会被一并打进产物，**目标机不需要额外装
 ffmpeg 或播放器**。前提：打包环境装了 `PySide6_Addons`——只装 Essentials 时
 插件源目录为空，产物能解析能下载、但开播必失败（QMediaPlayer ResourceError
-'Not available'）。产物约 **147MB**（比无后端时 +19MB，就是 FFmpeg 解码链）。
+'Not available'）。
 
-打包件实测（2026-09-08，三层 + 播放）：offscreen 启动 45s 稳定驻留
-（220MB）/ 真桌面 HWND 有效、标题正确（255MB）/ 按 PID 网络面确认
-6881 多网卡监听 + 127.0.0.1 流服务 + UDP×5（DHT）/ **用打包件里的
-QMediaPlayer 打开本地 MP4 → `LoadedMedia` 开播成功**（即目标机无需任何
-外部播放器）。
+#### 产物体积：147MB → 103MB（瘦身清单）
+
+`magnet-viewer.spec` 里有一组带注释的黑名单，只砍「本应用确定用不到」的大件：
+
+| 剔除项 | 体积 | 依据 |
+|---|---|---|
+| `opengl32sw.dll` | 20MB | Mesa 软件 OpenGL，只服务 Qt Quick 渲染后端；本应用是纯 Widgets |
+| Quick / Qml 全家 | 12.5MB | 被 Qt6Multimedia、virtualkeyboard 插件连带拖入，Widgets 应用不加载 QML 引擎 |
+| `Qt6Pdf` | 4.5MB | 来自 imageformats 的 `qpdf.dll`，本应用不显示 PDF |
+| `translations/` | 7.1MB | Qt 自带界面译文，本项目文案硬编码中文 |
+| 冷门图像插件 | 约 1MB | `qicns/qtga/qwbmp/qwebp`，图标与画廊用不到 |
+
+砍完必须复验——`pack_check.py` 就是干这个的：它既查「必需组件一件不少」
+（含整条多媒体链），也查「该砍的确实砍了」，体积超 130MB 会告警（瘦身失效
+的哨兵）。spec 里还有一道构建期硬校验，误删必需 DLL 时直接 `SystemExit`，
+不让问题拖到运行时才黑屏。
+
+打包件实测（2026-09-08，四层）：offscreen 40s 稳定驻留（220MB）/ 真桌面
+HWND 有效、标题正确（251MB）/ 按 PID 网络面确认 6881 多网卡监听 +
+127.0.0.1 流服务 + UDP×5（DHT）/ **打包件内 QMediaPlayer 开本地 MP4 →
+`LoadedMedia`，且 QVideoSink 抓到 640x360 画面（采样方差 5034，非黑屏）**
+——即瘦身没有伤到渲染链，目标机无需任何外部播放器。
 
 ## 使用步骤
 
@@ -110,6 +137,8 @@ magnet-viewer/
 ├── hybrid_v2_test.py     # 入口矩阵混合 v2 列（两入口端到端）
 ├── regression_run.py     # 一键回归（16 套）
 ├── magnet-viewer.spec    # PyInstaller 打包配置（onedir，产物 dist/MagnetViewer/）
+├── build.bat             # 一键打包（清旧产物 → 构建 → pack_check 自检）
+├── pack_check.py         # 打包产物自检（必需组件 / 瘦身是否失效 / 体积哨兵）
 ├── smoke_test.py         # 无 GUI 冒烟测试（python smoke_test.py）
 ├── local_magnet_test.py  # 本机闭环验证：做种端 + 磁力链解析 + 边下边播（无需外网）
 ├── moov_stream_test.py   # moov 尾部优先端到端验证（ffprobe/ffmpeg 实际探测，无 GUI）

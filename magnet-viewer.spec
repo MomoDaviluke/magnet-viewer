@@ -47,9 +47,74 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "pytest", "IPython"],
+    excludes=["tkinter", "pytest", "IPython",
+              # Quick/Qml/Pdf 全家：Widgets 应用不加载 QML 引擎，也不显示 PDF
+              "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets",
+              "PySide6.QtQuickControls2", "PySide6.QtPdf",
+              "PySide6.QtPdfWidgets", "PySide6.Qt3DCore", "PySide6.Qt3DRender",
+              "PySide6.QtCharts", "PySide6.QtDataVisualization",
+              "PySide6.QtBluetooth", "PySide6.QtNfc", "PySide6.QtPositioning",
+              "PySide6.QtSensors", "PySide6.QtSerialPort", "PySide6.QtTest",
+              "PySide6.QtDesigner", "PySide6.QtHelp", "PySide6.QtWebEngineCore",
+              "PySide6.QtWebEngineWidgets", "PySide6.QtWebSockets",
+              "PySide6.QtSql", "PySide6.QtNetworkAuth", "PySide6.QtRemoteObjects",
+              ],
     noarchive=False,
 )
+
+# ---------------- 瘦身过滤（2026-09-08） ----------------
+# 原则：只砍「本应用确定用不到」的大件，每条写清依据；砍完必须重跑
+#       `pack_check.py` + 三层实测 + 开播探针（build.bat 已串好）。
+#
+# 1) opengl32sw.dll（20MB）：Mesa 软件 OpenGL，只服务 Qt Quick 的渲染后端。
+#    本应用是纯 QtWidgets，视频画面走 Qt Multimedia 自己的渲染路径，不碰它。
+#    删错的表现是窗口黑屏 / 视频不出画，三层实测与抓帧探针会立刻暴露。
+# 2) Quick / Qml 全家（约 12.5MB）：被 Qt6Multimedia 与 virtualkeyboard
+#    插件间连带拖进来的，Widgets 应用不会加载 QML 引擎。
+# 3) Qt6Pdf（4.5MB）：来自 imageformats 的 qpdf.dll，本应用不显示 PDF。
+# 4) PySide6/translations（7.1MB）：Qt 自带界面译文，本项目文案硬编码中文。
+# 5) 冷门图像格式插件：qicns/qtga/qwbmp/qwebp（图标与画廊用不到）。
+DROP_BIN_EXACT = {"opengl32sw.dll"}
+DROP_BIN_PREFIX = ("Qt6Qml", "Qt6Quick", "QtQml", "QtQuick",
+                   "Qt6Pdf", "QtPdf")
+DROP_DATA_PREFIX = ("PySide6/translations/", "PySide6/qml/")
+DROP_DATA_NAME = {"qpdf.dll", "qicns.dll", "qtga.dll", "qwbmp.dll",
+                  "qwebp.dll"}
+
+
+def _norm(name: str) -> str:
+    """TOC 里的目标路径在 Windows 上可能是反斜杠，统一成正斜杠再判定。"""
+    return name.replace("\\", "/")
+
+
+def _base(name: str) -> str:
+    """binaries/datas 的目标名可能带子目录（如 PySide6/Qt6Core.dll），
+    判定一律按文件名，免得换 Qt 版本改了布局就悄悄失效。"""
+    return _norm(name).rsplit("/", 1)[-1]
+
+
+a.binaries = [
+    b for b in a.binaries
+    if _base(b[0]) not in DROP_BIN_EXACT
+    and not _base(b[0]).startswith(DROP_BIN_PREFIX)
+]
+a.datas = [
+    d for d in a.datas
+    if not _norm(d[0]).startswith(DROP_DATA_PREFIX)
+    and _base(d[0]) not in DROP_DATA_NAME
+]
+
+# 误删防护：少任一件都说明过滤过火——构建期直接失败，别等运行时才黑屏。
+MUST_KEEP = {
+    "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
+    "Qt6Multimedia.dll", "Qt6MultimediaWidgets.dll",
+    "avcodec-61.dll", "avformat-61.dll", "avutil-59.dll",
+}
+missing = MUST_KEEP - {_base(b[0]) for b in a.binaries}
+if missing:
+    raise SystemExit(f"[spec] 瘦身过滤误删必需组件：{sorted(missing)}")
+# ---------------- 瘦身过滤结束 ----------------
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
