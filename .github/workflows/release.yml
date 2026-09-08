@@ -1,0 +1,75 @@
+# 发布工作流：打 tag（v*）自动构建 Windows 产物并挂到 GitHub Release。
+#
+# 产物两种（2026-09-09 决策）：
+# - MagnetViewer-vX.Y.Z-win64.exe      单文件版，下载双击即用（onefile）
+# - MagnetViewer-win64-portable.zip    目录版 zip，启动快、杀软更友好（onedir）
+#
+# 维护要点（与 ci.yml / build.bat 的既有约定一致）：
+# - runner 是英文 locale（cp1252），必须 PYTHONUTF8=1 + PYTHONIOENCODING=utf-8，
+#   否则脚本里的中文输出直接 UnicodeEncodeError 崩掉且不产日志。
+# - 内嵌播放器依赖 QtMultimedia 的 FFmpeg 后端（plugins/multimedia/），
+#   只随 PySide6_Addons 分发——requirements.lock 安装后务必保留
+#   imageio-ffmpeg（moov 流测试用），PyInstaller 锁 6.22.2 与本地验证版本一致。
+# - 手动触发（workflow_dispatch，在 main 上）只构建并上传 artifact，
+#   不创建 Release；正式发布一律走 tag。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: 1
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies (locked, 与已验证环境一致)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.lock imageio-ffmpeg "pyinstaller==6.22.2"
+
+      - name: Build onefile exe
+        run: python -m PyInstaller --noconfirm magnet-viewer-onefile.spec
+
+      - name: Build onedir portable zip
+        run: |
+          python -m PyInstaller --noconfirm magnet-viewer.spec
+          Compress-Archive -Path dist\MagnetViewer -DestinationPath MagnetViewer-win64-portable.zip -Force
+
+      - name: Version the exe (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Copy-Item dist\MagnetViewer.exe "MagnetViewer-${env:GITHUB_REF_NAME}-win64.exe"
+
+      - name: Attach artifacts to GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            MagnetViewer-*-win64.exe
+            MagnetViewer-win64-portable.zip
+
+      - name: Upload artifacts (manual runs on main)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MagnetViewer-win64
+          path: |
+            dist/MagnetViewer.exe
+            MagnetViewer-win64-portable.zip
+          retention-days: 14
