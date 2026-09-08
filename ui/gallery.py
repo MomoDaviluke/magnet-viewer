@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QPushButton, QSplitter,
                                QVBoxLayout, QWidget)
 
+from ui.theme import BG_PANEL, TEXT_MUTED
 from core.models import (ParseResult, TorrentFile, disk_root,
                          file_disk_path, human_size)
 
@@ -35,7 +36,7 @@ class GalleryWidget(QWidget):
         self.viewer = QLabel("（选择左侧图片）")
         self.viewer.setAlignment(Qt.AlignCenter)
         self.viewer.setMinimumSize(300, 300)
-        self.viewer.setStyleSheet("background:#181818; color:#aaa;")
+        self.viewer.setStyleSheet(f"background:{BG_PANEL}; color:{TEXT_MUTED};")
 
         self.btn_prev = QPushButton("← 上一张")
         self.btn_next = QPushButton("下一张 →")

@@ -1,6 +1,7 @@
 """设置对话框：代理 / 元数据超时 / 缓存目录 / 退出清理。"""
 from __future__ import annotations
 
+from ui.theme import TEXT_MUTED
 import os
 
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -96,7 +97,7 @@ class SettingsDialog(QDialog):
         note = QLabel("提示：代理与超时保存后立即生效；缓存目录、默认下载目录"
                       "与并发数修改需重启程序。设置持久化于本机"
                       "（Windows 注册表 Bitseed\\MagnetViewer）。")
-        note.setStyleSheet("color:#777; font-size:12px;")
+        note.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
         note.setWordWrap(True)
 
         self.btn_clear = QPushButton("立即清理缓存")
