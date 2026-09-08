@@ -493,6 +493,112 @@ def main():
     assert tail_piece_window(tiny, 16 * 1024) == list(range(19))  # 小文件=整文件
     print(f"[3c] 尾部索引窗口通过：MP4 末块 {win[-1]} 窗口 {len(win)} 块 / MKV 不补拉")
 
+    # 调度器预约窗口（假句柄）：seek 必须立即预约、点播必须有上限、
+    # 滚动度量必须跟随播放位置（否则 seek 后 seek 点附近零预约）
+    class _FakeTI:
+        def __init__(self, pl, n):
+            self._pl, self._n = pl, n
+
+        def piece_length(self):
+            return self._pl
+
+        def num_files(self):
+            return self._n
+
+    class _FakeHandle:
+        def __init__(self, pl, n):
+            self.ti = _FakeTI(pl, n)
+            self.have = set()
+            self.deadlines = []
+            self.prios = None
+            self.cleared = 0
+
+        def torrent_file(self):
+            return self.ti
+
+        def have_piece(self, p):
+            return p in self.have
+
+        def set_piece_deadline(self, p, d):
+            self.deadlines.append(p)
+
+        def clear_piece_deadlines(self):
+            self.deadlines.clear()
+            self.cleared += 1
+
+        def prioritize_files(self, prios):
+            self.prios = list(prios)
+
+        def unset_flags(self, _f):
+            pass
+
+        def set_flags(self, _f):
+            pass
+
+        def resume(self):
+            pass
+
+        def pause(self):
+            pass
+
+    pl_s = 1024 * 1024
+    f_sched = TorrentFile(0, "root/demo.mp4", 100 * pl_s, 0, 0, 99)   # 100 块
+    h_sched = _FakeHandle(pl_s, 3)
+    sched = PreviewScheduler()
+    sched.begin(h_sched, f_sched)
+    dl = set(h_sched.deadlines)
+    assert dl >= set(range(0, 61)), "开播顺序窗口未预约"
+    assert dl >= {96, 97, 98, 99}, "尾部 moov 窗口未预约"
+    assert h_sched.prios == [4, 0, 0], h_sched.prios
+    # 拖动到 80MB：必须立即预约 seek 点起的窗口（旧实现只改锚点、不预约）
+    h_sched.deadlines.clear()
+    sched.seek_to_byte(80 * pl_s)
+    dl = set(h_sched.deadlines)
+    assert 80 in dl, "seek 后未立即预约 seek 点"
+    assert dl >= set(range(80, 100)), sorted(dl)[:5]
+    # 点播区间必须有上限：拖动的 `bytes=X-`（到文件尾）不能把剩余全文件置 ASAP
+    h_sched.deadlines.clear()
+    sched.request_range(0, 100 * pl_s)
+    assert len(set(h_sched.deadlines)) <= 60, f"点播无上限：{len(set(h_sched.deadlines))} 块"
+    assert min(h_sched.deadlines) == 0, "点播未从请求起点开始"
+    # 尾部 moov 点播不得把顺序窗口锚点推到文件尾（否则顺序窗口永久停摆）
+    sched.request_range(99 * pl_s, 100 * pl_s)
+    h_sched.deadlines.clear()
+    sched.tick()
+    assert h_sched.deadlines, "尾部点播后顺序窗口停摆"
+    # seek 之后：窗口尚未覆盖播放位置时，tick 必须从**播放位置**起预约。
+    # 旧实现以「从文件头的连续前缀」为度量 —— seek 后文件头前缀仍停在
+    # 旧位置 → 窗口恒被判定为「充裕」→ 永不滚动（seek 点零预约）。
+    sched.seek_to_byte(80 * pl_s)
+    sched._scheduled_to = 79          # 白盒：模拟窗口尚未覆盖 seek 点
+    h_sched.deadlines.clear()
+    sched.tick()
+    assert set(h_sched.deadlines) >= {80, 81, 82}, \
+        f"seek 后 tick 未从播放位置起预约：{sorted(set(h_sched.deadlines))[:5]}"
+    # 播放位置之后已下载时，窗口应继续向前滚动（旧实现会退回文件头重排）
+    sched.seek_to_byte(10 * pl_s)
+    h_sched.have.update(range(10, 70))
+    sched._scheduled_to = 9           # 白盒：窗口尚未覆盖
+    h_sched.deadlines.clear()
+    sched.tick()
+    assert h_sched.deadlines and max(h_sched.deadlines) >= 70, \
+        f"下载推进后窗口未向前滚动：{sorted(set(h_sched.deadlines))[-3:]}"
+    # 跳转必须清掉旧位置的 ASAP 预约：残留的远端分块仍在最高优先级并行
+    # 下载，会与新播放位置争带宽 —— 症状是「拖到未缓存区再拖回已缓存区
+    # 反而卡顿」。清完要重建尾部 moov 窗口与新位置窗口。
+    sched.seek_to_byte(80 * pl_s)
+    assert 80 in set(h_sched.deadlines), "未预约新跳转位置"
+    h_sched.have.update(range(20, 100))    # 拖回的目标区域已缓存（用户场景）
+    sched.seek_to_byte(20 * pl_s)
+    after = set(h_sched.deadlines)
+    assert 20 in after, "拖回后未预约新位置"
+    # 已缓存区域无需再向前预约，残留只能来自旧跳转窗口
+    assert not (after & {85, 86, 87}), \
+        f"旧跳转窗口残留：{sorted(after & set(range(80, 100)))}"
+    assert h_sched.cleared >= 1, "seek 未清理旧 deadline"
+    assert after >= {96, 97, 98, 99}, "清理后未重建尾部 moov 窗口"
+    print("[3c3] 调度器预约窗口通过：seek 立即预约 / 点播有上限 / 窗口随播放位置滚动 / 跳转清理残留")
+
     # 分块映射：连续前缀 + 任意区间可用性（moov 在尾部的判定基础）
     pl, size = 16 * 1024, 300 * 1024
     have = {0, 1, 2}   # 头部 3 块 + 尾部 2 块（中间缺失模拟稀疏空洞）
@@ -575,6 +681,53 @@ def main():
     srv5.shutdown()
     print("[3f] 点播+等待通过：未就绪区间先点播再等待，超时才退化为 416")
 
+    # 拖动进度条（seek）：FFmpeg 中断当前连接后发无上界请求 `bytes=X-`
+    # （X 到文件尾）。旧实现要求「整个剩余区间就绪」→ 大文件必然等满超时
+    # 416 → FFmpeg 判为致命错误、播放器进入 ErrorState（症状：拖动后卡死、
+    # 进度条失灵）。新实现渐进服务：start 起就绪多少发多少，FFmpeg 读尽
+    # Content-Length 后自动续发下一段 Range（与顺序播放同一机制）。
+    pl3, size3 = 1024 * 1024, 10 * 1024 * 1024
+    disk3 = os.path.join(cache, "seek.mp4")
+    with open(disk3, "wb") as f:
+        f.write(os.urandom(6 * pl3))       # 只验证前 6 块内容，其余留零
+        f.truncate(size3)
+    have3 = {0, 1, 5}                      # 头部 2 块 + seek 目标（第 6 块缺失）
+    pm3 = PieceMap(pl3, 0, 0, (size3 - 1) // pl3, size3, lambda p: p in have3)
+    demanded3 = []
+    srv6 = StreamServer(
+        cache, pieces_cb=lambda p: pm3 if p == os.path.normpath(disk3) else None,
+        demand_cb=lambda p, s, e: demanded3.append((s, e)), wait_timeout=2.0)
+    srv6.start()
+    url6 = srv6.url_for("seek.mp4")
+    t0 = time.time()
+    req = urllib.request.Request(url6, headers={"Range": f"bytes={5 * pl3}-"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read()
+        cost = time.time() - t0
+        assert resp.status == 206, resp.status
+        assert len(body) == pl3, f"应只发就绪的 1 块，实际 {len(body)}"
+        assert body == open(disk3, "rb").read()[5 * pl3:6 * pl3], "seek 处内容不一致"
+        assert resp.headers.get("Content-Range", "").endswith(f"/{size3}"), \
+            "Content-Range 总长应为逻辑大小"
+        assert cost < 1.5, f"未渐进服务（等了 {cost:.1f}s，疑似仍在等整个区间）"
+    assert demanded3 and demanded3[0][0] == 5 * pl3, f"未点播 seek 区间: {demanded3}"
+    # seek 点之后连续多块就绪 → 一次给出整个就绪前缀（3 块）
+    have3.update({6, 7})
+    req = urllib.request.Request(url6, headers={"Range": f"bytes={5 * pl3}-"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read()
+        assert resp.status == 206 and len(body) == 3 * pl3, (resp.status, len(body))
+    # seek 点完全未就绪 → 仍退化为 416（渐进服务不改「无数据可给」的语义）
+    req = urllib.request.Request(url6, headers={"Range": f"bytes={8 * pl3}-"})
+    try:
+        urllib.request.urlopen(req, timeout=30)
+        raise AssertionError("应当返回 416")
+    except urllib.error.HTTPError as e:
+        assert e.code == 416, e.code
+    srv6.shutdown()
+    os.remove(disk3)
+    print("[3f2] 拖动进度条渐进服务通过：就绪前缀即时 206（未等满超时），无数据仍 416")
+
     # 配置映射：应用代理配置 → libtorrent 设置键值（纯函数）
     from core.config import lt_proxy_settings
     direct = lt_proxy_settings(None)
@@ -633,7 +786,8 @@ def main():
     from ui.status_panel import StatusPanel  # noqa: F401
     from ui.downloads_pane import DownloadsPane, format_eta  # noqa: F401
     from ui.add_download_dialog import AddDownloadDialog  # noqa: F401
-    from core.scheduler import PreviewScheduler  # noqa: F401
+    # 注意：不要再在**函数内** import 顶层已导入的名字（如 PreviewScheduler）——
+    # 那会让它变成整个函数的局部名，函数前段使用会报 UnboundLocalError。
     print("[4] 全部模块导入通过")
 
     print("\n=== 冒烟测试全部通过 ===")
