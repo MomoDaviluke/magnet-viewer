@@ -116,6 +116,10 @@ def main():
     # 无音频/显示会话的环境（无头 CI、服务器）实例化即 ResourceError
     # 'Not available'，此时整组用例必红却与代码无关 —— 显式 SKIP，
     # 与既有「不假绿也不假红」的约定保持一致。
+    # 2026-09-08 补：另一种更常见的「不可用」是只装了 PySide6_Essentials——
+    # 多媒体后端插件（plugins/multimedia/ffmpegmediaplugin.dll + avcodec/
+    # avformat/avutil）只随 PySide6_Addons 分发。装上 Addons 后本组用例
+    # 在本机首次真正执行（A/B/C 全绿），此前长期停在 SKIP 分支。
     probe = _m()
     if probe.error() != _m.NoError:
         print(f"[SKIP] Qt 多媒体后端不可用（{probe.errorString()}），Qt 开播验证跳过")

@@ -13,6 +13,13 @@
 - **windowed（--noconsole）**：GUI 应用；无控制台黑窗。
 - PySide6 由官方 hook 自动收集插件与 DLL；此处仅显式补两处实测易漏：
   QtMultimedia/QtMultimediaWidgets 模块与 libtorrent 的 C 扩展。
+- **多媒体后端（2026-09-08 补，关键前提）**：内嵌播放器要的
+  `plugins/multimedia/ffmpegmediaplugin.dll` 与 avcodec/avformat/avutil/
+  swresample/swscale 只随 **PySide6_Addons** 分发——PySide6_Essentials 的
+  plugins 下根本没有 multimedia 目录。打包机必须先装 Addons，否则产物能
+  解析能下载、双击视频却开播必败（QMediaPlayer ResourceError
+  'Not available'）。装上后产物 128MB → 147MB（+19MB 即 FFmpeg 后端），
+  目标机无需额外安装 ffmpeg 或播放器。
 """
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 

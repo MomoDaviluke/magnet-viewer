@@ -26,7 +26,9 @@ python -m venv .venv
 .venv\Scripts\python main.py
 ```
 
-依赖：Python 3.10+（已在 3.13 验证）、`libtorrent`、`PySide6`。
+依赖：Python 3.10+（已在 3.13 验证）、`libtorrent`、`PySide6_Essentials`、
+`PySide6_Addons`（后者提供内嵌播放器要用的 Qt 多媒体后端；只装前者时视频
+能解析能下载，但双击预览会「打不开」——QMediaPlayer 无后端插件）。
 发布/回归环境建议改用精确锁定安装 `pip install -r requirements.lock`
 （与已验证环境逐字节一致；libtorrent 2.0/2.1 API 不兼容，宽松约束下
 新装机器可能落到未验证版本）。
@@ -41,7 +43,19 @@ python -m venv .venv
 
 onedir + windowed（无控制台）；不压 UPX（杀软误报头号诱因）。打包机与
 目标机均需 Windows x64；首次运行会自建缓存目录（%TEMP%\magnet_viewer_cache，
-可在设置中更改）。多媒体播放依赖系统 WebView/媒体组件（与直接运行一致）。
+可在设置中更改）。
+
+内嵌播放器所需的 Qt 多媒体后端（`plugins/multimedia/ffmpegmediaplugin.dll`
+与 `avcodec/avformat/avutil-*.dll`）会被一并打进产物，**目标机不需要额外装
+ffmpeg 或播放器**。前提：打包环境装了 `PySide6_Addons`——只装 Essentials 时
+插件源目录为空，产物能解析能下载、但开播必失败（QMediaPlayer ResourceError
+'Not available'）。产物约 **147MB**（比无后端时 +19MB，就是 FFmpeg 解码链）。
+
+打包件实测（2026-09-08，三层 + 播放）：offscreen 启动 45s 稳定驻留
+（220MB）/ 真桌面 HWND 有效、标题正确（255MB）/ 按 PID 网络面确认
+6881 多网卡监听 + 127.0.0.1 流服务 + UDP×5（DHT）/ **用打包件里的
+QMediaPlayer 打开本地 MP4 → `LoadedMedia` 开播成功**（即目标机无需任何
+外部播放器）。
 
 ## 使用步骤
 

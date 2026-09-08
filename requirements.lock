@@ -13,8 +13,11 @@
 #
 # 已验证环境：Python 3.13（3.13.12/3.13.14）+ libtorrent 2.1.1
 #             + PySide6 6.11.2（Windows，2026-09-07 全量回归通过）
+#             + PySide6_Addons 6.11.2（2026-09-08 补：多媒体后端插件来源，
+#               缺它则内嵌播放器不可用，qt_stream_open_test 只能 SKIP）
 libtorrent==2.1.1
 PySide6_Essentials==6.11.2
+PySide6_Addons==6.11.2
 shiboken6==6.11.2
 
 # 可选（仅 moov_stream_test / qt_stream_open_test 需要，start.bat 首启不装）：
