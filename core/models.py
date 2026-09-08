@@ -173,6 +173,27 @@ def contiguous_bytes(pm: PieceMap, limit: int | None = None) -> int:
     return max(0, min(size, contig))
 
 
+def ready_until(pm: PieceMap, start: int, end_excl: int) -> int:
+    """从 start 起向后延伸，返回第一个**未就绪**字节的位置（开区间末端）。
+
+    用于流服务的「渐进服务」：拖动进度条时 FFmpeg 发 `bytes=X-`（覆盖到
+    文件尾），要求整个区间就绪必然超时——改为就绪多少发多少，FFmpeg 读尽
+    Content-Length 后会自动续发下一段 Range（与头部顺序播放同一机制）。
+    返回 start 表示 start 处一个就绪字节都没有。
+    """
+    if start >= end_excl:
+        return start
+    if pm.piece_length <= 0 or end_excl > pm.size:
+        return start
+    p0 = (pm.offset + start) // pm.piece_length
+    p1 = (pm.offset + end_excl - 1) // pm.piece_length
+    p = p0
+    while p <= p1 and pm.have(p):
+        p += 1
+    until = p * pm.piece_length - pm.offset
+    return max(start, min(end_excl, until))
+
+
 def range_available(pm: PieceMap, start: int, end_excl: int) -> bool:
     """[start, end_excl) 区间内的每个字节是否都属于已落盘分块。"""
     if start >= end_excl or end_excl <= 0:

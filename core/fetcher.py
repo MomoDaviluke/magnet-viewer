@@ -29,7 +29,7 @@ from .models import ParseResult, PieceMap, TorrentFile, safe_rel_path
 from .parser import is_torrent_path, parse_torrent_file
 from .resume import resume_path, write_resume
 from .scheduler import PreviewScheduler
-from .taskstore import (load_tasks, normalize_info_hash, save_tasks,
+from .taskstore import (load_tasks, save_tasks,
                         task_from_result, upsert_task)
 
 METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种
@@ -1057,6 +1057,51 @@ class SessionManager:
             log_warning("fetcher.status.file_progress", f"{e}")
             st["file_progress"] = []
         return st
+
+    def buffered_segments_of_preview(self):
+        """当前预览文件的已缓存分段（文件内字节区间 [start, end) 列表）。
+
+        供进度条着色。用 handle.status().pieces **一次性**取全部块的落盘
+        状态（C++ 层，比逐块 have_piece 快几个数量级），再在文件块范围内
+        合并连续段 —— 700ms 一次也不构成负担，顺带落实了 P2-1 的批量位图。
+        无预览 / 状态不可用时返回 None（进度条退化为不着色）。
+        """
+        with self._lock:
+            active = self.scheduler.active
+            f = self.scheduler.file
+            handle = self.scheduler.handle
+        if not active or f is None or handle is None:
+            return None
+        try:
+            ti = handle.torrent_file()
+            pieces = getattr(handle.status(), "pieces", None)
+            if ti is None or not pieces:
+                return None
+            pl = ti.piece_length()
+            if pl <= 0:
+                return None
+            segs: list[tuple[int, int]] = []
+            run = None                      # 连续已落盘段的起始块
+            for p in range(f.start_piece, f.end_piece + 1):
+                if pieces[p]:
+                    if run is None:
+                        run = p
+                elif run is not None:
+                    segs.append(self._piece_range_bytes(run, p - 1, pl, f))
+                    run = None
+            if run is not None:
+                segs.append(self._piece_range_bytes(run, f.end_piece, pl, f))
+            return segs
+        except Exception as e:
+            log_warning("fetcher.buffered_segments", f"{e}")
+            return None
+
+    @staticmethod
+    def _piece_range_bytes(first: int, last: int, pl: int, f) -> tuple[int, int]:
+        """块号闭区间 [first, last] → 文件内字节区间 [start, end)。"""
+        start = max(0, first * pl - f.offset)
+        end = min(f.size, (last + 1) * pl - f.offset)
+        return (start, max(start, end))
 
     @property
     def current_result(self) -> ParseResult | None:
