@@ -9,7 +9,7 @@
 #   python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 #   （如需 moov/qt 两套流媒体测试：pip install imageio-ffmpeg）
 #   .venv\Scripts\pip freeze > requirements.lock
-# 升级依赖 = 改 requirements.txt → 重建 venv → 重新生成 lock → 15 套回归。
+# 升级依赖 = 改 requirements.txt → 重建 venv → 重新生成 lock → 16 套回归。
 #
 # 已验证环境：Python 3.13（3.13.12/3.13.14）+ libtorrent 2.1.1
 #             + PySide6 6.11.2（Windows，2026-09-07 全量回归通过）

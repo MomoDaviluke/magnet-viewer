@@ -97,7 +97,12 @@ class _StreamHandler(BaseHTTPRequestHandler):
                 return 0, None, None, False
             if pm is not None:
                 return contiguous_bytes(pm), pm, None, True
-            # pm 为 None：非预览文件，继续走旧接口/静态全量
+            # pieces_cb 在场但不认识该文件：交给 avail_cb 兜底；两路都给不出
+            # 可判定依据时必须判「不可用」——「反查不命中」不等于「已下载完」，
+            # 下载中文件反查失败后被当整文件服务，就是稀疏零数据（2026-09-08
+            # 实证：pieces_cb 恒返 None 时，旧逻辑对未下载文件回 206+全零）。
+            if self.avail_cb is None:
+                return 0, None, None, False
         if self.avail_cb is not None:
             try:
                 avail = max(0, min(int(self.avail_cb(fp)), logical))
@@ -105,7 +110,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
                 log_warning("stream.availability.avail_cb", f"{fp}: {e}")
                 return 0, None, None, False
             return avail, None, avail, True
-        return logical, None, None, True
+        return logical, None, None, True   # 纯静态服务：两个回调都未提供
 
     def _range_available(self, pm, avail, start: int, end_excl: int) -> bool:
         """[start, end_excl) 是否全部可读。"""
@@ -277,8 +282,11 @@ class _StreamHandler(BaseHTTPRequestHandler):
         deadline = time.time() + budget
         while True:
             logical = os.path.getsize(fp)
-            _, pm, avail, _ = self._availability(fp, logical)
-            if self._range_available(pm, avail, start, end_excl):
+            _, pm, avail, ok = self._availability(fp, logical)
+            # ok 必须参与判定：等待期间回调可能开始抛异常/反查失效，
+            # 此时 (pm, avail) 双 None 若被 _range_available 当「全量可用」，
+            # 等待结束反而吐出稀疏零数据（2026-09-08 审计 P0-4 第二触发点）
+            if ok and self._range_available(pm, avail, start, end_excl):
                 return True
             if time.time() >= deadline:
                 return False

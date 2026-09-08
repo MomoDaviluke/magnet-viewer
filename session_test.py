@@ -42,7 +42,8 @@ try:
     from core.fetcher import (SessionManager, TaskRecord, STATE_COMPLETED,
                               STATE_DOWNLOADING, STATE_FAILED,
                               STATE_META_FETCH, STATE_PAUSED, STATE_STOPPED)
-except Exception as e:      # 依赖缺失：显式 SKIP，绝不假装通过
+except ImportError as e:    # 依赖缺失（模块/导出不存在）：显式 SKIP；
+                            # 语法错误/逻辑错误不是 ImportError，会正常冒泡为失败
     print(f"依赖缺失，无法执行 session 专项验收：{e}")
     sys.exit(2)
 

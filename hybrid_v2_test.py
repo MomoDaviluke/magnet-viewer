@@ -31,7 +31,8 @@ try:
             and hasattr(lt, "sha256_hash")):
         print("libtorrent 无 v2 支持（需 2.x），显式 SKIP")
         sys.exit(2)
-except Exception as e:      # 依赖缺失：显式 SKIP，绝不假装通过
+except ImportError as e:    # 依赖缺失（模块/导出不存在）：显式 SKIP；
+                            # 语法错误/逻辑错误不是 ImportError，会正常冒泡为失败
     print(f"依赖缺失，无法执行混合 v2 验收：{e}")
     sys.exit(2)
 

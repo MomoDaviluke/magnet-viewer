@@ -21,12 +21,12 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install dependencies
+      - name: Install dependencies (locked, 与已验证环境一致)
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt imageio-ffmpeg
+          pip install -r requirements.lock imageio-ffmpeg
 
-      - name: Run 8-suite regression
+      - name: Run 16-suite regression
         run: python regression_run.py
 
       - name: Upload regression logs

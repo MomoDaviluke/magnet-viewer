@@ -11,7 +11,7 @@ import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import (QModelIndex, QMimeData,  # noqa: E402
+from PySide6.QtCore import (QModelIndex, QItemSelectionModel, QMimeData,  # noqa: E402
                             QStringListModel, QUrl)
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.config import RECENT_LIMIT, AppConfig, DEFAULTS  # noqa: E402
 from core.parser import parse_torrent_file  # noqa: E402
+from ui.add_download_dialog import AddDownloadDialog  # noqa: E402
+from ui.downloads_pane import COL_NAME, DownloadsPane  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 
 OK, FAIL = [], []
@@ -291,6 +293,34 @@ def main() -> int:
           "画廊大图从隔离路径加载成功（save_subdir 已拼接）")
     check(gal.viewer.pixmap() is not None,
           "大图区已渲染 pixmap（不再停留「下载中…」）")
+
+    # ---------------------------------------------------------------- [4d] 评审 P0 防回归
+    print("\n[4d] 评审 P0 防回归（添加下载 / 下载页选中保持）")
+    dlg = AddDownloadDialog({}, "防回归.bin", 1024)
+    check(isinstance(dlg.priority(), int),
+          "AddDownloadDialog.priority() 可调用并返回 int"
+          "（P0-1：方法不再被同名 QSpinBox 控件遮蔽）")
+    dlg.priority_spin.setValue(3)
+    check(dlg.priority() == 3, "priority() 读回 spin 值（3）")
+
+    def mk_task(h: str, name: str) -> dict:
+        return {"info_hash": h, "name": name, "state": "DOWNLOADING",
+                "progress": 0.1, "down_rate": 0, "eta": None,
+                "priority": 1, "save_path": "", "selected_files": []}
+
+    pane = DownloadsPane()
+    pane.set_tasks([mk_task("a" * 40, "task-A"), mk_task("b" * 40, "task-B")])
+    idx0 = pane.tree.model().index(0, COL_NAME)
+    pane.tree.selectionModel().select(
+        idx0, QItemSelectionModel.SelectionFlag.Select
+        | QItemSelectionModel.SelectionFlag.Rows)
+    pane.set_tasks([mk_task("a" * 40, "task-A"),
+                    mk_task("b" * 40, "task-B")])   # 模拟 700ms 状态轮询刷新
+    sel = pane.selected_task() or {}
+    check(sel.get("name") == "task-A",
+          "set_tasks 全量刷新后选中保持（P0-2：700ms 轮询不再清掉选中）")
+    check("task-A" in pane.details.text(),
+          "刷新后详情区显示选中任务（不再退回「选择任务查看详情」）")
 
     # ---------------------------------------------------------------- [5] 清理
     print("\n[5] 收尾")

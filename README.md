@@ -153,19 +153,19 @@ magnet-viewer/
 
 | 验证项 | 结果 |
 |--------|------|
-| `contract_check.py`：对外契约自检（23 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist·session·registry·taskops·resolver·preview 签名 / states·registry 常量取值 / TaskRecord 字段集 / fetcher 别名全 property 结构 / R-4 UI 无私有直写 / CACHE_MARKER 常量）—— **156 项通过** | 通过（秒级，不启会话） |
+| `contract_check.py`：对外契约自检（23 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist·session·registry·taskops·resolver·preview 签名 / states·registry 常量取值 / TaskRecord 字段集 / fetcher 别名全 property 结构 / R-4 UI 无私有直写 / CACHE_MARKER 常量）—— **157 项通过** | 通过（秒级，不启会话） |
 | `persist_test.py`：**第一阶段持久化专项**（假依赖，不启会话/不联网）——纯函数路径卫生、任务清单原子写与失败不扩散、fastresume 请求/归属、退出清理（有界等待·幂等重发·临时键 tmp-<id> 不再掀翻 drain）、启动恢复九组（无 resume / resume 有效 / resume 损坏 / .torrent / 来源失效 / add 失败 / 暂停·停止·完成 / 元数据就绪 / 目录冲突）、Facade 委托接线 —— **91 项通过** | 通过（1.6s） |
 | `session_test.py`：第二阶段会话核心专项（假依赖）——会话配置纯函数 / start 端口冲突回退与恢复异常不阻断 / 代理限速热更新 / shutdown 四步（remove_torrent(handle,0) 绝不删用户数据·有界 join·drain 恰一次）/ 五类告警分发 / per-task 看门狗（记录级超时·四态过滤·文案取数 D5）/ sweep 节流 / alert 循环整批韧性 / Facade 真接线 —— **78 项通过** | 通过（0.7s） |
 | `registry_test.py`：第三阶段注册表与锁归属专项——hash_key/ih_from_params 纯函数 / put_record 让位与别名 / 焦点换代 / find_record 双重匹配 / detach 三件套 / **R-1 锁探针（try-acquire + property spy + 4 线程×500 轮并发；_emit_error 端到端）** / preview_dir / Facade property 单源 —— **47 项通过** | 通过（0.3s） |
 | `taskops_test.py`：第四阶段任务 CRUD 专项（假句柄+真注册表）——入参防御 / D10 转正两入口 / activate 调用序列 / 优先级·暂停·恢复（看门狗重启）/ remove 的 delete_files 两分支与 D9 守卫 / **R-3 锁探针：handle.status() 出锁派生** / tasks() 派生字段 / Facade 7 API 路由 —— **62 项通过** | 通过（0.2s） |
 | `resolver_test.py`：第五阶段解析编排专项（假会话）——begin_resolve 换代四分支 / gen 代次自弃 / .torrent 与磁力链两入口（upload_mode·bootstrap tracker 注入·快路径）/ connect_peer 超时与 task_id 定位 / 元数据就绪链（READY·DOWNLOADING·保持 PAUSED·幂等·失败 FAILED）/ 完成链 D3 分叉 / result_from_torrent_info（P0-1/P0-2 防回归）/ Facade —— **55 项通过** | 通过（0.4s） |
 | `preview_test.py`：第五阶段预览桥专项（假句柄）——磁盘路径反查（分隔符归一）/ PieceMap 透传 / demand 区间钳制与除零防线 / **P1-8 语义：不可判定→None/False 绝不整文件可用** / status 同源一次扫描·一致快照·降级 / Facade 8 入口路由 —— **34 项通过** | 通过（0.2s） |
-| `smoke_test.py`：解析 / **本地种子注入 cache_dir** / 路径穿越防护 / bencode 防御（深度炸弹·超长整数·超长长度字段） / 鉴权（无 token·伪造 Host → 403） / Range 流服务 / 前缀钳制 / **中文·特殊字符文件名往返** / 分块级可用性 / 尾部索引窗口 / **点播+等待** / **代理配置映射（含 tracker 重置）** / **会话启动参数** / **限速与日志开关接线** / **缓存配额 LRU（保护名单·limit=0·散落文件）** / 模块导入 | 通过 |
+| `smoke_test.py`：解析 / **本地种子注入 cache_dir** / 路径穿越防护 / bencode 防御（深度炸弹·超长整数·超长长度字段） / 鉴权（无 token·伪造 Host → 403） / Range 流服务 / 前缀钳制 / **中文·特殊字符文件名往返** / 分块级可用性 / 尾部索引窗口 / **点播+等待** / **不可判定不降级（pieces_cb 未命中 → 503，绝不喂稀疏零数据，REVIEW-2026-09 P0-4）** / **代理配置映射（含 tracker 重置）** / **会话启动参数** / **限速与日志开关接线** / **缓存配额 LRU（保护名单·limit=0·散落文件）** / 模块导入 | 通过 |
 | `local_magnet_test.py`：磁力链 → 元数据 → 单文件顺序下载 | 通过（元数据 1.0s、info_hash 一致、900 KB 缓冲至 100%、磁盘字节数一致） |
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
 | `qt_stream_open_test.py`（QMediaPlayer FFmpeg 后端 offscreen 实测，依赖同上） | 通过：A 仅头部→`FormatError`（即用户遇到的 moov atom not found）；B 头+尾+按需补拉→`LoadedMedia` 成功开播；C 全量→成功 |
 | GUI 无头启动 | 通过（主窗口构造、会话与流服务启动、退出码 0） |
-| `gui_feature_test.py`（offscreen 实测 40 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** |
+| `gui_feature_test.py`（offscreen 实测 46 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** / **评审 P0 防回归（添加下载对话框 priority() 可调用 · 下载页 700ms 刷新后选中与详情保持）** |
 | `single_file_test.py`：单文件种子 × 本地种子/磁力链两条入口 | 通过（12/12）：路径层级、`file_disk_path` 落点、流服务按 `f.path` 供给 206（目录隔离后断言随 `.preview/<ih>/` 布局更新，接口未变） |
 | `local_torrent_test.py`：本地 .torrent 闭环 | 通过（9/9）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
 | `hybrid_v2_test.py`：**入口矩阵混合 v2 列补齐**（P0-2/P1-1 防回归）：默认产种（meta version=2）× 本地 .torrent / 磁力链两条入口 | 通过（19/19）：造种自检 parser hash==lt.info_hash()（SHA-256 截断 20 字节）、两入口 info_hash 与造种端一致、多文件层级 root/inner、预览下载完成、流服务 206、纯 v2 明确 ValueError（剥 files 键构造）|

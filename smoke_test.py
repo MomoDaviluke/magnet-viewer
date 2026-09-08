@@ -530,6 +530,20 @@ def main():
     srv2.shutdown()
     print("[3b] 前缀钳制通过：200 钳制 / 206 前缀内 / 416 超界 / 503 未就绪")
 
+    # 可用性「不可判定」绝不降级为整文件服务（REVIEW-2026-09 P0-4 防回归）：
+    # pieces_cb 在场但反查不命中（恒返 None）→ 必须 503，而不是 206+稀疏零数据
+    srv_nd = StreamServer(cache, pieces_cb=lambda p: None, wait_timeout=0.2)
+    srv_nd.start()
+    url_nd = srv_nd.url_for(rel)
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            url_nd, headers={"Range": "bytes=0-1023"}), timeout=5)
+        raise AssertionError("pieces_cb 不可判定时应当返回 503，而不是吐零数据")
+    except urllib.error.HTTPError as e:
+        assert e.code == 503, e.code
+    srv_nd.shutdown()
+    print("[3b1] 不可判定不降级通过：pieces_cb 未命中 → 503（绝不喂稀疏零数据）")
+
     # 中文 / 特殊字符文件名端到端往返（真实种子极常见）
     cache_cn = os.path.join(tmp, "cacheCN")
     os.makedirs(os.path.join(cache_cn, "剧集 第一季"), exist_ok=True)

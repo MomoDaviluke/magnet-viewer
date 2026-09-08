@@ -581,8 +581,10 @@ class MainWindow(QMainWindow):
 
         优先级：①下载任务文件（按磁盘路径反查任务句柄，分块级可用）；
         ②已解析预览/画廊文件（_path_to_file 映射）。两者都查不到 → None
-        （流服务按静态整文件服务，仅用于已完成的受管文件；下载中任务
-        必定命中①，绝不会被当作整文件喂零数据）。
+        =「无法判定可用性」→ 流服务回 503（2026-09-08 起：旧逻辑把查不到
+        当「已完成的受管文件按静态整文件服务」，但反查失败 ≠ 已下载完，
+        下载中文件反查失败会被喂稀疏零数据，实证见 REVIEW-2026-09.md
+        P0-4；恪守 P1-8 语义：不可判定绝不降级为整文件可用）。
         """
         pm = self.session.piece_map_for_path(disk_path)
         if pm is not None:
@@ -590,14 +592,14 @@ class MainWindow(QMainWindow):
         key = os.path.normpath(disk_path)
         f = self._path_to_file.get(key)
         if f is None:
-            # 未命中 → 流服务降级为「按整文件服务」。若该文件仍在下载中，
-            # 会把未下载的稀疏零数据喂给播放器（历史 P3-2 缺陷的同一机制）。
-            # 此前此处完全静默，是排查该缺陷耗时过长的直接原因，必须留痕。
+            # 未命中 → 不可判定，流服务回 503 让客户端稍后重试。若该文件
+            # 仍在下载中而被当整文件服务，会把未下载的稀疏零数据喂给播放器
+            # （历史 P3-2 缺陷的同一机制）。此告警必须留痕。
             if key not in self._map_miss_warned:
                 self._map_miss_warned.add(key)
                 log_warning("main_window.pieces_map.miss",
-                            f"分块映射未命中：{disk_path} —— 将按整文件服务，"
-                            f"若仍在下载中会把稀疏零数据喂给播放器")
+                            f"分块映射未命中：{disk_path} —— 将按不可用处理"
+                            f"（503），不再降级为整文件服务")
             return None
         pl = self.session.piece_length()
         if not pl:

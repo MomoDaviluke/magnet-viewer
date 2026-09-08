@@ -11,7 +11,7 @@ pause/resume/remove/priority↑↓/opendir/openpreview。
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QItemSelectionModel, Signal
 from PySide6.QtGui import (QColor, QPalette, QStandardItem,
                            QStandardItemModel)
 from PySide6.QtWidgets import (QApplication, QLabel, QMenu, QMessageBox,
@@ -179,14 +179,41 @@ class DownloadsPane(QWidget):
     # ---------- 外部接口（联调层调用） ----------
 
     def set_tasks(self, tasks: list[dict]):
-        """全量刷新任务列表（进度/速度由外部轮询注入，重建行）。"""
+        """全量刷新任务列表（进度/速度由外部轮询注入，重建行）。
+
+        主窗口状态定时器每 700ms 调一次本方法。QStandardItemModel 重建会
+        连带清掉选中/滚动位置——不恢复的话选中项每 0.7s 丢一次，详情区与
+        右键菜单形同虚设（REVIEW-2026-09 P0-2）。因此：
+        ① 右键菜单等弹窗打开期间跳过刷新（避免菜单引用的 index 失效）；
+        ② 重建前记录选中任务的 info_hash 与滚动位置，重建后按 hash 恢复。
+        """
+        if QApplication.activePopupWidget() is not None:
+            return
         self._tasks = list(tasks or [])
+        sel_hash = (self.selected_task() or {}).get("info_hash")
+        bar = self.tree.verticalScrollBar()
+        scroll_pos = bar.value()
+
         self._model.removeRows(0, self._model.rowCount())
         for task in self._tasks:
             self._append_row(task)
         page = 1 if self._tasks else 0
         if self._stack.currentIndex() != page:
             self._stack.setCurrentIndex(page)
+
+        if sel_hash:
+            root = self._model.invisibleRootItem()
+            for r in range(root.rowCount()):
+                it = root.child(r, 0)
+                t = it.data(Qt.UserRole) if it is not None else None
+                if t and t.get("info_hash") == sel_hash:
+                    idx = self._model.index(r, COL_NAME)
+                    self.tree.selectionModel().select(
+                        idx, QItemSelectionModel.SelectionFlag.Select
+                        | QItemSelectionModel.SelectionFlag.Rows)
+                    break
+        if scroll_pos:
+            bar.setValue(scroll_pos)
         self._update_details()
 
     def tasks(self) -> list[dict]:
