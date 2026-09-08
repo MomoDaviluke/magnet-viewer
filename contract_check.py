@@ -82,13 +82,14 @@ def main() -> int:
     print("=== 对外契约自检（fetcher 重构安全网）===\n")
 
     # ------------------------------------------------ [1] SessionManager 公开方法
-    print("[1] SessionManager 公开方法签名（22 项，基线 2026-09-07）")
+    print("[1] SessionManager 公开方法签名（23 项，基线 2026-09-07 + 阶段 6 R-4）")
     SESSION_SIG = {
         # 生命周期
         "start": [("proxy", True), ("metadata_timeout", True)],
         "shutdown": [],
         "apply_proxy": [("proxy", False)],
         "apply_rate_limit": [("kbps", False)],
+        "apply_metadata_timeout": [("seconds", False)],
         "protected_dirs": [],
         # 解析入口（契约 #1 / #4）
         "resolve": [("source", False)],
@@ -135,6 +136,14 @@ def main() -> int:
                  "cache_dir", "_handle", "on_metadata", "on_error",
                  "on_file_completed"):
         check(hasattr(mgr, name), f"实例属性 {name} 存在（外部直访依赖）")
+    # R-4（阶段 6 收编）：UI 不再直写私有 _metadata_timeout —— 源码级冻结，
+    # 谁改回去这里就红。_metadata_timeout 兼容 property 仍保留（测试直读）。
+    import io as _io
+    mw = _io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "ui", "main_window.py"),
+                  encoding="utf-8").read()
+    check("._metadata_timeout" not in mw,
+          "ui/main_window.py 无私有成员直写（R-4：走 apply_metadata_timeout）")
 
     # ------------------------------------------------ [4] 协作模块契约
     print("\n[4] 协作模块签名（拆 fetcher 时的误伤防线）")

@@ -362,6 +362,10 @@ def section_facade(ck):
     mgr._torrents[IH] = rec
     ck.check(reg.torrents.get(IH) is rec, "写入代理本体后 registry 侧可见（单源）")
     mgr._torrents.pop(IH, None)
+    # R-4（阶段 6）：公开方法写超时，与直写 property 同源生效
+    mgr.apply_metadata_timeout(5.5)
+    ck.check(mgr.metadata_timeout == 5.5 and reg.metadata_timeout == 5.5,
+             "apply_metadata_timeout 落 registry 单源（R-4 收编）")
 
     # R-1 端到端：_emit_error 的 resolving 写经过锁
     reg = mgr._registry

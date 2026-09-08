@@ -46,7 +46,12 @@ magnet-viewer/
 ├── main.py               # 入口
 ├── core/
 │   ├── parser.py         # bencode 编解码（含大小/深度/整数 DoS 上限）+ .torrent / magnet 解析
-│   ├── fetcher.py        # libtorrent 会话管理（元数据获取、超时看门狗、代理、资源清理）
+│   ├── fetcher.py        # SessionManager Facade：组装下述 6 服务 + 薄委托 + 兼容别名
+│   ├── registry.py       # 任务注册表与单锁归属：TaskRecord / 锁 / torrents+tasks / 当前别名组
+│   ├── session.py        # libtorrent 会话生命周期：配置构造/端口回退/代理限速热更新/告警循环/per-task 超时看门狗/退出清理
+│   ├── resolver.py       # 解析编排：resolve 两入口/换代防竞态/connect_peer/元数据就绪与完成告警链
+│   ├── taskops.py        # 下载任务 CRUD：添加/转正/激活/暂停恢复/优先级/移除(守卫删文件)/tasks() 快照(出锁派生)
+│   ├── preview.py        # 预览桥：磁盘路径反查→PieceMap→点播补拉 / have_piece / status 快照
 │   ├── scheduler.py      # 预览调度：单文件锁定 + 顺序分块 + 索引块优先 + 按需补拉
 │   ├── stream_server.py  # 本地 HTTP 流服务（127.0.0.1 + Range + token/Host 鉴权）
 │   ├── cache_guard.py    # 缓存目录守卫（防误删用户数据目录）
@@ -67,6 +72,13 @@ magnet-viewer/
 ├── REVIEW.md             # 上一轮全面审查报告（含修复记录）
 ├── audit_report.md       # 本轮团队全面审查报告与修复进度
 ├── contract_check.py     # 对外契约自检（秒级，重构 fetcher 的安全网）
+├── persist_test.py       # 持久化专项（假依赖，秒级）
+├── session_test.py       # 会话核心专项（假依赖，秒级）
+├── registry_test.py      # 注册表与锁归属专项（含 R-1 锁探针，秒级）
+├── taskops_test.py       # 任务 CRUD 专项（含 R-3 出锁派生探针，秒级）
+├── resolver_test.py      # 解析与元数据编排专项（假会话，秒级）
+├── preview_test.py       # 预览桥与状态专项（假句柄，秒级）
+├── regression_run.py     # 一键回归（15 套）
 ├── smoke_test.py         # 无 GUI 冒烟测试（python smoke_test.py）
 ├── local_magnet_test.py  # 本机闭环验证：做种端 + 磁力链解析 + 边下边播（无需外网）
 ├── moov_stream_test.py   # moov 尾部优先端到端验证（ffprobe/ffmpeg 实际探测，无 GUI）
@@ -81,8 +93,13 @@ magnet-viewer/
 
 | 验证项 | 结果 |
 |--------|------|
-| `contract_check.py`：对外契约自检（25 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist 签名 / states 常量取值 / CACHE_MARKER 常量）—— **91 项通过** | 通过（秒级，不启会话） |
+| `contract_check.py`：对外契约自检（23 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist·session·registry·taskops·resolver·preview 签名 / states·registry 常量取值 / TaskRecord 字段集 / fetcher 别名全 property 结构 / R-4 UI 无私有直写 / CACHE_MARKER 常量）—— **156 项通过** | 通过（秒级，不启会话） |
 | `persist_test.py`：**第一阶段持久化专项**（假依赖，不启会话/不联网）——纯函数路径卫生、任务清单原子写与失败不扩散、fastresume 请求/归属、退出清理（有界等待·幂等重发·临时键 tmp-<id> 不再掀翻 drain）、启动恢复九组（无 resume / resume 有效 / resume 损坏 / .torrent / 来源失效 / add 失败 / 暂停·停止·完成 / 元数据就绪 / 目录冲突）、Facade 委托接线 —— **91 项通过** | 通过（1.6s） |
+| `session_test.py`：第二阶段会话核心专项（假依赖）——会话配置纯函数 / start 端口冲突回退与恢复异常不阻断 / 代理限速热更新 / shutdown 四步（remove_torrent(handle,0) 绝不删用户数据·有界 join·drain 恰一次）/ 五类告警分发 / per-task 看门狗（记录级超时·四态过滤·文案取数 D5）/ sweep 节流 / alert 循环整批韧性 / Facade 真接线 —— **78 项通过** | 通过（0.7s） |
+| `registry_test.py`：第三阶段注册表与锁归属专项——hash_key/ih_from_params 纯函数 / put_record 让位与别名 / 焦点换代 / find_record 双重匹配 / detach 三件套 / **R-1 锁探针（try-acquire + property spy + 4 线程×500 轮并发；_emit_error 端到端）** / preview_dir / Facade property 单源 —— **47 项通过** | 通过（0.3s） |
+| `taskops_test.py`：第四阶段任务 CRUD 专项（假句柄+真注册表）——入参防御 / D10 转正两入口 / activate 调用序列 / 优先级·暂停·恢复（看门狗重启）/ remove 的 delete_files 两分支与 D9 守卫 / **R-3 锁探针：handle.status() 出锁派生** / tasks() 派生字段 / Facade 7 API 路由 —— **62 项通过** | 通过（0.2s） |
+| `resolver_test.py`：第五阶段解析编排专项（假会话）——begin_resolve 换代四分支 / gen 代次自弃 / .torrent 与磁力链两入口（upload_mode·bootstrap tracker 注入·快路径）/ connect_peer 超时与 task_id 定位 / 元数据就绪链（READY·DOWNLOADING·保持 PAUSED·幂等·失败 FAILED）/ 完成链 D3 分叉 / result_from_torrent_info（P0-1/P0-2 防回归）/ Facade —— **55 项通过** | 通过（0.4s） |
+| `preview_test.py`：第五阶段预览桥专项（假句柄）——磁盘路径反查（分隔符归一）/ PieceMap 透传 / demand 区间钳制与除零防线 / **P1-8 语义：不可判定→None/False 绝不整文件可用** / status 同源一次扫描·一致快照·降级 / Facade 8 入口路由 —— **34 项通过** | 通过（0.2s） |
 | `smoke_test.py`：解析 / **本地种子注入 cache_dir** / 路径穿越防护 / bencode 防御（深度炸弹·超长整数·超长长度字段） / 鉴权（无 token·伪造 Host → 403） / Range 流服务 / 前缀钳制 / **中文·特殊字符文件名往返** / 分块级可用性 / 尾部索引窗口 / **点播+等待** / **代理配置映射（含 tracker 重置）** / **会话启动参数** / **限速与日志开关接线** / **缓存配额 LRU（保护名单·limit=0·散落文件）** / 模块导入 | 通过 |
 | `local_magnet_test.py`：磁力链 → 元数据 → 单文件顺序下载 | 通过（元数据 1.0s、info_hash 一致、900 KB 缓冲至 100%、磁盘字节数一致） |
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
@@ -95,7 +112,7 @@ magnet-viewer/
 | `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python live_test.py` 复核。 |
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
-> 一键回归：`python regression_run.py`（10 套：`contract_check` 契约自检 + `persist_test` 持久化专项 + 7 套旧测试 + 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
+> 一键回归：`python regression_run.py`（15 套：`contract_check` 契约自检 + 6 套重构专项（persist/session/registry/taskops/resolver/preview，假依赖秒级）+ 7 套旧测试 + 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
 > 测试覆盖策略：按**数据入口路径**（本地种子 / 磁力链；单文件 / 多文件 / 混合 v2）铺排，而非仅按功能模块——历史上三个缺陷都源于同一功能的不同入口未各自覆盖。详见 `REVIEW.md`。
 
 ## 已修复问题
@@ -120,7 +137,7 @@ magnet-viewer/
 
 - **冷门资源**：磁力链必须存在在线 Peer 才能拿到元数据；0 做种资源会超时（默认 90 秒）。这是协议本质限制。
 - **种子版本**：支持 v1 与 v1+v2 混合种子（BEP-52），info_hash 分别按 SHA-1 / SHA-256 计算。**纯 v2 种子**（仅含 `file tree`）暂不支持，解析时会给出明确提示。
-- **纯函数测试缺失**：当前测试以集成测试为主（需启 libtorrent 会话）。纯函数（路径净化、尾部窗口、代理映射等）的快速单元测试尚在完善中。
+- **纯函数单元测试**：六个重构专项（persist/session/registry/taskops/resolver/preview，共 367 项）以假依赖覆盖纯函数与分支路径，不启会话、秒级完成；混合 v2 × 两条入口的端到端矩阵仍待补（见 REVIEW.md §四）。
 - **安全边界**：程序只对本地 127.0.0.1 提供服务，且所有请求路径受 `safe_rel_path()` + `_is_within()` 双重约束，不会读取或写出缓存目录之外的文件。但它仍是常规的 BT 客户端，元数据与分块来自不可信的 Peer——解析结果只用于展示，请勿据此直接打开或执行下载到的文件。
 - **流式格式**：MKV 与 faststart MP4 体验最佳；moov 在尾部的普通 MP4 会先补拉尾部索引块（约 4 MB，开播慢几秒），索引就绪后即可边下边播；AVI/WMV 依赖系统解码器，可能无法播放。
 - **边下边播会下载被预览的那个文件的分块**（不是整个资源）；「查看文件清单」仍然零下载。

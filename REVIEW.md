@@ -260,7 +260,7 @@ libtorrent v2 (sha256) = be6e569594449b4151b1829c08725cf1fd80bfa162a7d33ba33f7a5
 5. **P1-2 日志系统 + 高危异常改造**
    - ✅ 日志设施 `core/logutil.py`（滚动 1 MB×3，线程安全，可关闭，绝不因日志自身抛异常）
    - ✅ 63 处 `except` 已接入日志；原报告点名的 8 处高危点覆盖 7 处
-   - 🟡 剩 42 处仍静默（多为新增下载模块代码）
+   - ✅ 重构收口后复测（AST 逐块，2026-09-07）：核心链路 fetcher/registry/resolver/preview/scheduler **零静默**；全项目有日志/转抛 72 处，仍静默 44 处——集中在外围与合理场景（logutil 自身的「绝不因日志抛异常」设计、stream_server 播放器断连等预期异常、taskstore/cache_quota 纯函数防御、UI 渲染吞异常），高危路径已无死角
    - ✅ `main_window._pieces_map` 未命中告警已补（含按路径节流，避免每请求刷屏）
 6. **P1-3 shutdown 加锁与 join** — ✅ 已完成（加锁 + 落盘 tasks/fastresume + join）
 

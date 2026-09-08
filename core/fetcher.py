@@ -110,8 +110,9 @@ class SessionManager:
 
         # 会话核心（阶段 2 抽出）：会话构造/热更新/退出清理/告警循环/看门狗。
         # 与 persist 同一套注入约定：宿主成员（_ses/_running/_thread/…）经
-        # getter/setter 闭包读写，session 不反向依赖本类；_metadata_timeout 等
-        # UI/测试直访的属性仍留在宿主上（兼容决策）。
+        # getter/setter 闭包读写，session 不反向依赖本类；_metadata_timeout
+        # 兼容 property 留在宿主（contract [3] 冻结的直读依赖；UI 写路径
+        # 自阶段 6 起走公开方法 apply_metadata_timeout，R-4 收编）。
         self._sess = SessionCore(SessionDeps(
             listen_port=self.listen_port, active_downloads=self._active_downloads,
             lock=self._lock,
@@ -260,6 +261,13 @@ class SessionManager:
     @property
     def metadata_timeout(self) -> float:
         return self._metadata_timeout
+
+    def apply_metadata_timeout(self, seconds: float) -> None:
+        """运行时更新元数据超时（秒）。热生效：看门狗每轮读会话级值。
+
+        R-4（P2-10 收编）：UI 经本方法更新，不再直写私有成员。
+        """
+        self._registry.metadata_timeout = float(seconds)
 
     @property
     def download_dir(self) -> str:

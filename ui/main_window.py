@@ -237,7 +237,8 @@ class MainWindow(QMainWindow):
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             # 代理与超时立即生效（缓存目录重启生效）
             self.session.apply_proxy(self.cfg.proxy())
-            self.session._metadata_timeout = float(self.cfg.get("metadata_timeout"))
+            self.session.apply_metadata_timeout(
+                float(self.cfg.get("metadata_timeout")))
             # 限速与日志开关：保存即热更新，无需重启
             self.session.apply_rate_limit(int(self.cfg.get("download_rate_limit") or 0))
             logutil.set_enabled(bool(self.cfg.get("logging_enabled")))
