@@ -1,4 +1,4 @@
-"""9 套测试回归运行器：一键全量回归，汇总退出码。
+"""16 套测试回归运行器：一键全量回归，汇总退出码。
 
 依据 README.md 退出码约定与 t4_acceptance_plan.md 回归契约（D4）：
 下载管理模块改造后必须保证 7 套旧测试全绿（0=通过 / 1=失败 / 2=SKIP）。
@@ -9,7 +9,7 @@
 末套 `download_mgr_test` 为下载管理模块验收（约 2 分钟，含本机做种闭环）。
 
 用法：
-    python regression_run.py            # 全量 9 套
+    python regression_run.py            # 全量 16 套
     python regression_run.py smoke      # 单套（按名字前缀匹配）
 
 退出码：任一测试 FAIL(1) → 本脚本退出 1；全部通过(0) → 0；
@@ -38,6 +38,7 @@ SUITES = [
     "local_magnet_test",
     "local_torrent_test",
     "single_file_test",
+    "hybrid_v2_test",     # 入口矩阵补齐：混合 v2 × 本地种子/磁力链两入口
     "gui_feature_test",
     "moov_stream_test",
     "qt_stream_open_test",

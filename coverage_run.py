@@ -2,7 +2,7 @@
 
 用法：
     python coverage_run.py            # 快速集（假依赖专项 + 秒级套件）
-    python coverage_run.py full       # 全量 15 套（约 3~4 分钟，含端到端）
+    python coverage_run.py full       # 全量 16 套（约 3~4 分钟，含端到端）
 
 实现要点：测试经 `python -m coverage run` 逐个拉起（run_one 本就是
 subprocess，进程内钩子方案会漏采——coverage run 直接当入口最稳）；

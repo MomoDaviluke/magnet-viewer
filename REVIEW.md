@@ -212,10 +212,12 @@ libtorrent v2 (sha256) = be6e569594449b4151b1829c08725cf1fd80bfa162a7d33ba33f7a5
 
 | 入口 | 单文件种子 | 多文件种子 | 混合 v2 种子 |
 |------|-----------|-----------|-------------|
-| 本地 `.torrent` | ❌ 缺失（P0-1） | ✅ `local_torrent_test.py` | ❌ 缺失（P0-2） |
-| 磁力链 | ❌ 缺失（P0-1） | ✅ `local_magnet_test.py` | ❌ 缺失（P0-2） |
+| 本地 `.torrent` | ✅ `single_file_test.py` | ✅ `local_torrent_test.py` | ✅ `hybrid_v2_test.py` |
+| 磁力链 | ✅ `single_file_test.py` | ✅ `local_magnet_test.py` | ✅ `hybrid_v2_test.py` |
 
-本轮已新增 `single_file_test.py`（覆盖单文件 × 两条入口）。建议补齐混合 v2 一列。
+矩阵已补齐（2026-09-07）：`single_file_test.py` 覆盖单文件 × 两条入口；
+`hybrid_v2_test.py` 覆盖混合 v2 × 两条入口（19 项，含纯 v2 明确报错断言），
+均入 `regression_run.py`（现 16 套）。
 
 **2. 补充确定性单元测试**
 

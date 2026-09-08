@@ -81,7 +81,8 @@ magnet-viewer/
 ├── taskops_test.py       # 任务 CRUD 专项（含 R-3 出锁派生探针，秒级）
 ├── resolver_test.py      # 解析与元数据编排专项（假会话，秒级）
 ├── preview_test.py       # 预览桥与状态专项（假句柄，秒级）
-├── regression_run.py     # 一键回归（15 套）
+├── hybrid_v2_test.py     # 入口矩阵混合 v2 列（两入口端到端）
+├── regression_run.py     # 一键回归（16 套）
 ├── smoke_test.py         # 无 GUI 冒烟测试（python smoke_test.py）
 ├── local_magnet_test.py  # 本机闭环验证：做种端 + 磁力链解析 + 边下边播（无需外网）
 ├── moov_stream_test.py   # moov 尾部优先端到端验证（ffprobe/ffmpeg 实际探测，无 GUI）
@@ -111,12 +112,13 @@ magnet-viewer/
 | `gui_feature_test.py`（offscreen 实测 40 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** |
 | `single_file_test.py`：单文件种子 × 本地种子/磁力链两条入口 | 通过（12/12）：路径层级、`file_disk_path` 落点、流服务按 `f.path` 供给 206（目录隔离后断言随 `.preview/<ih>/` 布局更新，接口未变） |
 | `local_torrent_test.py`：本地 .torrent 闭环 | 通过（9/9）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
+| `hybrid_v2_test.py`：**入口矩阵混合 v2 列补齐**（P0-2/P1-1 防回归）：默认产种（meta version=2）× 本地 .torrent / 磁力链两条入口 | 通过（19/19）：造种自检 parser hash==lt.info_hash()（SHA-256 截断 20 字节）、两入口 info_hash 与造种端一致、多文件层级 root/inner、预览下载完成、流服务 206、纯 v2 明确 ValueError（剥 files 键构造）|
 | `download_mgr_test.py`：下载管理模块验收（MVP 7 + 增强 2 + 边界 5 + 流服务安全） | **通过（80/80，退出码 0）**：添加磁力链→下载中 / 暂停（5s 磁盘字节快照不变）/ 恢复（**进度续增**为主判据——暂停快照可能已因分块乱序到达而等于全长，此时字节数本就无法再增，故字节续增降级为条件断言）/ 删除任务（目录释放、重添无残留）/ 退出重启续传（`.tasks.json`+fastresume 读回、上传增量证不重下）/ 完成（落盘=声明值）/ 双任务并发 100% / 限速 ±20% / 边界（重复 hash·per-task 看门狗·防穿越·resume 损坏重建·缓存被清不崩溃）/ 下载中任务流服务安全（分块级可用性，绝不整文件喂零数据） |
 | `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python live_test.py` 复核。 |
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
-> 一键回归：`python regression_run.py`（15 套：`contract_check` 契约自检 + 6 套重构专项（persist/session/registry/taskops/resolver/preview，假依赖秒级）+ 7 套旧测试 + 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
-> 覆盖率报告：`python coverage_run.py`（快速集，秒级）/ `coverage_run.py full`（全量 15 套）——coverage.py 接入，只报告不设门禁；基线（2026-09-07 快速集）：registry 97% / preview 94% / session 95% / persist 90% / resolver 88% / fetcher 85%。
+> 一键回归：`python regression_run.py`（16 套：`contract_check` 契约自检 + 6 套重构专项（persist/session/registry/taskops/resolver/preview，假依赖秒级）+ 8 套旧测试（含混合 v2 入口矩阵）+ 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
+> 覆盖率报告：`python coverage_run.py`（快速集，秒级）/ `coverage_run.py full`（全量 16 套）——coverage.py 接入，只报告不设门禁；基线（2026-09-07 快速集）：registry 97% / preview 94% / session 95% / persist 90% / resolver 88% / fetcher 85%。
 > 测试覆盖策略：按**数据入口路径**（本地种子 / 磁力链；单文件 / 多文件 / 混合 v2）铺排，而非仅按功能模块——历史上三个缺陷都源于同一功能的不同入口未各自覆盖。详见 `REVIEW.md`。
 
 ## 已修复问题
