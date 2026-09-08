@@ -26,6 +26,7 @@ from ui.file_tree import FileTreeWidget
 from ui.preview_pane import PreviewPane
 from ui.settings_dialog import SettingsDialog
 from ui.status_panel import StatusPanel
+from ui.theme import TEXT_MUTED
 
 TAB_FILES, TAB_PREVIEW, TAB_DOWNLOADS = 0, 1, 2
 
@@ -113,6 +114,7 @@ class MainWindow(QMainWindow):
         self.preview.stop_requested.connect(self._stop_preview)
         self.preview.to_download_requested.connect(self._preview_to_download)
         self.preview.video.seek_requested.connect(self._on_seek)
+        self.preview.video.scrub_preview.connect(self._on_scrub_preview)
         self.preview.video.stream_failed.connect(self._on_stream_failed)
         self.preview.gallery.file_requested.connect(self._on_gallery_file)
         # 下载页信号接线
@@ -172,6 +174,7 @@ class MainWindow(QMainWindow):
         self.input.setPlaceholderText("粘贴 magnet:?xt=urn:btih:... 磁力链接，或点击右侧按钮选择 .torrent 文件")
         self.btn_open = QPushButton("打开种子文件…")
         self.btn_resolve = QPushButton("解析")
+        self.btn_resolve.setObjectName("primary")
         self.btn_open.clicked.connect(self._pick_torrent)
         self.btn_resolve.clicked.connect(self._resolve_input)
         self.input.returnPressed.connect(self._resolve_input)
@@ -196,7 +199,7 @@ class MainWindow(QMainWindow):
                                "磁力链元数据获取超时 {} 秒。")
         self.hint.setText(
             self._hint_template.format(int(self.session.metadata_timeout)))
-        self.hint.setStyleSheet("color:#777; font-size:12px;")
+        self.hint.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
         root.addWidget(self.hint)
 
         # 页签
@@ -501,6 +504,16 @@ class MainWindow(QMainWindow):
         if self._preview_file is not None and self._preview_file.is_video:
             self.session.scheduler.seek_to_byte(byte_offset)
 
+    def _on_scrub_preview(self, byte_offset: int):
+        """拖动中预取：目标区间先点播，松手前数据已在路上。
+
+        request_range 自带 60 块上限，预取 4MB 足够开播解码；
+        误预取（拖过又拖回）由下次 seek 的 clear_piece_deadlines 回收。
+        """
+        if self._preview_file is not None and self._preview_file.is_video:
+            self.session.scheduler.request_range(
+                byte_offset, byte_offset + 4 * 1024 * 1024)
+
     def _on_gallery_file(self, f):
         """画廊中切换到未下载的图片 → 按需下载该文件。"""
         if f is None or f == self._preview_file:
@@ -554,12 +567,28 @@ class MainWindow(QMainWindow):
         self.session.scheduler.request_range(start, end_excl)
 
     def _refresh_status(self):
+        # 预览调度器的滚动预约窗口必须周期性驱动：它负责按播放位置（含拖动
+        # 后的 seek 位置）持续把后续分块置为最高优先级。此前仅 begin()/seek
+        # 时调用一次，窗口从不滚动，seek 点之后完全依赖流服务的点播回调。
+        try:
+            if self.session.scheduler.active:
+                self.session.scheduler.tick()
+        except Exception as e:
+            log_warning("main.scheduler.tick", f"{e}")
         st = self.session.status()
         self.status_panel.update_status(st)
         self.preview.gallery.update_status(st)
         if self._preview_file is not None and st is not None:
             self.preview.video.update_buffer(st.get("buffer", 0.0),
                                              st.get("download_rate", 0))
+            # 进度条缓冲分段着色（一次批量取块位图，见 fetcher 注释）
+            try:
+                segs = self.session.buffered_segments_of_preview()
+            except Exception as e:
+                segs = None
+                log_warning("main.buffered_segments", f"{e}")
+            if segs is not None:
+                self.preview.video.update_segments(segs)
         # 下载任务列表（700ms 轮询注入；tasks() 自带派生进度/速度/ETA）
         try:
             self.downloads.set_tasks(self.session.tasks())
@@ -602,9 +631,12 @@ class MainWindow(QMainWindow):
             # 数据仍未就绪：静默等待，不算失败次数，避免反复弹错误
             QTimer.singleShot(1500, self._retry_stream)
             return
+        # 带上出错前的位置续播：setSource 会从头开始，不带位置的话
+        # 拖动进度条后因数据未就绪报错时，用户会看到「突然从头重播」
         self.preview.video.set_stream(self._stream_url,
                                       self._preview_file.name,
-                                      self._preview_file.size)
+                                      self._preview_file.size,
+                                      resume_ms=self.preview.video.take_resume_ms())
         self._stream_attempts = 0   # 开播成功：重试计数归零，下次失败可重新重试
 
     # ---------- 关闭 ----------
