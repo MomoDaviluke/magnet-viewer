@@ -13,7 +13,7 @@ import math
 import libtorrent as lt
 
 from .logutil import log_warning
-from .models import PieceMap, contiguous_bytes
+from .models import PieceMap, contiguous_bytes, have_from_bitmap
 
 LOOKAHEAD_PIECES = 60        # 一次向前预约的分块数量
 TAIL_BYTES_MIN = 4 * 1024 * 1024   # 尾部窗口下限（覆盖常见 moov 尺寸）
@@ -72,12 +72,17 @@ class PreviewScheduler:
             except Exception as e:
                 log_warning("scheduler.request_tail", f"piece={p}: {e}")
 
+    def _have_snapshot(self):
+        """一次性位图快照 have 回调（P2-1：N 次绑定调用 → 1 次 status()）。"""
+        return have_from_bitmap(self.handle.status().pieces)
+
     def tail_ready(self) -> bool:
         """尾部索引窗口是否已全部落盘（无窗口时恒为 True）。"""
         if not self._tail_pieces or self.file is None or self.handle is None:
             return True
         try:
-            return all(self.handle.have_piece(p) for p in self._tail_pieces)
+            have = self._have_snapshot()
+            return all(have(p) for p in self._tail_pieces)
         except Exception as e:
             log_warning("scheduler.tail_ready", f"{e}")
             return False
@@ -90,9 +95,10 @@ class PreviewScheduler:
             ti = self.handle.torrent_file()
             if ti is None:
                 return 0
+            # P2-1：连续前缀扫描走一次性位图快照，不再逐块 have_piece
             pm = PieceMap(ti.piece_length(), self.file.offset,
                           self.file.start_piece, self.file.end_piece,
-                          self.file.size, self.handle.have_piece)
+                          self.file.size, self._have_snapshot())
             return contiguous_bytes(pm)
         except Exception as e:
             log_warning("scheduler.contiguous_progress", f"{e}")

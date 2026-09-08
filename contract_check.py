@@ -152,6 +152,8 @@ def main() -> int:
         "file_disk_path": [("cache_dir", False), ("f", False)],   # 契约 #7
         "human_size": [("n", False)],
         "contiguous_bytes": [("pm", False), ("limit", True)],
+        # P2-1 位图 have 工厂（流服务/scheduler/preview 三条热路径共用）
+        "have_from_bitmap": [("pieces", False)],
         "range_available": [("pm", False), ("start", False), ("end_excl", False)],
         "disk_root": [("cache_dir", False), ("save_subdir", True)],
     })

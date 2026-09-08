@@ -57,11 +57,14 @@ class FakeHandle:
         self.status_ok = status_ok
         self.file = file          # torrent_file() 替身
         self.begun = []
+        self.have_calls = 0       # P2-1：have_piece 调用计数（位图路径应为 0）
+        self.status_calls = 0     # status() 调用计数（位图路径每轮恰 1）
 
     def info_hash(self):
         return self.ih
 
     def have_piece(self, p):
+        self.have_calls += 1
         return p in self._have
 
     def set_piece_deadline(self, p, ms):
@@ -76,8 +79,10 @@ class FakeHandle:
         return self.file is not None
 
     def status(self):
+        self.status_calls += 1
         if not self.status_ok:
             raise RuntimeError("句柄失效")
+        have = self._have
 
         class S:
             # 用真枚举值作 state（STATE_NAMES 键即这些属性值，裸 int 不保证相等）
@@ -86,6 +91,9 @@ class FakeHandle:
             num_seeds = 1
             download_payload_rate = 50
             total_done = 250
+            # 真 lt2.1.1 torrent_status.pieces：与 have_piece 全一致的
+            # bitfield（实测），长度=分块总数
+            pieces = [i in have for i in range(64)]
         return S()
 
     def file_progress(self):
@@ -188,6 +196,12 @@ def section_piece_map(ck):
                  "PieceMap 透传 f1 的 offset/分块区间/大小")
         ck.check(bool(pm.have(2)) is True and bool(pm.have(1)) is False,
                  "have 回调 = 句柄 have_piece（已下 piece2 可读）")
+        # P2-1：have 判定走一次性位图快照——查询不得触发 have_piece 绑定调用
+        ck.check(h.have_calls == 0 and h.status_calls >= 1,
+                 f"P2-1 位图路径：have_piece {h.have_calls} 次（应 0）、"
+                 f"status {h.status_calls} 次（快照一次）")
+        ck.check(bool(pm.have(9999)) is False and bool(pm.have(-5)) is False,
+                 "位图越界索引 → False（不可判定按不可用，绝不误判可读）")
         ck.check(pv.piece_map_for_path(os.path.join(cache, "x")) is None,
                  "未命中 → None（pieces_cb 语义：不可判定≠可用）")
         h.file = None    # torrent_file() 抛

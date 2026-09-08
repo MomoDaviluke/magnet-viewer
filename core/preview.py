@@ -27,7 +27,7 @@ import time
 import libtorrent as lt
 
 from .logutil import log_warning
-from .models import ParseResult, PieceMap, TorrentFile
+from .models import ParseResult, PieceMap, TorrentFile, have_from_bitmap
 from .registry import TaskRecord, TaskRegistry
 
 STATE_NAMES = {
@@ -94,14 +94,15 @@ class PreviewCore:
         rec, f = hit
         handle = rec.handle
         try:
+            # 单次锁外句柄调用（P1-8：异常/缺失 → None，绝不整文件可用）
+            st = handle.status()          # P2-1：位图快照，替代逐块 have_piece
             pl = handle.torrent_file().piece_length()
         except Exception as e:
             log_warning("fetcher.piece_map.piece_length", f"{e}")
             return None
-        have = handle.have_piece
         return PieceMap(piece_length=pl, offset=f.offset,
                         start_piece=f.start_piece, end_piece=f.end_piece,
-                        size=f.size, have=have)
+                        size=f.size, have=have_from_bitmap(st.pieces))
 
     def demand_for_path(self, disk_path: str, start_byte: int,
                         end_excl: int) -> bool:

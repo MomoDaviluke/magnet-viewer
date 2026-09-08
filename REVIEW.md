@@ -268,7 +268,10 @@ libtorrent v2 (sha256) = be6e569594449b4151b1829c08725cf1fd80bfa162a7d33ba33f7a5
 
 7. **P2-1 缓冲区计算优化**
    - ✅ 已消除 `status()` 内 `contiguous` 与 `buffer` 的重复扫描（`fetcher.py:1042-1049`）
-   - 🟡 增量扫描、批量取位图未做 —— 大文件下每个 HTTP 请求仍触发一次 O(分片数) 扫描
+   - ✅ 批量取位图（2026-09-07，重构收口后）：三条热路径（流服务 piece_map、
+     scheduler contiguous/tail_ready）改 `handle.status().pieces` 一次快照 +
+     `models.have_from_bitmap` O(1) 索引，N 次绑定调用 → 1 次；preview_test
+     计数断言钉死（have_piece 恰 0 次）
 8. **P2-2 缓存上限与 LRU** — ❌ 未实现
    - 注意：`core/cache_guard.py` 是**防误删守卫**（高风险目录拒绝 + CACHE_MARKER + 保留名单），
      不是配额管理，两者勿混淆。缓存无界增长问题仍然存在。
