@@ -182,7 +182,8 @@ def main() -> int:
     sig_check("StreamServer", stream_server.StreamServer, {
         "__init__": [("base_dir", False), ("avail_cb", True),
                      ("pieces_cb", True), ("demand_cb", True),
-                     ("wait_timeout", True), ("bases", True)],
+                     ("wait_timeout", True), ("bases", True),
+                     ("max_concurrency", True)],   # P1-1 并发上限（可选，默认 16）
         "url_for": [("rel_path", False)],
     })
     sig_check("cache_guard", cache_guard, {                          # 契约 #8

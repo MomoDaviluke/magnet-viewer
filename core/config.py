@@ -6,6 +6,8 @@ import os
 
 from PySide6.QtCore import QSettings
 
+from core import secretbox
+
 RECENT_LIMIT = 15
 
 DEFAULTS: dict = {
@@ -53,11 +55,18 @@ class AppConfig:
         default = DEFAULTS[key]
         t = _TYPES.get(key, str)
         try:
-            return self.q.value(key, default, type=t)
+            v = self.q.value(key, default, type=t)
         except TypeError:
             return default
+        if key == "proxy_pass":
+            # 注册表里存的是 DPAPI 密文（dpapi:v1:…），旧明文原样返回
+            return secretbox.unprotect(str(v or ""))
+        return v
 
     def set(self, key: str, value):
+        if key == "proxy_pass":
+            # 凭据不明文落注册表（REVIEW-2026-09 P1-3）；空串不加密
+            value = secretbox.protect(str(value or ""))
         self.q.setValue(key, value)
         self.q.sync()
 

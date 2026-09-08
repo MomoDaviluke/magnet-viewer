@@ -134,9 +134,10 @@ class _StreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _respond_503(self):
-        # 数据尚未就绪：返回 503 让客户端稍后重试，而不是吐零数据
+        # 数据尚未就绪（或并发超限）：返回 503 让客户端稍后重试，而不是吐零数据
         self.send_response(503, "Buffering")
         self._security_headers()
+        self.send_header("Retry-After", "1")
         self.send_header("Retry-After", "1")
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -192,6 +193,19 @@ class _StreamHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._respond_forbidden()
             return
+        # 并发上限：ThreadingHTTPServer 每请求一线程，播放器/扫描器打过来
+        # 会无界堆线程（REVIEW-2026-09 P1-1）。超限立即 503 让客户端稍后
+        # 重试，绝不排队堆积。鉴权不占坑（403 洪泛不消耗并发额度）。
+        sem = type(self).limiter
+        if not sem.acquire(blocking=False):
+            self._respond_503()
+            return
+        try:
+            self._serve_inner(send_body)
+        finally:
+            sem.release()
+
+    def _serve_inner(self, send_body: bool):
         rel = urllib.parse.unquote(urllib.parse.urlparse(self.path).path).lstrip("/")
         roots = self.base_dirs or (os.path.normpath(self.base_dir),)
         # 绝对路径（download_dir 在缓存目录外时，url_for 携带绝对落盘路径）
@@ -315,7 +329,7 @@ class StreamServer:
 
     def __init__(self, base_dir: str, avail_cb=None, pieces_cb=None,
                  demand_cb=None, wait_timeout: float = 20.0,
-                 bases: list | None = None):
+                 bases: list | None = None, max_concurrency: int = 16):
         # 注意：直接把函数放进类字典会触发描述符协议（实例访问得到绑定方法，
         # 回调会被多传一个 self 参数）。staticmethod 的实例访问返回原函数，无此问题；
         # Python 3.13 起 functools.partial 放类字典也会有同样隐患。
@@ -326,7 +340,8 @@ class StreamServer:
                 roots.append(nb)
         attrs = {"base_dir": base_dir, "base_dirs": tuple(roots),
                  "wait_timeout": wait_timeout,
-                 "token": secrets.token_urlsafe(16)}
+                 "token": secrets.token_urlsafe(16),
+                 "limiter": threading.BoundedSemaphore(max(1, max_concurrency))}
         if avail_cb is not None:
             attrs["avail_cb"] = staticmethod(avail_cb)
         if pieces_cb is not None:

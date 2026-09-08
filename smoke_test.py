@@ -567,6 +567,25 @@ def main():
     srv_cn.shutdown()
     print("[3b2] 中文/特殊字符文件名往返通过：编码、读取一致，且仍受穿越防护约束")
 
+    # 并发上限：超限立即 503（带 Retry-After），不排队堆积线程（P1-1 防回归）
+    srv_lim = StreamServer(cache, max_concurrency=1)
+    srv_lim.start()
+    lim = srv_lim._httpd.RequestHandlerClass.limiter
+    lim.acquire()                                  # 人为占满唯一名额
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            srv_lim.url_for(rel), headers={"Range": "bytes=0-1023"}), timeout=5)
+        raise AssertionError("并发占满时应当返回 503")
+    except urllib.error.HTTPError as e:
+        assert e.code == 503 and e.headers.get("Retry-After"), (e.code, e.headers)
+    finally:
+        lim.release()
+    with urllib.request.urlopen(urllib.request.Request(
+            srv_lim.url_for(rel), headers={"Range": "bytes=0-1023"}), timeout=5) as resp:
+        assert resp.status == 206, resp.status     # 释放后恢复正常
+    srv_lim.shutdown()
+    print("[3b3] 并发上限通过：占满 → 503+Retry-After，释放 → 206 恢复")
+
     # 尾部索引窗口（moov 优先）纯逻辑测试
     mp4 = TorrentFile(0, "root/demo.mp4", 100 * 1024 * 1024, 0, 0, 6399)
     mkv = TorrentFile(1, "root/demo.mkv", 100 * 1024 * 1024, 0, 0, 6399)
@@ -676,6 +695,18 @@ def main():
     assert mp["proxy_type"] == 5 and mp["proxy_username"] == "u"   # http + 账号 → http_pw
     assert lt_proxy_settings({"type": "socks5", "host": ""})["proxy_type"] == 0  # 空主机回落直连
     print("[3g] 代理配置映射通过：直连/socks5/http_pw/空主机回落（含 tracker 重置）")
+
+    # 凭据保护：DPAPI 加密往返（P1-3 防回归；纯函数，不碰注册表）
+    from core import secretbox
+    enc = secretbox.protect("s3cret-PW")
+    if os.name == "nt":
+        assert enc.startswith("dpapi:v1:") and "s3cret" not in enc, enc
+        assert secretbox.unprotect(enc) == "s3cret-PW"
+    else:
+        assert enc == "s3cret-PW"      # 非 Windows 退化直通
+    assert secretbox.unprotect("plain-old") == "plain-old"   # 旧明文兼容直读
+    assert secretbox.unprotect("dpapi:v1:AAAA") == ""        # 损坏密文 → 空，不崩
+    print("[3g2] 凭据保护通过：DPAPI 往返 / 旧明文兼容 / 损坏密文不崩")
 
     # 会话启动参数：代理 + 自定义元数据超时
     mgr = SessionManager(os.path.join(tmp, "px_cache"), listen_port=6893)
