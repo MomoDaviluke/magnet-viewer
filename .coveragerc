@@ -1,0 +1,18 @@
+# coverage.py 配置（由 coverage_run.py 经 COVERAGE_PROCESS_START 钩子加载，
+# 使 subprocess 拉起的测试脚本也计入）。只报告，不设 fail-under 门禁。
+[run]
+source = core, ui
+parallel = true
+branch = true
+relative_files = true
+
+[paths]
+source =
+    core/
+    .\core\
+    */core/
+
+[report]
+omit =
+    */__pycache__/*
+    main.py

@@ -27,6 +27,9 @@ python -m venv .venv
 ```
 
 依赖：Python 3.10+（已在 3.13 验证）、`libtorrent`、`PySide6`。
+发布/回归环境建议改用精确锁定安装 `pip install -r requirements.lock`
+（与已验证环境逐字节一致；libtorrent 2.0/2.1 API 不兼容，宽松约束下
+新装机器可能落到未验证版本）。
 
 ## 使用步骤
 
@@ -113,6 +116,7 @@ magnet-viewer/
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
 > 一键回归：`python regression_run.py`（15 套：`contract_check` 契约自检 + 6 套重构专项（persist/session/registry/taskops/resolver/preview，假依赖秒级）+ 7 套旧测试 + 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
+> 覆盖率报告：`python coverage_run.py`（快速集，秒级）/ `coverage_run.py full`（全量 15 套）——coverage.py 接入，只报告不设门禁；基线（2026-09-07 快速集）：registry 97% / preview 94% / session 95% / persist 90% / resolver 88% / fetcher 85%。
 > 测试覆盖策略：按**数据入口路径**（本地种子 / 磁力链；单文件 / 多文件 / 混合 v2）铺排，而非仅按功能模块——历史上三个缺陷都源于同一功能的不同入口未各自覆盖。详见 `REVIEW.md`。
 
 ## 已修复问题

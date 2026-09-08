@@ -16,6 +16,7 @@ dist/
 # 测试与覆盖率缓存
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 
 # 编辑器与系统文件
