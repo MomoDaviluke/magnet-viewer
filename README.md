@@ -175,7 +175,7 @@ magnet-viewer/
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
 | `qt_stream_open_test.py`（QMediaPlayer FFmpeg 后端 offscreen 实测，依赖同上） | 通过：A 仅头部→`FormatError`（即用户遇到的 moov atom not found）；B 头+尾+按需补拉→`LoadedMedia` 成功开播；C 全量→成功 |
 | GUI 无头启动 | 通过（主窗口构造、会话与流服务启动、退出码 0） |
-| `gui_feature_test.py`（offscreen 实测 46 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** / **评审 P0 防回归（添加下载对话框 priority() 可调用 · 下载页 700ms 刷新后选中与详情保持）** |
+| `gui_feature_test.py`（offscreen 实测 70 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** / **评审 P0 防回归（添加下载对话框 priority() 可调用 · 下载页 700ms 刷新后选中与详情保持）** / **播放器 seek 防抖·预取·缓冲分段着色** |
 | `single_file_test.py`：单文件种子 × 本地种子/磁力链两条入口 | 通过（12/12）：路径层级、`file_disk_path` 落点、流服务按 `f.path` 供给 206（目录隔离后断言随 `.preview/<ih>/` 布局更新，接口未变） |
 | `local_torrent_test.py`：本地 .torrent 闭环 | 通过（9/9）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
 | `hybrid_v2_test.py`：**入口矩阵混合 v2 列补齐**（P0-2/P1-1 防回归）：默认产种（meta version=2）× 本地 .torrent / 磁力链两条入口 | 通过（19/19）：造种自检 parser hash==lt.info_hash()（SHA-256 截断 20 字节）、两入口 info_hash 与造种端一致、多文件层级 root/inner、预览下载完成、流服务 206、纯 v2 明确 ValueError（剥 files 键构造）|
