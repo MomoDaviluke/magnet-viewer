@@ -53,6 +53,7 @@ class PreviewScheduler:
         self.handle = None
         self.file = None
         self._scheduled_to = -1
+        self._play_from = -1     # 播放起点块（begin=文件头 / seek=目标块）
         self._tail_pieces: list[int] = []
         self.on_file_completed = None  # callback(int file_index)，由会话层注入
 
@@ -121,6 +122,7 @@ class PreviewScheduler:
         self.handle = handle
         self.file = file
         self._scheduled_to = file.start_piece - 1
+        self._play_from = file.start_piece
         self._tail_pieces = tail_piece_window(file, ti.piece_length())
         # 先预约尾部索引块，再进入顺序窗口
         self._request_tail()
@@ -131,6 +133,12 @@ class PreviewScheduler:
 
         播放器（FFmpeg）要读哪段就立刻下载哪段——典型场景是 MP4 尾部 moov
         探测与任意位置拖动。重复调用是幂等的（deadline 会被覆盖为 ASAP）。
+
+        单次点播的块数**必须有上限**：拖动进度条时 FFmpeg 发的是
+        `bytes=X-`（X 到文件尾），不加限制会把剩余整个文件都置为 ASAP ——
+        带宽被分散到几百 MB 上，反而拖慢 seek 目标本身、顺序性也随之丧失。
+        点播是「临时插队」，不移动顺序窗口的锚点（否则尾部 moov 探测会把
+        锚点推到文件尾，导致顺序窗口永久停摆）。
         """
         if not self.active or self.file is None or self.handle is None:
             return
@@ -145,6 +153,7 @@ class PreviewScheduler:
                         self.file.start_piece + max(0, start_byte) // pl)
             last = min(self.file.end_piece,
                        self.file.start_piece + max(0, end_byte - 1) // pl)
+            last = min(last, first + LOOKAHEAD_PIECES - 1)
             for p in range(first, last + 1):
                 self.handle.set_piece_deadline(p, 0)
         except Exception as e:
@@ -152,28 +161,70 @@ class PreviewScheduler:
                         f"{start_byte}-{end_byte}: {e}")
 
     def seek_to_byte(self, byte_offset: int) -> None:
-        """播放位置跳转后，从对应 piece 重新开始预约。"""
+        """播放位置跳转后，从对应 piece 重新开始预约。
+
+        必须**立即**预约 seek 目标起的窗口：调度器只在 begin()/此处/周期性
+        tick() 被调用，若只重置锚点而不预约，seek 点的数据就完全依赖流服务
+        的点播回调（有上限、且只覆盖那一次 HTTP 请求的区间）。
+        """
         if not self.active or self.file is None:
             return
         ti = self.handle.torrent_file()
         pl = ti.piece_length()
         piece = self.file.start_piece + byte_offset // pl
-        self._scheduled_to = min(piece - 1, self.file.end_piece)
+        piece = max(self.file.start_piece, min(piece, self.file.end_piece))
+        # 跳转必须先清掉旧位置的 ASAP 预约：拖到未缓存区再拖回已缓存区时，
+        # 残留的远端分块仍在以最高优先级并行下载，与新播放位置争带宽 →
+        # 明明已缓存的区域反而卡顿。清完再重建「尾部窗口 + 新位置窗口」。
+        self._clear_deadlines()
+        self._play_from = piece
+        self._scheduled_to = piece - 1
+        target = min(self.file.end_piece, piece + LOOKAHEAD_PIECES)
+        self._request_tail()      # 尾部 moov 窗口同样被清掉，必须重建
+        for p in range(piece, target + 1):
+            try:
+                self.handle.set_piece_deadline(p, 0)
+            except Exception as e:
+                log_warning("scheduler.seek.deadline", f"piece={p}: {e}")
+        self._scheduled_to = max(self._scheduled_to, target - 1)
         self.tick()
 
+    def _clear_deadlines(self) -> None:
+        """清空全部分块 deadline（跳转前调用，避免旧位置残留抢占带宽）。"""
+        if self.handle is None:
+            return
+        try:
+            self.handle.clear_piece_deadlines()
+        except Exception as e:
+            log_warning("scheduler.clear_deadlines", f"{e}")
+
+    def _first_missing_from(self, from_piece: int) -> int:
+        """从 from_piece 起向后第一个未落盘的块（全部就绪时返回 end_piece）。"""
+        p = max(from_piece, self.file.start_piece)
+        end = self.file.end_piece
+        try:
+            while p <= end and self.handle.have_piece(p):
+                p += 1
+        except Exception as e:
+            log_warning("scheduler.first_missing", f"{e}")
+        return min(p, end)
+
     def tick(self) -> None:
-        """周期调用：根据下载进度向前滚动预约窗口。"""
+        """周期调用：从**播放位置**起按下载进度向前滚动预约窗口。
+
+        滚动度量必须以播放位置（_play_from）为起点，而不是「从文件头的连续
+        前缀」——seek 之后文件头前缀仍停留在旧位置，用它当判据会让窗口恒被
+        判定为「充裕」而永不滚动（历史缺陷：seek 后 seek 点附近零预约）。
+        """
         if not self.active or self.file is None:
             return
         ti = self.handle.torrent_file()
         if ti is None:
             return
-        pl = ti.piece_length()
         # 尾部索引窗口尚未就绪则持续补拉（探测 moov 是开播前提）
         if self._tail_pieces and not self.tail_ready():
             self._request_tail()
-        done = self.contiguous_progress()
-        first_missing = min(self.file.end_piece, self.file.start_piece + done // pl)
+        first_missing = self._first_missing_from(self._play_from)
         if first_missing <= self._scheduled_to - 16:
             return  # 窗口仍然充裕，无需操作
         start = max(first_missing, self._scheduled_to + 1)

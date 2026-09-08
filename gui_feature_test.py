@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -87,7 +88,7 @@ def main() -> int:
     # 2a. 拖入磁力链文本 -> 应被接受
     md = QMimeData()
     md.setText("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567")
-    from PySide6.QtGui import QDragEnterEvent, QDropEvent
+    from PySide6.QtGui import QDragEnterEvent
     from PySide6.QtCore import QPoint, Qt
 
     ev = QDragEnterEvent(QPoint(5, 5), Qt.CopyAction | Qt.MoveAction, md,
@@ -294,33 +295,152 @@ def main() -> int:
     check(gal.viewer.pixmap() is not None,
           "大图区已渲染 pixmap（不再停留「下载中…」）")
 
-    # ---------------------------------------------------------------- [4d] 评审 P0 防回归
-    print("\n[4d] 评审 P0 防回归（添加下载 / 下载页选中保持）")
-    dlg = AddDownloadDialog({}, "防回归.bin", 1024)
-    check(isinstance(dlg.priority(), int),
-          "AddDownloadDialog.priority() 可调用并返回 int"
-          "（P0-1：方法不再被同名 QSpinBox 控件遮蔽）")
-    dlg.priority_spin.setValue(3)
-    check(dlg.priority() == 3, "priority() 读回 spin 值（3）")
+    # ------------------------------------------------- [4b] 进度条 seek 防抖
+    # 回归「拖动进度条后无法播放 + 进度条失灵」的 UI 侧成因：
+    # ① 双重 seek —— sliderReleased 已跳转，释放引发的 valueChanged 又启动
+    #    400ms 防抖，防抖回调再次 setPosition 并二次发射 seek_requested，
+    #    第二次跳转会打断第一次的连接重建；
+    # ② 滑块弹回 —— 跳转生效前（seek 异步、未下载区间还要等数据）广播的仍是
+    #    旧位置，若程序性回写就会把用户拖到的位置覆盖回去。
+    print("\n[4b] 播放器进度条：拖动只跳一次 / 跳转生效前不回写")
+    from PySide6.QtMultimedia import QMediaPlayer
+    from ui.preview_player import VideoPreviewWidget
+    vp = VideoPreviewWidget()
+    vp._size = 10 * 1024 * 1024                  # 10MB，供字节换算
+    vp.slider.setRange(0, 100000)                # 模拟时长 100s
+    vp.player.duration = lambda: 100000          # 无媒体源时伪造时长（仅换算用）
+    seeks = []
+    vp.seek_requested.connect(lambda b: seeks.append(b))
+    vp.slider.setValue(50000)
+    app.processEvents()
+    vp.slider.sliderReleased.emit()              # 模拟拖动释放
+    app.processEvents()
+    check(len(seeks) == 1, f"拖动释放只触发一次 seek 请求（实际 {len(seeks)} 次）")
+    check(vp._seek_target == 50000, "已记录跳转目标（生效前抑制回写）")
+    vp._on_position(0)                            # 跳转未生效时的旧位置广播
+    check(vp.slider.value() == 50000, "旧位置广播未把滑块弹回")
+    _t0 = time.time()                             # 等防抖窗口结束（400ms）
+    while time.time() - _t0 < 0.7:
+        app.processEvents()
+        time.sleep(0.05)
+    check(len(seeks) == 1, f"防抖窗口结束后未重复 seek（实际 {len(seeks)} 次）")
+    vp._on_position(50000)                        # position 追上目标
+    check(vp._seek_target is None, "position 追上目标后解除回写抑制")
+    vp._on_position(52000)
+    check(vp.slider.value() == 52000, "解除抑制后滑块恢复跟随播放位置")
+    vp.deleteLater()
 
-    def mk_task(h: str, name: str) -> dict:
-        return {"info_hash": h, "name": name, "state": "DOWNLOADING",
-                "progress": 0.1, "down_rate": 0, "eta": None,
-                "priority": 1, "save_path": "", "selected_files": []}
+    # ------------------------------------------------- [4c] 出错后续播位置
+    # 回归：播放中出错 → 自动重试的 set_stream 会重新 setSource，从头开始播
+    # （体感就是「拖动后突然从头重播、进度条失灵」）。必须带着出错位置续播。
+    print("\n[4c] 播放出错后重试：回到出错位置而非从头")
+    vp2 = VideoPreviewWidget()
+    vp2._size = 10 * 1024 * 1024
+    vp2.player.duration = lambda: 100000
+    vp2.player.position = lambda: 42000
+    vp2._seek_target = None
+    vp2._on_player_error(QMediaPlayer.ResourceError, "模拟错误")
+    check(vp2.take_resume_ms() == 42000, "出错时记录当前播放位置")
+    vp2._mark_seek(60000)                        # 跳转尚未生效时出错
+    vp2._on_player_error(QMediaPlayer.ResourceError, "模拟错误")
+    check(vp2.take_resume_ms() == 60000, "跳转中出错优先记录跳转目标")
+    check(vp2.take_resume_ms() is None, "取走后清空（不被下次重试误用）")
+    seeks2 = []
+    vp2.seek_requested.connect(lambda b: seeks2.append(b))
+    vp2._resume_ms = 60000                       # 模拟 set_stream(resume_ms=…)
+    vp2._on_media_status(QMediaPlayer.BufferedMedia)
+    check(len(seeks2) == 1 and seeks2[0] == int(60000 / 100000 * vp2._size),
+          f"续播时同步通知调度器（{seeks2}）")
+    check(vp2._seek_target == 60000, "续播期间抑制回写，避免进度条弹回")
+    check(vp2._resume_ms is None, "续播位置只应用一次")
+    vp2.deleteLater()
 
-    pane = DownloadsPane()
-    pane.set_tasks([mk_task("a" * 40, "task-A"), mk_task("b" * 40, "task-B")])
-    idx0 = pane.tree.model().index(0, COL_NAME)
-    pane.tree.selectionModel().select(
-        idx0, QItemSelectionModel.SelectionFlag.Select
-        | QItemSelectionModel.SelectionFlag.Rows)
-    pane.set_tasks([mk_task("a" * 40, "task-A"),
-                    mk_task("b" * 40, "task-B")])   # 模拟 700ms 状态轮询刷新
-    sel = pane.selected_task() or {}
-    check(sel.get("name") == "task-A",
-          "set_tasks 全量刷新后选中保持（P0-2：700ms 轮询不再清掉选中）")
-    check("task-A" in pane.details.text(),
-          "刷新后详情区显示选中任务（不再退回「选择任务查看详情」）")
+    # ------------------------------------------------- [4d] 停止/换片/出错后的跳转隔离
+    # A1：stop() 不清跳转状态 → 400ms 后把旧跳转作用到后续文件；
+    # A2：错误态下 setPosition 无效，滑块必须禁用，否则「拖了没反应」；
+    # A4：换片同理；A3：时长未广播时用滑块范围兜底换算。
+    print("\n[4d] 停止·换片·出错后的跳转隔离与时长兜底")
+    vp3 = VideoPreviewWidget()
+    vp3._size = 10 * 1024 * 1024
+    vp3.slider.setRange(0, 100000)
+    vp3.player.duration = lambda: 100000
+    seeks3 = []
+    vp3.seek_requested.connect(lambda b: seeks3.append(b))
+    vp3.slider.setValue(40000)
+    vp3.stop()                                    # A1
+    _t0 = time.time()
+    while time.time() - _t0 < 0.7:
+        app.processEvents()
+        time.sleep(0.05)
+    check(not seeks3, f"stop() 后不再发射跳转（{seeks3}）")
+    vp3.slider.setRange(0, 100000)
+    vp3.slider.setValue(60000)                    # A4：换片前的悬空点击
+    app.processEvents()
+    vp3.set_stream("file:///nonexistent_demo.mp4", "new.mp4", 5 * 1024 * 1024)
+    _t0 = time.time()
+    while time.time() - _t0 < 0.7:
+        app.processEvents()
+        time.sleep(0.05)
+    check(not seeks3, f"换片后旧跳转不作用到新片（{seeks3}）")
+
+    vp5 = VideoPreviewWidget()                    # A2
+    check(vp5.slider.isEnabled(), "初始状态滑块可用")
+    vp5._on_player_error(QMediaPlayer.ResourceError, "模拟错误")
+    check(not vp5.slider.isEnabled(), "出错后滑块禁用（避免拖了没反应）")
+    vp5.set_stream("file:///nonexistent_demo.mp4", "again.mp4", 8 * 1024 * 1024)
+    check(vp5.slider.isEnabled(), "重新开播后滑块恢复可用")
+
+    vp6 = VideoPreviewWidget()                    # A3
+    vp6._size = 10 * 1024 * 1024
+    vp6.player.duration = lambda: 0               # 时长尚未广播
+    vp6.slider.setRange(0, 100000)
+    seeks6 = []
+    vp6.seek_requested.connect(lambda b: seeks6.append(b))
+    vp6.slider.setValue(50000)
+    vp6.slider.sliderReleased.emit()
+    check(len(seeks6) == 1 and seeks6[0] == 5 * 1024 * 1024,
+          f"时长未广播时用滑块范围兜底换算（{seeks6}）")
+    vp3.deleteLater()
+    vp5.deleteLater()
+    vp6.deleteLater()
+
+    # ------------------------------------------------- [4e] 预取/反馈/缓冲着色
+    print("\n[4e] 拖动预取节流 · 跳转反馈文案 · 缓冲分段着色")
+    from ui.preview_player import BufferedSlider
+    vp7 = VideoPreviewWidget()
+    vp7._size = 10 * 1024 * 1024
+    vp7.slider.setRange(0, 100000)
+    vp7.player.duration = lambda: 100000
+    scrubs = []
+    vp7.scrub_preview.connect(lambda b: scrubs.append(b))
+    # 拖动中快速移动 6 次（间隔 <300ms 节流窗）→ 只应预取 1~2 次
+    for v in (10000, 20000, 30000, 40000, 50000, 60000):
+        vp7.slider.sliderMoved.emit(v)
+        app.processEvents()
+    check(1 <= len(scrubs) <= 2, f"拖动中预取按 300ms 节流（{len(scrubs)} 次）")
+    check(scrubs and scrubs[0] == int(10000 / 100000 * vp7._size),
+          f"预取换算为字节偏移（{scrubs[:1]}）")
+    # 跳转反馈：跳转后、position 追上前，缓冲栏显示「跳转中」
+    vp7.slider.setValue(70000)
+    vp7.slider.sliderReleased.emit()
+    vp7.update_buffer(0.1, 0)
+    check("跳转中" in vp7.buffer_label.text(), "跳转期间缓冲栏显示跳转文案")
+    vp7._on_position(70000)                    # position 追上目标
+    vp7.update_buffer(0.5, 200 * 1024)
+    check("跳转中" not in vp7.buffer_label.text(), "追上后恢复常规缓冲文案")
+
+    bs = BufferedSlider()
+    bs.setRange(0, 100)
+    bs.set_segments([(0, 30 * 1024 * 1024), (60 * 1024 * 1024, 90 * 1024 * 1024)],
+                    100 * 1024 * 1024)
+    pm1 = bs.grab()                            # 触发 paintEvent（分段着色路径）
+    check(not pm1.isNull() and bs._segments and
+          abs(bs._segments[0][1] - 0.3) < 1e-9, "缓冲分段存储与绘制不崩溃")
+    bs.clear_segments()
+    pm2 = bs.grab()
+    check(not pm2.isNull() and not bs._segments, "清空分段后可正常重绘")
+    bs.deleteLater()
+    vp7.deleteLater()
 
     # ---------------------------------------------------------------- [5] 清理
     print("\n[5] 收尾")

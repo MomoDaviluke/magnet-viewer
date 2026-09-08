@@ -1,6 +1,7 @@
 """底部状态面板：会话状态 / 做种 / 速度 / 缓冲。"""
 from __future__ import annotations
 
+from ui.theme import TEXT_MUTED
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from core.models import human_size
@@ -16,9 +17,8 @@ class StatusPanel(QWidget):
         self.buffer = QLabel("")
         self.cache = QLabel("")
 
-        for lbl in (self.peers, self.speed, self.total_speed, self.buffer,
-                    self.cache):
-            lbl.setStyleSheet("color:#555;")
+        for lbl in (self.peers, self.speed, self.total_speed, self.buffer):
+            lbl.setStyleSheet(f"color:{TEXT_MUTED};")
         self.total_speed.hide()  # 无任务时不占位
         self.cache.hide()        # 无占用信息时不占位
 

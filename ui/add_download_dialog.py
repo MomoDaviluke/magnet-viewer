@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from ui.theme import TEXT_MUTED
 import os
 
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox,
@@ -67,7 +68,7 @@ class AddDownloadDialog(QDialog):
         note = QLabel("提示：保存子目录是下载根目录下的单层目录名"
                       "（可留空自动使用 info_hash）；优先级 0 = 不下载、"
                       "3 = 最高；预览始终为最高优先级。")
-        note.setStyleSheet("color:#777; font-size:12px;")
+        note.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
         note.setWordWrap(True)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save

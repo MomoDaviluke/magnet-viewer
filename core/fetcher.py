@@ -37,24 +37,69 @@ from .persist import safe_task_save_path as persist_safe_task_save_path
 from .persist import save_subdir_of as persist_save_subdir_of
 from .persist import task_dir as persist_task_dir
 from .scheduler import PreviewScheduler
-from .session import SessionCore, SessionDeps
-# 再导出：历史写法 from core.fetcher import TaskRecord / METADATA_TIMEOUT /
-# *_SUBDIR 仍须可用（persist_test/session_test/registry_test 在用）；本体已
-# 下沉 core.registry（R-2：TaskRecord 是注册表行结构，寄居 fetcher 是历史债）。
-from .registry import hash_key as registry_hash_key
-from .registry import ih_from_params as registry_ih_from_params
-from .resolver import ResolverCore
-from .resolver import result_from_torrent_info as resolver_result_from_ti
-from .taskops import TaskOps
-# 再导出：历史写法 from core.fetcher import STATE_* 仍须可用（download_mgr_test
-# 在用）；常量本体已下沉到 core.states，避免 fetcher → persist → fetcher 环。
-from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES,  # noqa: F401
-                     STATE_COMPLETED, STATE_DELETED, STATE_DOWNLOADING,
-                     STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
-                     STATE_QUEUED, STATE_READY, STATE_SEEDING, STATE_STOPPED,
-                     STATE_VALIDATE)
-from .taskstore import load_tasks
+from .taskstore import (load_tasks, save_tasks,
+                        task_from_result, upsert_task)
 
+METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种
+
+# 任务生命周期状态机（对齐 plan/t1 §3 与 downloads_pane 的 STATE_META 命名）：
+# QUEUED → META_FETCH → VALIDATE → DOWNLOADING ⇄ PAUSED → COMPLETED → STOPPED；
+# FAILED / DELETED 为终态；默认完成后自动停止（不做种，决策 D3）。
+STATE_QUEUED = "QUEUED"
+STATE_META_FETCH = "META_FETCH"
+STATE_VALIDATE = "VALIDATE"
+STATE_DOWNLOADING = "DOWNLOADING"
+STATE_PAUSED = "PAUSED"
+STATE_COMPLETED = "COMPLETED"
+STATE_STOPPED = "STOPPED"
+STATE_FAILED = "FAILED"
+STATE_SEEDING = "SEEDING"
+STATE_DELETED = "DELETED"
+STATE_READY = "READY"        # 内部态：仅查看清单/预览（review 记录专用，
+                             # 不持久化、不进入 tasks() 快照）
+
+DOWNLOAD_STATES = {STATE_QUEUED, STATE_META_FETCH, STATE_VALIDATE,
+                   STATE_DOWNLOADING, STATE_PAUSED, STATE_COMPLETED,
+                   STATE_STOPPED, STATE_FAILED, STATE_SEEDING, STATE_DELETED}
+
+# 节目目录名：下载任务根与预览缓存根（决策 D7）
+DOWNLOADS_SUBDIR = "downloads"
+PREVIEW_SUBDIR = ".preview"
+
+
+@dataclass
+class TaskRecord:
+    """任务注册表条目：一个 info_hash 唯一对应一个 libtorrent 句柄。"""
+    handle: lt.torrent_handle | None = None
+    result: ParseResult | None = None      # 元数据就绪后的解析结果
+    gen: int = 0                           # 创建代次（防旧解析覆盖新会话）
+    resolving: bool = False                # 是否仍在等待元数据
+    resolve_started: float = 0.0           # 本次解析开始时间（per-task 看门狗）
+    state: str = STATE_META_FETCH
+    timeout: float | None = None           # 覆盖默认元数据超时（None=会话级）
+    download: bool = False                 # 是否为持久化下载任务（add_task 系）
+    seed: bool = False                     # 完成后是否做种（D3 默认否）
+    priority: int = 0                      # 任务优先级（0~3，0=默认）
+    save_path: str = ""                    # 任务落盘目录（绝对路径）
+    source: str = ""                       # 来源（磁力链或 .torrent 路径）
+    error: str = ""                        # 最近错误（UI 可见）
+
+
+# 公共 tracker，提升冷门磁力链的 peer 发现率
+BOOTSTRAP_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.tracker.cl:1337/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+]
+
+STATE_NAMES = {
+    getattr(lt.torrent_status, k, None): k.replace("_", " ")
+    for k in ("checking_files", "downloading_metadata", "downloading",
+              "finished", "seeding", "allocating", "checking_resume_data")
+    if getattr(lt.torrent_status, k, None) is not None
+}
 
 
 class SessionManager:
@@ -452,6 +497,51 @@ class SessionManager:
     def status(self) -> dict | None:
         """线程安全状态快照（UI 轮询）。实现见 core.preview.PreviewCore.status。"""
         return self._preview.status()
+
+    def buffered_segments_of_preview(self):
+        """当前预览文件的已缓存分段（文件内字节区间 [start, end) 列表）。
+
+        供进度条着色。用 handle.status().pieces **一次性**取全部块的落盘
+        状态（C++ 层，比逐块 have_piece 快几个数量级），再在文件块范围内
+        合并连续段 —— 700ms 一次也不构成负担，顺带落实了 P2-1 的批量位图。
+        无预览 / 状态不可用时返回 None（进度条退化为不着色）。
+        """
+        with self._lock:
+            active = self.scheduler.active
+            f = self.scheduler.file
+            handle = self.scheduler.handle
+        if not active or f is None or handle is None:
+            return None
+        try:
+            ti = handle.torrent_file()
+            pieces = getattr(handle.status(), "pieces", None)
+            if ti is None or not pieces:
+                return None
+            pl = ti.piece_length()
+            if pl <= 0:
+                return None
+            segs: list[tuple[int, int]] = []
+            run = None                      # 连续已落盘段的起始块
+            for p in range(f.start_piece, f.end_piece + 1):
+                if pieces[p]:
+                    if run is None:
+                        run = p
+                elif run is not None:
+                    segs.append(self._piece_range_bytes(run, p - 1, pl, f))
+                    run = None
+            if run is not None:
+                segs.append(self._piece_range_bytes(run, f.end_piece, pl, f))
+            return segs
+        except Exception as e:
+            log_warning("fetcher.buffered_segments", f"{e}")
+            return None
+
+    @staticmethod
+    def _piece_range_bytes(first: int, last: int, pl: int, f) -> tuple[int, int]:
+        """块号闭区间 [first, last] → 文件内字节区间 [start, end)。"""
+        start = max(0, first * pl - f.offset)
+        end = min(f.size, (last + 1) * pl - f.offset)
+        return (start, max(start, end))
 
     @property
     def current_result(self) -> ParseResult | None:

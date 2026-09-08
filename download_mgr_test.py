@@ -36,7 +36,7 @@ import test_support as ts  # noqa: E402
 from core.fetcher import (STATE_COMPLETED, STATE_DOWNLOADING,  # noqa: E402
                           STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
                           STATE_QUEUED, SessionManager)
-from core.models import contiguous_bytes, human_size, range_available  # noqa: E402
+from core.models import contiguous_bytes, human_size  # noqa: E402
 from core.resume import resume_path  # noqa: E402
 from core.taskstore import task_file_path  # noqa: E402
 
