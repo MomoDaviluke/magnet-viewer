@@ -95,15 +95,23 @@ class TaskOps:
             result = parse_torrent_file(source)   # 同步解析：返回 id 需要 info_hash
             ih = result.info_hash
             reg = self.reg
+            converted = None
             with reg.lock:
                 if ih in reg.tasks:
                     return ih                     # 去重：已是下载任务
                 rec = reg.torrents.get(ih)
                 if rec is not None and not rec.download:
-                    return self._convert_to_download_locked(
+                    ih = self._convert_to_download_locked(
                         rec, ih, source, save_subdir, priority, seed)
-            return self._add_torrent_file_task(ses, source, result, ih,
-                                               save_subdir, priority, seed)
+                    converted = rec               # I/O 收尾出锁执行（P1-4）
+            if converted is not None:
+                self.persist.persist_tasks()
+                if converted.result is not None:
+                    self.activate_download(converted)
+            else:
+                return self._add_torrent_file_task(ses, source, result, ih,
+                                                   save_subdir, priority, seed)
+            return ih
         # 磁力链
         try:
             p = lt.parse_magnet_uri(source)
@@ -111,12 +119,20 @@ class TaskOps:
             raise ValueError(f"磁力链接无效：{e}") from e
         ih = ih_from_params(p)
         reg = self.reg
+        converted = None
         with reg.lock:
             if ih and ih in reg.tasks:
                 return ih
             if ih and ih in reg.torrents and not reg.torrents[ih].download:
-                return self._convert_to_download_locked(
-                    reg.torrents[ih], ih, source, save_subdir, priority, seed)
+                rec_conv = reg.torrents[ih]
+                ih = self._convert_to_download_locked(
+                    rec_conv, ih, source, save_subdir, priority, seed)
+                converted = rec_conv              # I/O 收尾出锁执行（P1-4）
+        if converted is not None:
+            self.persist.persist_tasks()
+            if converted.result is not None:
+                self.activate_download(converted)
+            return ih
         return self._add_magnet_task(ses, source, p, ih, save_subdir,
                                      priority, seed)
 
@@ -233,9 +249,9 @@ class TaskOps:
                     "created_at": time.time(), "finished_at": None,
                     "seed": bool(seed)}
             reg.tasks, _ = upsert_task(reg.tasks, task)
-        self.persist.persist_tasks()
-        if rec.result is not None:
-            self.activate_download(rec)
+        # P1-4（REVIEW-2026-09）：persist_tasks（同步文件写）与 activate_download
+        # （libtorrent 会话调用）不再在 reg.lock 内执行——由调用方出锁收尾，
+        # 失败语义不变（两者内部均仅告警）。
         return ih
 
     def activate_download(self, rec: TaskRecord) -> None:
@@ -319,8 +335,9 @@ class TaskOps:
                 reg.tasks[key]["state"] = STATE_PAUSED
                 reg.tasks[key]["error"] = ""
         self.persist.persist_tasks()
-        with reg.lock:
-            self.persist.request_resume(rec)
+        # P1-4：fastresume 请求（libtorrent 异步入队）出锁执行；rec 若已被
+        # 并发删除，handle 失效由 request_resume 内部 except 告警兜住
+        self.persist.request_resume(rec)
         return True
 
     def resume_task(self, task_id: str) -> bool:
@@ -343,9 +360,10 @@ class TaskOps:
                 reg.tasks[key]["state"] = rec.state
                 reg.tasks[key]["error"] = ""
         self.persist.persist_tasks()
-        with reg.lock:
-            self.activate_download(rec)
-            self.persist.request_resume(rec)
+        # P1-4：激活与 fastresume 请求出锁执行（与既有 best-effort 容错一致：
+        # rec 被并发删除时 handle 失效由内部 except 告警兜住）
+        self.activate_download(rec)
+        self.persist.request_resume(rec)
         return True
 
     def remove_task(self, task_id: str, delete_files: bool = False) -> bool:

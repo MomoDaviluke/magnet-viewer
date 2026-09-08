@@ -225,11 +225,19 @@ def section_convert(ck):
                  "记录字段更新 download/seed/priority/state")
         ck.check(reg.tasks.get(IH, {}).get("state") == STATE_DOWNLOADING,
                  "清单 upsert 且状态 DOWNLOADING")
-        ck.check(persist.persist_calls == 1, "转正即落盘一次")
+        ck.check(persist.persist_calls == 0,
+                 "锁内零落盘（P1-4：文件写出锁执行）")
         h = rec.handle
+        ck.check(h.resumed == 0
+                 and lt.torrent_flags.upload_mode not in h.unset_flags_calls,
+                 "锁内零激活（P1-4：libtorrent 调用出锁执行）")
+        # 出锁收尾（生产语义：add_task 出锁后执行——失败语义不变，仅告警）
+        ops.persist.persist_tasks()
+        ops.activate_download(rec)
+        ck.check(persist.persist_calls == 1, "出锁收尾：转正即落盘一次")
         ck.check(h.resumed == 1
                  and lt.torrent_flags.upload_mode in h.unset_flags_calls,
-                 "转正即 activate：解除 upload_mode + resume")
+                 "出锁收尾：转正即 activate（解除 upload_mode + resume）")
 
         # 无元数据的 review 记录 → META_FETCH + 重启看门狗
         rec2 = add_rec(reg, IH2, result=None, resolving=False,

@@ -53,7 +53,8 @@ build.bat          :: 一键：清旧产物 -> PyInstaller 构建 -> pack_check 
 
 onedir + windowed（无控制台）；不压 UPX（杀软误报头号诱因）。打包机与
 目标机均需 Windows x64；首次运行会自建缓存目录（%TEMP%\magnet_viewer_cache，
-可在设置中更改）。
+可在设置中更改）。注意：预览/下载数据与本机用户数据同权限存储（不加密），
+同机同用户的其他进程可读——请勿把缓存目录指给多人共用的位置。
 
 内嵌播放器所需的 Qt 多媒体后端（`plugins/multimedia/ffmpegmediaplugin.dll`
 与 `avcodec/avformat/avutil-*.dll`）会被一并打进产物，**目标机不需要额外装
