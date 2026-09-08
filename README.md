@@ -31,6 +31,18 @@ python -m venv .venv
 （与已验证环境逐字节一致；libtorrent 2.0/2.1 API 不兼容，宽松约束下
 新装机器可能落到未验证版本）。
 
+### 打包为免安装 exe（Windows）
+
+```bash
+.venv\Scripts\pip install pyinstaller
+.venv\Scripts\pyinstaller --noconfirm --clean magnet-viewer.spec
+# 产物：dist\MagnetViewer\MagnetViewer.exe（整个目录拷走即可运行）
+```
+
+onedir + windowed（无控制台）；不压 UPX（杀软误报头号诱因）。打包机与
+目标机均需 Windows x64；首次运行会自建缓存目录（%TEMP%\magnet_viewer_cache，
+可在设置中更改）。多媒体播放依赖系统 WebView/媒体组件（与直接运行一致）。
+
 ## 使用步骤
 
 1. 粘贴磁力链（如 `magnet:?xt=urn:btih:...`）或点「打开种子文件…」，点「解析」；也可直接把 `.torrent` 文件或磁力链文本**拖进窗口**。输入框会按最近 15 条历史自动补全。
@@ -83,6 +95,7 @@ magnet-viewer/
 ├── preview_test.py       # 预览桥与状态专项（假句柄，秒级）
 ├── hybrid_v2_test.py     # 入口矩阵混合 v2 列（两入口端到端）
 ├── regression_run.py     # 一键回归（16 套）
+├── magnet-viewer.spec    # PyInstaller 打包配置（onedir，产物 dist/MagnetViewer/）
 ├── smoke_test.py         # 无 GUI 冒烟测试（python smoke_test.py）
 ├── local_magnet_test.py  # 本机闭环验证：做种端 + 磁力链解析 + 边下边播（无需外网）
 ├── moov_stream_test.py   # moov 尾部优先端到端验证（ffprobe/ffmpeg 实际探测，无 GUI）
