@@ -35,8 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from core import (cache_guard, cache_quota, models, parser, persist,
-                      registry, scheduler, session, states, stream_server,
-                      taskops)
+                      preview, registry, resolver, scheduler, session,
+                      states, stream_server, taskops)
     from core import fetcher as fetcher_mod
     from core.fetcher import SessionManager
 except Exception as e:          # 依赖缺失：显式 SKIP，绝不假装通过
@@ -251,6 +251,37 @@ def main() -> int:
               ("TaskRecord", "TaskRegistry", "METADATA_TIMEOUT",
                "DOWNLOADS_SUBDIR", "PREVIEW_SUBDIR")),
           "core.fetcher 仍再导出 TaskRecord/TaskRegistry/常量（历史 import 不破）")
+    # resolver（阶段 5 抽出）：解析与元数据编排。alert 双回调是 session
+    # 注入线，begin_resolve 换代语义是 P1-10/11 竞态修复机制——全冻结。
+    sig_check("resolver", resolver, {
+        "result_from_torrent_info": [("ti", False), ("info_hash", False)],
+    })
+    sig_check("resolver.ResolverCore", resolver.ResolverCore, {
+        "resolve": [("source", False)],
+        "begin_resolve": [],
+        "connect_peer": [("ip", False), ("port", False),
+                         ("wait_handle", True), ("task_id", True)],
+        "on_metadata_received": [("rec", False)],
+        "on_download_finished": [("rec", False)],
+    })
+    # preview（阶段 5 抽出）：磁盘路径反查→PieceMap→点播补拉→状态快照。
+    # find/piece_map/demand 的 None/False「不可判定」语义是流服务安全前提。
+    sig_check("preview.PreviewCore", preview.PreviewCore, {
+        "start_preview": [("f", False)],
+        "stop_preview": [],
+        "find_record_for_path": [("disk_path", False)],
+        "piece_map_for_path": [("disk_path", False)],
+        "demand_for_path": [("disk_path", False), ("start_byte", False),
+                            ("end_excl", False)],
+        "task_result": [("task_id", False)],
+        "have_piece": [("piece", False)],
+        "piece_length": [],
+        "current_result": [],
+        "status": [],
+    })
+    check(all(hasattr(fetcher_mod, n) for n in
+              ("STATE_NAMES", "resolver_result_from_ti")),
+          "core.fetcher 仍再导出 STATE_NAMES / resolver 纯函数别名")
     # taskops（阶段 4 抽出）：任务 CRUD 全量签名冻结。fetcher 的 7 个任务
     # 公开方法从此只是薄委托；download_mgr_test 是它的端到端对账方。
     sig_check("taskops", taskops, {

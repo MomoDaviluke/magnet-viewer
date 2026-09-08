@@ -32,6 +32,8 @@ SUITES = [
     "session_test",       # 阶段 2 会话核心专项（假依赖，秒级）
     "registry_test",      # 阶段 3 注册表与锁归属专项（假句柄，秒级）
     "taskops_test",       # 阶段 4 任务 CRUD 专项（假句柄+真注册表，秒级）
+    "resolver_test",      # 阶段 5 解析与元数据编排专项（假会话，秒级）
+    "preview_test",       # 阶段 5 预览桥与状态专项（假句柄，秒级）
     "smoke_test",
     "local_magnet_test",
     "local_torrent_test",
