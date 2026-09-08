@@ -59,6 +59,12 @@ def _is_within(root: str, path: str) -> bool:
 
 
 class _StreamHandler(BaseHTTPRequestHandler):
+    # HTTP/1.1 keep-alive：播放器（FFmpeg/QMediaPlayer）一次播放会对同一
+    # URL 连续发起多个 Range 请求（探测 moov → 读头部 → seek 目标渐进段…）。
+    # 短连接模式下每段一个 TCP 连接，高频开合会被网络防护软件判为扫描
+    # 而中止连接（实测 -10053，FFmpeg 报 'Error reading HTTP response'）；
+    # 复用连接从根上规避。所有响应都带精确 Content-Length，满足 1.1 要求。
+    protocol_version = "HTTP/1.1"
     base_dir = ""       # 由 StreamServer 注入：第一根目录（相对路径落点）
     base_dirs = ()      # 由 StreamServer 注入：全部根目录（规范化的元组）
     avail_cb = None     # 由 StreamServer 注入：path -> 已下载前缀字节数（可选）
@@ -150,7 +156,6 @@ class _StreamHandler(BaseHTTPRequestHandler):
         # 数据尚未就绪（或并发超限）：返回 503 让客户端稍后重试，而不是吐零数据
         self.send_response(503, "Buffering")
         self._security_headers()
-        self.send_header("Retry-After", "1")
         self.send_header("Retry-After", "1")
         self.send_header("Content-Length", "0")
         self.end_headers()

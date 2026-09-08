@@ -213,8 +213,9 @@ class DownloadsPane(QWidget):
                         idx, QItemSelectionModel.SelectionFlag.Select
                         | QItemSelectionModel.SelectionFlag.Rows)
                     break
-        if scroll_pos:
-            bar.setValue(scroll_pos)
+        # 无条件恢复：0 也是合法目标位置（顶部）——用 if scroll_pos 会在
+        # 「用户本来就停在顶部」时跳过，重建后残留的非 0 位置就不被归位了
+        bar.setValue(scroll_pos)
         self._update_details()
 
     def tasks(self) -> list[dict]:

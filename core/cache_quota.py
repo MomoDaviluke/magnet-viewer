@@ -115,6 +115,11 @@ def enforce_preview_limit(preview_root: str, limit_mb: int,
         except Exception as e:
             _warn(f"删除预览目录失败（留待下次）：{path}：{e}")
             continue
+        if os.path.isdir(path):
+            # ignore_errors=True 会吞掉删除失败（如文件被占用），此时若仍
+            # 计入 freed，配额会提前「达标」而实际仍超限（Copilot 评审指出）
+            _warn(f"删除预览目录失败（留待下次）：{path}")
+            continue
         freed += size
         _warn(f"预览缓存超限，按 LRU 清理：{path}（释放 {size} 字节）")
     return total - freed, freed

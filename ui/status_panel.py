@@ -17,7 +17,8 @@ class StatusPanel(QWidget):
         self.buffer = QLabel("")
         self.cache = QLabel("")
 
-        for lbl in (self.peers, self.speed, self.total_speed, self.buffer):
+        for lbl in (self.peers, self.speed, self.total_speed, self.buffer,
+                    self.cache):
             lbl.setStyleSheet(f"color:{TEXT_MUTED};")
         self.total_speed.hide()  # 无任务时不占位
         self.cache.hide()        # 无占用信息时不占位
