@@ -308,6 +308,13 @@ def section_current(ck):
                  "begin 收到 (当前句柄, 文件)")
         pv.stop_preview()
         ck.check(sched.stops == 1, "stop 转发 scheduler")
+        # 消费 stop_release 脚手架（审查 Minor-6：死记录面要么有人断言要么删）：
+        # 默认调用透传 release_only=False；convert 档由宿主显式传 True。
+        ck.check(sched.stop_release == [False],
+                 "PreviewCore.stop_preview 默认透传 release_only=False")
+        pv.stop_preview(release_only=True)
+        ck.check(sched.stop_release == [False, True],
+                 "release_only=True 逐层透传（convert 档链路）")
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 

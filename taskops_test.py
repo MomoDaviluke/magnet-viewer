@@ -71,27 +71,39 @@ class FakeHandle:
         self.status_raises = False
         self.total_done = 0
         self.down_rate = 0
+        self.calls: list = []          # 全局有序调用记录（§I b③ 顺序断言）
 
     def info_hash(self):
         return self.ih
 
     def pause(self):
         self.paused += 1
+        self.calls.append("pause")
 
     def resume(self):
         self.resumed += 1
+        self.calls.append("resume")
 
     def set_flags(self, f):
         self.set_flags_calls.append(f)
+        self.calls.append(f"set:{_flag_name(f)}")
 
     def unset_flags(self, f):
         self.unset_flags_calls.append(f)
+        self.calls.append(f"unset:{_flag_name(f)}")
 
     def prioritize_files(self, prio):
         self.prioritized.append(list(prio))
+        self.calls.append("prioritize")
 
     def clear_piece_deadlines(self):
-        pass
+        self.calls.append("clear_deadlines")
+
+    def set_piece_deadline(self, piece, ms):
+        pass                          # scheduler.begin/tick 会调用（§I 真链路）
+
+    def have_piece(self, piece):
+        return False                  # 无落盘：first_missing 即播放起点
 
     def torrent_priority(self, p):
         self.torrent_priorities.append(p)
@@ -108,12 +120,24 @@ class FakeHandle:
         pass
 
 
+def _flag_name(f):
+    """libtorrent flag → 稳定短名（FakeHandle.calls 顺序断言用）。"""
+    if f == lt.torrent_flags.upload_mode:
+        return "upload_mode"
+    if f == lt.torrent_flags.auto_managed:
+        return "auto_managed"
+    return f"flag:{f}"
+
+
 class FakeTI:
     def __init__(self, n):
         self._n = n
 
     def num_files(self):
         return self._n
+
+    def piece_length(self):
+        return 16384
 
 
 class FakeStatus:
@@ -545,39 +569,64 @@ def section_lifecycle(ck):
     ws = tempfile.mkdtemp(prefix="mv_lifecycle_")
     try:
         cache = os.path.join(ws, "cache")
-        result = ParseResult(info_hash=IH, name="n", total_size=100,
-                             piece_size=16384, num_pieces=1,
-                             files=[TorrentFile(0, "n.bin", 100, 0, 0, 0)],
+        result = ParseResult(info_hash=IH, name="root", total_size=200,
+                             piece_size=16384, num_pieces=12,
+                             files=[TorrentFile(0, "root/a.bin", 100, 0, 0, 5),
+                                    TorrentFile(1, "root/b.bin", 100, 100,
+                                                6, 11)],
                              source="magnet")
 
         def mk_mgr(mode):
+            """fixture 走真 scheduler.begin()：转正前目标文件已被真实置 4
+            （审查 Minor-5 b①：让「优先级延续」命题被真实置位，而非手摆状态）。"""
             mgr = SessionManager(cache)
             mgr._cache_mode_get = lambda: mode
-            h = FakeHandle(IH, num_files=1)
+            h = FakeHandle(IH, num_files=2)
             rec = TaskRecord(handle=h, result=result, state="READY",
                              save_path=mgr._preview_dir(IH))
             with mgr._lock:
                 mgr._registry.put_record_locked(IH, rec, make_current=True)
-            mgr.scheduler.handle = h        # 预览态：调度器锚在当前句柄
-            mgr.scheduler.file = result.files[0]
+            mgr.start_preview(result.files[0])   # 真 begin()：置 [4,0]
             return mgr, h, rec
 
         # ---- convert 档：关预览自动转正 ----
         mgr, h, rec = mk_mgr("convert")
         mgr.stop_preview()
         ck.check(h.paused == 0, "convert：pause() 零调用（不冻结，引擎继续全量缓存）")
-        ck.check(not any(p and set(p) == {0} for p in h.prioritized),
-                 "convert：不清文件优先级（begin 置下的 file-priority 4 延续）")
+        # 审查 Minor-5 b②：正向断言 prioritized 序列——release/转正路径
+        # prioritize_files 零调用，begin() 置下的 [4,0] 原样延续。
+        ck.check(h.prioritized == [[4, 0]],
+                 "convert：prioritized 全程仅 begin 的一次 [4,0]（停预览零重刷）")
         ck.check(rec.download is True, "convert：rec 转正为下载任务（download=True）")
         ck.check(IH in mgr._registry.tasks, "convert：任务清单 upsert 含该 ih")
         ck.check(rec.save_path == mgr._preview_dir(IH),
                  "convert：save_path 仍 .preview/<ih>（已落盘分块零重下）")
+        # 审查 Minor-5 b③：转正收尾的 libtorrent 交织序必须是
+        # unset(upload_mode) → set(auto_managed) → resume（顺序是优先级
+        # 生效前提：upload_mode 句柄上的 set_flags/resume 语义依赖该序）。
+        tail_i = (len(h.calls) - h.calls[::-1].index("clear_deadlines") - 1
+                  if "clear_deadlines" in h.calls else -1)
+        ck.check(tail_i >= 0
+                 and h.calls[tail_i + 1:] == ["unset:upload_mode",
+                                              "set:auto_managed", "resume"],
+                 f"convert：release→转正收尾交织序正确（实得 {h.calls[tail_i + 1:]}）")
+        # ---- F1（Critical-1 回归）：转正清单 selected == 实际下载集 ----
+        sel = mgr._registry.tasks.get(IH, {}).get("selected")
+        ck.check(sel == ["root/a.bin"],
+                 f"convert：selected=[预览文件]（实得 {sel}）——不再刷成全选")
+        # resume/重启路径：activate_download 默认（非 preserve）按 selected
+        # 重设 → 目标文件 4、其余 0，**不是全选 [4,4]**（迅雷语义：转正=继续
+        # 缓存正在预览的那一个文件）。
+        mgr._taskops.activate_download(rec)
+        ck.check(h.prioritized == [[4, 0], [4, 0]],
+                 f"convert：resume 重刷仍 [4,0]（实得 {h.prioritized}）")
 
         # ---- hold 档：与基线逐字一致 ----
         mgr2, h2, rec2 = mk_mgr("hold")
         mgr2.stop_preview()
         ck.check(h2.paused == 1, "hold：pause 恰一次（基线）")
-        ck.check(h2.prioritized == [[0]], "hold：全 0 文件优先级（基线）")
+        ck.check(h2.prioritized == [[4, 0], [0, 0]],
+                 "hold：begin [4,0] 后 stop 全 0（基线）")
         ck.check(lt.torrent_flags.auto_managed in h2.unset_flags_calls,
                  "hold：撤 auto_managed（基线）")
         ck.check(rec2.download is False and IH not in mgr2._registry.tasks,
@@ -586,16 +635,16 @@ def section_lifecycle(ck):
         # ---- convert 档非转正场景：已是下载任务 → 只 release 不重复转正 ----
         mgr3 = SessionManager(cache)
         mgr3._cache_mode_get = lambda: "convert"
-        h3 = FakeHandle(IH2, num_files=1)
+        h3 = FakeHandle(IH2, num_files=2)
         rec3 = TaskRecord(handle=h3, result=result, state=STATE_DOWNLOADING,
                           download=True, save_path=mgr3._task_dir(IH2))
         with mgr3._lock:
             mgr3._registry.put_record_locked(IH2, rec3, make_current=True)
-        mgr3.scheduler.handle = h3
-        mgr3.scheduler.file = result.files[0]
+        mgr3.start_preview(result.files[0])
         before = dict(mgr3._registry.tasks)
         mgr3.stop_preview()
-        ck.check(h3.paused == 0 and mgr3._registry.tasks == before,
+        ck.check(h3.paused == 0 and mgr3._registry.tasks == before
+                 and h3.prioritized == [[4, 0]],
                  "convert：下载任务停预览只 release，不重复转正/不改清单")
     finally:
         shutil.rmtree(ws, ignore_errors=True)

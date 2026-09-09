@@ -214,11 +214,18 @@ class TaskOps:
 
     def _convert_to_download_locked(self, rec: TaskRecord, ih: str,
                                     source: str, save_subdir: str | None,
-                                    priority: int, seed: bool) -> str:
+                                    priority: int, seed: bool,
+                                    selected_files: list[str] | None = None) -> str:
         """预览/查看态记录转正为下载任务（D10）。
 
         沿用既有句柄与落盘目录（.preview/<ih>，已下载分块零额外下载），
         仅解除 upload_mode 并开始按文件优先级下载；调用方须已持锁。
+
+        ``selected_files``（阶段 B 审查 Critical-1）：转正清单的 selected
+        集合。convert 档关预览转正的是「继续缓存正在预览的那一个文件」，
+        调用方须把预览文件路径传进来——缺省 None = 全视图文件（add_task
+        入口的种子级全选语义保持现状）。不写对，resume/重启走
+        activate_download 就会按 selected 把清单刷成全选。
         """
         reg = self.reg
         rec.download = True
@@ -233,16 +240,25 @@ class TaskOps:
             task = task_from_result(rec.result, state=STATE_DOWNLOADING,
                                     save_path=rec.save_path,
                                     priority=rec.priority,
-                                    source=source, seed=seed)
+                                    source=source, seed=seed,
+                                    selected=selected_files)
             reg.tasks, _ = upsert_task(reg.tasks, task)
         else:
             rec.state = STATE_META_FETCH
             if not rec.resolving:
                 rec.resolving = True
                 rec.resolve_started = time.time()
+            # selected=[] 在 activate_download 语义中 = 全选（判式
+            # `not selected or f.path in selected`）；元数据到达后
+            # on_metadata_received 会按 view_files 回填。已知限制：本分支
+            # 只被 add_task 种子级转正打到（全选语义，与其清单一致）；
+            # convert 档关预览转正走不到这里——其快照条件要求
+            # rec.result is not None，元数据未就绪只 release 不转正。
             task = {"info_hash": ih, "source": source,
                     "name": "(获取元数据中)", "total_size": 0,
-                    "files": [], "selected": [],
+                    "files": [],
+                    "selected": (list(selected_files)
+                                 if selected_files else []),
                     "state": STATE_META_FETCH,
                     "priority": rec.priority,
                     "save_path": rec.save_path, "error": "", "retries": 0,

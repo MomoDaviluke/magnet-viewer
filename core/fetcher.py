@@ -382,10 +382,12 @@ class SessionManager:
 
     def _convert_to_download(self, rec: TaskRecord, ih: str, source: str,
                              save_subdir: str | None, priority: int,
-                             seed: bool) -> str:
+                             seed: bool,
+                             selected_files: list[str] | None = None) -> str:
         """review 记录转正为下载任务（D10，**须持锁**）。见 core.taskops。"""
         return self._taskops._convert_to_download_locked(
-            rec, ih, source, save_subdir, priority, seed)
+            rec, ih, source, save_subdir, priority, seed,
+            selected_files=selected_files)
 
     def _activate_download(self, rec: TaskRecord) -> None:
         """让下载任务真正开始。实现见 core.taskops.TaskOps.activate_download。"""
@@ -431,12 +433,13 @@ class SessionManager:
         self._preview.start_preview(f)
 
     def stop_preview(self):
-        """停预览。阶段 B 两档语义（preview_cache_mode，下次开启预览时生效）：
+        """停预览。阶段 B 两档语义（preview_cache_mode，下次关闭预览时生效）：
 
-        - ``convert``（默认）：锁内快照 (rec, ih) → 出锁 scheduler.stop
+        - ``convert``（默认）：锁内快照 (rec, ih, 预览文件) → 出锁 scheduler.stop
           (release_only=True)（只清 deadline/锚点，不 pause、不清优先级）→
-          预览态记录自动转正（D10 复用 _convert_to_download_locked，不复制
-          逻辑）→ 出锁收尾 persist/activate/request_resume（P1-4 同款编排）。
+          预览态记录自动转正（D10 复用 _convert_to_download，不复制
+          逻辑；selected 写入预览文件路径，与实际下载集对齐——Critical-1）→
+          出锁收尾 persist/activate/request_resume（P1-4 同款编排）。
           已是下载任务 / 元数据未就绪 / 无预览 → 仅 release，不重复转正。
         - ``hold``：基线行为，与迁移前逐字一致（冻结暂停）。
 
@@ -461,18 +464,27 @@ class SessionManager:
             snap = None
             if (rec is not None and rec.handle is handle
                     and not rec.download and rec.result is not None):
-                snap = (rec, ih)
+                # 预览文件路径必须在 scheduler 还活着时快照（转正 selected
+                # 的入料；stop 后 self.file 归 None）。
+                sched_file = self.scheduler.file
+                snap = (rec, ih,
+                        sched_file.path if sched_file is not None else None)
         self._preview.stop_preview(release_only=True)
         if snap is None:
             return
-        rec, ih = snap
+        rec, ih, preview_path = snap
         # review 记录的 rec.source 从不回填（register_current 不设），兜底用
         # 磁力链参数重建来源（转正清单的 source 是重启恢复的入料）。
         source = rec.source or \
             f"magnet:?xt=urn:btih:{rec.result.info_hash}"
         with reg.lock:
-            self._taskops._convert_to_download_locked(
-                rec, ih, source, None, rec.priority, bool(rec.seed))
+            # TOCTOU 复核（审查 Minor-4）：release 期间 add_task 可能已把
+            # 该记录转正（种子级全选）——再转会把它的 selected 刷没。
+            if rec.download:
+                return
+            self._convert_to_download(
+                rec, ih, source, None, rec.priority, bool(rec.seed),
+                selected_files=[preview_path] if preview_path else None)
         self._persist.persist_tasks()
         self._taskops.activate_download(rec, preserve_files=True)
         self._persist.request_resume(rec)

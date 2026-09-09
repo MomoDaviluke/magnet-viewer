@@ -87,8 +87,11 @@ contract_check 扩项（preview 模块新导入常量引用、scheduler/stop 若
 - **状态语义**：转正走既有 persist（任务清单 + `request_resume` 立即写 fastresume）；下载面板应能立刻看到这条任务（回归 download_mgr_test 手法断言清单含之）。
 - **测试**：taskops_test / session_test 加假句柄断言：convert 档 `pause()` 零调用 + 转正回调落地 + resume 文件生成；hold 档行为与基线逐字一致（防回归）。
 - contract 扩项：`scheduler.stop` 新签名指纹、`SessionManager` 相关公开面若有变同步冻结。
+- **阶段 B 审查回炉（2026-09-09）**：Critical-1——转正清单 selected 与实际下载集对齐（关预览转正=继续缓存正在预览的那一个文件，`_convert_to_download_locked` 新增可选参 `selected_files`，stop_preview 在 scheduler 存活期快照预览文件路径透传；resume/重启不再刷成全选）；Minor 批——锁段2 TOCTOU 复核（release 期间被 add_task 转正则跳过）、§I 强化（真 begin() fixture、正向 prioritized 断言、收尾交织序 unset(upload_mode)→set(auto_managed)→resume、selected 回归）、preview_test 消费 stop_release、config 生效时机措辞改「下次关闭预览时生效」。**settings UI 控件/README 文案已按 2026-09-09 用户指令裁至阶段 D。**
 
 ## 阶段 C — 配额与跨重启闭环（第三批子代理）
+
+> **挂账（阶段 B 审查 Important-2）**：convert 转正目录仍在 `.preview/`——「立即清理缓存」/退出清理会把活转正任务文件删光（保留名单不含 `.preview` 活任务），阶段 C 必须处理：转正目录改名迁入 `downloads/` 或清理入口复核 `protected_dirs`。修复前已在 `_clear_cache_now` 与 `closeEvent` 清理路径加 interim 注释标注此已知风险（只加注释不改行为）。
 
 - **竞态修复**：`_enforce_cache_quota`（main_window.py:633-656）与 `protected_dirs()` 快照之间窗口——删除前对每个候选目录**复核** keep_dirs（cache_quota 内部二次校验即可，锁纪律不变）。
 - **转正后配额语义**：convert 生成的任务在句柄存活期受 protected_dirs 保护；用户删除该任务后目录恢复可被 LRU 回收——补一条回归断言。
@@ -107,7 +110,7 @@ contract_check 扩项（preview 模块新导入常量引用、scheduler/stop 若
 ## 验收标准（整体）
 
 1. 双击预览 → 播放流畅性不倒退（moov_stream_test / qt 门控用例全绿）。
-2. 关闭预览 → 下载面板出现该任务且继续下载；退出重启 → 任务恢复续传（`.resume` 有该 hash 文件）。
+2. 关闭预览 → 下载面板出现该任务且继续下载；退出重启 → 任务恢复续传（`.resume` 有该 hash 文件）；转正任务暂停→恢复、重启→恢复后 selected 仍指向预览文件（不全选，审查 Critical-1 补断言）。
 3. 设置切 `hold` → 行为与 `445ff9a` 基线逐字一致。
 4. 画廊连刷大量图片不再绕过配额；磁盘满场景任务显式 FAILED 而非静默卡死。
 5. `regression_run.py` 全绿、`contract_check.py` FAIL 0、无已暂存 4 文件被卷入提交。

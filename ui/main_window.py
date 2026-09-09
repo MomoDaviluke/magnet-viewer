@@ -355,6 +355,11 @@ class MainWindow(QMainWindow):
 
         决策 D8：downloads/（用户下载数据）与任务持久化文件（.tasks.json /
         .resume）不在清理范围；守卫校验不变（受管标记）。
+
+        ⚠ interim（阶段 B 审查 Important-2，阶段 C 处理）：convert 转正任务
+        目录仍在 .preview/ 下，本清理会连活转正任务的已缓存文件一起删光
+        （保留名单不含 .preview 活任务）——阶段 C 须把转正目录迁入
+        downloads/ 或在此复核 protected_dirs() 后排除活任务目录。
         """
         self._stop_preview()
         if not guard_ok_for_cleanup(self.cache_dir):
@@ -768,6 +773,10 @@ class MainWindow(QMainWindow):
                 # 决策 D8：退出清理只清预览缓存，downloads/（用户下载数据）
                 # 与任务持久化文件（.tasks.json/.resume）保留；
                 # 根目录仍须通过受管标记守卫（拒绝清非受管目录）
+                # ⚠ interim（阶段 B 审查 Important-2，阶段 C 处理）：convert
+                # 转正任务目录仍在 .preview/ 下，重启前若有活转正任务，这里
+                # 会把其已缓存文件删光（清单/.resume 保留，文件没了）——
+                # 阶段 C 须迁目录或复核 protected_dirs() 排除活任务。
                 if not guard_ok_for_cleanup(self.cache_dir):
                     log_warning("main.close.clear_cache",
                                 f"拒绝清理非受管缓存目录：{self.cache_dir}")

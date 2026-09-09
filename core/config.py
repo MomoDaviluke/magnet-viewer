@@ -28,7 +28,8 @@ DEFAULTS: dict = {
     "cache_limit_mb": 2048,        # 预览缓存上限 MB，0 = 不限；超限按 LRU 清最旧预览目录
     "preview_cache_mode": PREVIEW_CACHE_CONVERT,
     # 关预览行为：convert=自动转正继续缓存（迅雷式）| hold=暂停冻结（基线）。
-    # 下次开启预览时生效；值域即两常量（cache_mode.py），不新增校验逻辑。
+    # 下次关闭预览时生效（stop_preview 现读现判，审查 Minor-8 修正措辞）；
+    # 值域即两常量（cache_mode.py），不新增校验逻辑。
     "logging_enabled": True,       # 运行日志开关（core.logutil；关闭后全部记录降为空操作）
 }
 
