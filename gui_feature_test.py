@@ -511,6 +511,66 @@ def main() -> int:
           "不传注记：缓冲栏与基线文案一致")
     vp8.deleteLater()
 
+    # ---- [4b-7] D4 Minor：顶层 listdir 失败语义 + closeEvent 单次读配置 ----
+    print("\n[4b-7] D4 收尾：listdir 失败上抛→-1 / closeEvent 配置单读")
+    # (a) cache_guard.clear_cache_contents 顶层 listdir 失败必须**上抛**
+    # OSError（基线语义：os.listdir 裸调）——静默返回 0 会让用户以为
+    # 「清理成功」而目录原封未动。调用方 _clear_preview_cache_now 已有
+    # try→-1 兜底，UI 层据此提示清理失败。
+    import ui.main_window as _mw2  # noqa: E402
+    fail_dir = os.path.join(tmp, "cache_listdir_fail")
+    os.makedirs(fail_dir, exist_ok=True)
+    _mw2.ensure_cache_dir(fail_dir)     # 写受管标记，过守卫
+    _orig_listdir = os.listdir
+    def _boom_listdir(p):
+        raise OSError(13, "Permission denied")
+    os.listdir = _boom_listdir
+    try:
+        raised = False
+        try:
+            clear_cache_contents(fail_dir)
+        except OSError:
+            raised = True
+        check(raised, "顶层 listdir 失败：clear_cache_contents 上抛 OSError"
+                      "（基线语义，不静默返回 0）")
+        orig_cd2 = w.cache_dir
+        w.cache_dir = fail_dir
+        try:
+            rc = w._clear_preview_cache_now()
+        finally:
+            w.cache_dir = orig_cd2
+        check(rc == -1, f"_clear_preview_cache_now 兜底 OSError→返回 -1（实得 {rc}）")
+    finally:
+        os.listdir = _orig_listdir
+
+    # (b) closeEvent 的 clear_cache_on_exit 只读一次配置（双读合并；False 时
+    # 也不再白算名单）。计数探针包住 cfg.get。
+    reads: list[str] = []
+    _orig_get = w.cfg.get
+    def _spy_get(key):
+        if key == "clear_cache_on_exit":
+            reads.append(key)
+        return _orig_get(key)
+    w.cfg.get = _spy_get
+    _orig_sd = w.session._sess.shutdown
+    _orig_srv = w.server.shutdown
+    _orig_clear2 = w._clear_preview_cache_now
+    w.session._sess.shutdown = lambda: None
+    w.server.shutdown = lambda: None
+    w._clear_preview_cache_now = lambda keep_dirs=(), log_key="": None
+    try:
+        w.show()                        # closeEvent 只在可见窗口上派发
+        app.processEvents()
+        w.close()
+        app.processEvents()
+    finally:
+        w.cfg.get = _orig_get
+        w.session._sess.shutdown = _orig_sd
+        w.server.shutdown = _orig_srv
+        w._clear_preview_cache_now = _orig_clear2
+    check(len(reads) == 1,
+          f"closeEvent 单次读 clear_cache_on_exit（实读 {len(reads)} 次）")
+
     # ---------------------------------------------------------------- [4c] 画廊隔离路径
     print("\n[4c] 画廊磁盘路径拼接（P0-2 回归）")
     import base64  # noqa: E402

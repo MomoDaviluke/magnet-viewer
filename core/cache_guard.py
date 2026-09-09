@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from typing import Iterable
 
 CACHE_MARKER = ".magnet_viewer_cache"
 
@@ -80,8 +81,9 @@ def guard_ok_for_cleanup(path: str, require_marker: bool = True) -> bool:
     return True
 
 
-def clear_cache_contents(cache_dir: str, keep: frozenset | None = None,
-                         keep_dirs: set[str] = ()) -> int:
+def clear_cache_contents(cache_dir: str,
+                         keep: Iterable[str] | None = None,
+                         keep_dirs: set[str] | Iterable[str] = ()) -> int:
     """清空缓存目录内容，但保留名单之外的条目一律删除（唯一清理入口）。
 
     **保留名单**（默认 CLEANUP_KEEP）：downloads/（用户下载数据）、
@@ -99,7 +101,10 @@ def clear_cache_contents(cache_dir: str, keep: frozenset | None = None,
     调用方须先经 guard_ok_for_cleanup() 守卫（本函数不重复校验，便于
     设置对话框对编辑框当前值先校验再清理）。返回删除的条目数（顶层
     口径；keep_dirs 部分清理时嵌套删除数上卷），目录不存在返回 -1。
-    失败条目静默跳过（与既有清理语义一致）。
+    **顶层** listdir 失败（权限/竞态删除）上抛 OSError——调用方
+    （_clear_preview_cache_now 等）统一 try→-1 兜底并提示清理失败，
+    绝不静默返回 0 冒充「清理成功、删了 0 项」（D4c，基线语义）；
+    **嵌套**失败条目与嵌套目录扫描失败静默跳过（部分清理尽力而为）。
     """
     keep = CLEANUP_KEEP if keep is None else frozenset(keep)
     keep_paths = {os.path.normcase(os.path.abspath(d))
@@ -115,11 +120,16 @@ def clear_cache_contents(cache_dir: str, keep: frozenset | None = None,
     def _purge(path: str, top: bool) -> int:
         """删 path 下无保条目。keep 名单只在顶层生效（嵌套 .preview/<ih>
         内不豁免同名条目）；keep_paths 命中目录整棵跳过，含受保后代的目录
-        递归部分清理。keep_paths 为空时每层都是纯 rmtree → 基线行为。"""
+        递归部分清理。keep_paths 为空时每层都是纯 rmtree → 基线行为。
+
+        ``top=True``（顶层入口）时 listdir 失败**上抛**（调用方兜底）；
+        嵌套层失败返回 0（只跳过该目录，不影响兄弟清理）。"""
         removed = 0
         try:
             names = os.listdir(path)
         except OSError:
+            if top:
+                raise
             return 0
         for name in names:
             if top and name in keep:

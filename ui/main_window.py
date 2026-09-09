@@ -843,14 +843,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            # D4b：clear_cache_on_exit 单读（旧实现在名单快照与清理分支
+            # 各读一次——双读之间设置被改会「快照了却不清理/清理了没快照」
+            # 的错拍，且 False 时白算一遍 protected_dirs()）。
             # C1 时机结论（实证 core/session.SessionCore.shutdown）：shutdown
             # 末段 clear_runtime_state_locked() 清空注册表——**事后**
             # protected_dirs() 必为空。名单快照必须在 shutdown 之前抓。
-            exit_keep = (self._live_cache_dirs()
-                         if self.cfg.get("clear_cache_on_exit") else set())
+            exit_clear = bool(self.cfg.get("clear_cache_on_exit"))
+            exit_keep = self._live_cache_dirs() if exit_clear else set()
             self.session.shutdown()
             self.server.shutdown()
-            if self.cfg.get("clear_cache_on_exit"):
+            if exit_clear:
                 # 决策 D8：退出清理只清预览缓存，downloads/（用户下载数据）
                 # 与任务持久化文件（.tasks.json/.resume）保留；
                 # 根目录仍须通过受管标记守卫（拒绝清非受管目录）。

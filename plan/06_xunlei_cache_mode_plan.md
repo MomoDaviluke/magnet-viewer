@@ -120,3 +120,36 @@ contract_check 扩项（preview 模块新导入常量引用、scheduler/stop 若
 - A0 若证伪"全文件已在下载"→ 阶段 B 前必须改 begin 策略，本计划作废重议。
 - convert 档默认值改变现有用户行为（关预览不再暂停）——RELEASE NOTE 单列一条；如反馈过激，改默认为 `"hold"` 是一行 config 的事。
 - 每阶段独立 commit，任一阶段出问题回滚该 commit 即可，不跨阶段纠缠。
+
+---
+
+## 完成记录（阶段 D 收尾批，2026-09-09）
+
+### Commits（copilot-fixes，基线 9a9e05d 之上三刀）
+
+| commit | 内容 |
+|---|---|
+| `382e8b9` | **D0+D1**：`_enforce_cache_quota` 的 LRU keep 回调改**裸调** `session.protected_dirs()`（fail-closed：异常透传给 `cache_quota._norm_keep`→None→本轮零删除；审查 Important-1）；`_live_cache_dirs` 空集兜底保留、只服务手动/退出清理入口（fail-open 有意，docstring 注明分工）。`SessionCore.handle_alert` 新增写盘失败分支 `_handle_write_error`：`file_error_alert`/`storage_failed_alert`（`_write_error_kind` getattr 探测——**本环境 libtorrent 2.1.1 已无 `storage_failed_alert`，1.2 起并入 `file_error_alert`**，两代命名与测试替身共用入口）→ 归属任务 STATE_FAILED + rec.error + tasks 清单同步 + persist（锁内改态、出锁落盘，watchdog 下载分支同款编排，R-1/P1-4）；预览任务经 emit_error 弹 UI；error/filename 缺失 getattr 兜底。 |
+| `42fa7ec` | **D2+D3**：SettingsDialog 缓存区新增「预览缓存模式」QComboBox（值域逐字 `core.cache_mode.PREVIEW_CACHE_MODES`——消灭其零引用状态；convert=「关闭预览后继续缓存（推荐）」/ hold=「关闭预览即暂停」；初值 `cfg.get("preview_cache_mode")`、`_save` 回写）；底部生效文案与 README 设置条目补「预览缓存模式在下次**关闭**预览时生效」。新增纯函数 `ui.main_window.background_cache_text`（convert 档 + file_progress 命中 → 「后台缓存完整文件：xx%（播放位置优先）」，数据源为 status() 现成数组，零新增查询路径），`update_buffer` 加可选参 `bg_note` 拼接注记（不传=基线文案逐字不变，hold 档恒 None）。 |
+| 本批末刀（D4+文档，见 git log 首条；代码首落 `b3c36d3`→经 amend 并入完成记录） | **D4 Minor 批**：a) `cache_guard.clear_cache_contents` 注解 `keep: Iterable[str] \| None`、`keep_dirs: set[str] \| Iterable[str]`；`cache_quota._norm_keep`/`enforce_preview_limit` 注解补 callable 形态（`Callable[[], ...]`，对齐 C2 实际接受面）。b) `closeEvent` `clear_cache_on_exit` 双读合并单读（消双读错拍窗口 + False 时不再白算名单）。c) 顶层 `os.listdir` 失败改回基线上抛语义（嵌套层仍静默跳过；`_clear_preview_cache_now` try→-1 兜住），杜绝「静默返回 0 冒充清理成功」。 |
+
+### 测试
+
+- session_test §E 新增 E6–E9（假 alert 注入：下载任务标错+清单同步+persist+**代理锁探针证旁路写持锁**；storage_failed 兜底；预览 emit_error；迟到告警丢弃）——OK 87（+9）。
+- gui_feature_test 新增 [4b-4]（D0：真 tempfile 超限 + 坏回调→零删除 fail-closed 黑盒 + spy 截获 keep 闭包单独引爆白盒）、[4b-5]（D2 combo 值域/初值/保存回写）、[4b-6]（D3 文案纯函数 + update_buffer 拼接）、[4b-7]（D4c 上抛→-1、D4b cfg.get 计数探针单读）——通过 105 项（+15）。
+- TDD 全程红→绿（E6–E9 先行 FAIL 7、[4b-4]~[4b-7] 各自先行 FAIL 后转绿）。
+
+### 验收标准逐条核对
+
+1. **播放流畅性不倒退**：✅ moov_stream_test EXIT=0、qt_stream_open_test PASS（regression_run 内），阶段 D 未触流服务/调度路径。
+2. **关预览转正→下载面板可见→重启续传→selected 指预览文件**：✅ 阶段 B/C 落地并各有回归（fetcher.stop_preview convert 编排、taskops_test §J 跨重启闭环、Critical-1 selected 对齐）；阶段 D 的 D2 下拉/D3 文案只做读写配置与显示，不改转正行为。
+3. **切 hold 与基线逐字一致**：✅ `stop_preview` hold 分支原样走 `_preview.stop_preview()`（阶段 B 审查回炉钉住）；D3 文案 hold 档恒 None（[4b-6] 断言）；D2 combo 仅读写 `preview_cache_mode` 值本身。
+4. **画廊不绕配额 + 磁盘满显式 FAILED**：✅ 前者 A2（gui [4f]）；后者本批 D1 落地——**以假 alert 注入验证标错链路**（真磁盘满端到端不可稳定复现，libtorrent 真发 file_error_alert 即走同一路径）；D0 补 LRU 名单故障不扩大删除面。
+5. **回归/契约/提交卫生**：✅ regression_run 16 套全绿（收口前复跑）、contract_check OK 158 / FAIL 0（handle_alert 冻结签名未动；新增公开项 `background_cache_text` 为 UI 模块纯函数、`SettingsDialog.cache_mode` 为实例属性，均不在既有冻结表语义内，无需扩项）、三刀全部 pathspec 提交，4 个无关已暂存文件未卷入（提交后 git status 复核）。
+
+### 遗留（已知不修，仅记录）
+
+- **v2-only 哈希 btih 兜底**：磁力链纯 v2 种子（无 v1 哈希）时 btih 参数兜底仍不完整——历史挂账，与本阶段无关，未动。
+- **受保目录==cache 根时清理 no-op 缺提示**：`clear_cache_contents` 命中 cache 根时返回 0（内容全保），UI 显示「清理完成（无项）」而非「活任务占用，未清理」——语义正确但提示不精确，留待 UI 文案专项。
+- **真·磁盘满端到端用例**：依赖可控配额文件系统，offscreen 测试环境不具备，以 handle_alert 单元级覆盖替代。
+

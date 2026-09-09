@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from typing import Callable, Iterable
 
 from core.logutil import log_warning
 
@@ -78,7 +79,9 @@ def scan_preview_dirs(preview_root: str) -> list[tuple[str, int, float]]:
     return out
 
 
-def _norm_keep(keep_dirs) -> set[str] | None:
+def _norm_keep(
+        keep_dirs: "set[str] | Iterable[str] | Callable[[], set[str] | Iterable[str]] | None"
+        ) -> set[str] | None:
     """keep_dirs 归一：set/None 直取，callable 现取快照（C2）。
 
     回调抛异常返回 None——调用方按「名单故障」保守处理（本轮不删），
@@ -92,9 +95,10 @@ def _norm_keep(keep_dirs) -> set[str] | None:
             for d in (kd or set()) if d}
 
 
-def enforce_preview_limit(preview_root: str, limit_mb: int,
-                          keep_dirs: set[str] | None = None,
-                          warn=None) -> tuple[int, int]:
+def enforce_preview_limit(
+        preview_root: str, limit_mb: int,
+        keep_dirs: "set[str] | Iterable[str] | Callable[[], set[str] | Iterable[str]] | None" = None,
+        warn=None) -> tuple[int, int]:
     """执行配额：超限时按 LRU 删除最旧的任务目录。
 
     返回 ``(清理后总占用字节, 本次释放字节)``。
