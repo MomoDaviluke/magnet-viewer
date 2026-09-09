@@ -170,7 +170,10 @@ class MainWindow(QMainWindow):
         self.session = SessionManager(
             self.cache_dir,
             download_dir=str(self.cfg.get("download_dir") or "").strip() or None,
-            active_downloads=int(self.cfg.get("default_concurrency") or 3))
+            active_downloads=int(self.cfg.get("default_concurrency") or 3),
+            # 阶段 B：预览缓存模式（convert/hold）——每次关预览时现读，
+            # 保存设置即「下次关预览生效」，无需重建会话。
+            cache_mode_get=lambda: self.cfg.get("preview_cache_mode"))
         self.session.start(proxy=self.cfg.proxy(),
                            metadata_timeout=self.cfg.get("metadata_timeout"))
         # 会话级限速 + 日志开关：启动即按配置应用（P2-18 此前承诺了

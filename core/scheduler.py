@@ -246,20 +246,27 @@ class PreviewScheduler:
             return 0.0
         return min(1.0, self.contiguous_progress() / self.file.size)
 
-    def stop(self) -> None:
-        """取消预览：清空 deadline、全部文件优先级置 0 并暂停。
+    def stop(self, release_only: bool = False) -> None:
+        """取消预览：清空 deadline 并还原调度锚点。
 
+        release_only=False（hold 档／基线行为）：全部文件优先级置 0 并暂停。
         同时撤掉 auto_managed：libtorrent 的队列管理（active_downloads）
         可能自动 resume 处于 paused 的种子，导致「停止预览」后仍在后台续传。
+
+        release_only=True（convert 档）：**只**清 deadline + 还原锚点——
+        不清文件优先级、不 pause、不撤 auto_managed。begin() 已把目标文件
+        file-priority 置 4（引擎本就在全文件落盘，A0 实证），是否转正由
+        宿主（SessionManager）在锁外决策；转正后的句柄继续按优先级缓存。
         """
         if self.handle is not None:
             try:
                 self.handle.clear_piece_deadlines()
-                ti = self.handle.torrent_file()
-                if ti is not None:
-                    self.handle.prioritize_files([0] * ti.num_files())
-                    self.handle.unset_flags(lt.torrent_flags.auto_managed)
-                self.handle.pause()
+                if not release_only:
+                    ti = self.handle.torrent_file()
+                    if ti is not None:
+                        self.handle.prioritize_files([0] * ti.num_files())
+                        self.handle.unset_flags(lt.torrent_flags.auto_managed)
+                    self.handle.pause()
             except Exception as e:
                 log_warning("scheduler.stop", f"{e}")
         self.handle = None

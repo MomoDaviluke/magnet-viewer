@@ -57,8 +57,10 @@ class PreviewCore:
             raise RuntimeError("请先解析种子")
         self._scheduler_get().begin(handle, f)
 
-    def stop_preview(self):
-        self._scheduler_get().stop()
+    def stop_preview(self, release_only: bool = False):
+        """停预览。release_only=True（convert 档）：只清 deadline/锚点，
+        不 pause、不清文件优先级——是否转正由宿主（SessionManager）锁外决策。"""
+        self._scheduler_get().stop(release_only=release_only)
 
     # ---------- 磁盘路径反查（流服务回调入口） ----------
 

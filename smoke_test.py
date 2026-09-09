@@ -123,6 +123,7 @@ def main():
     # DEFAULTS 里——按文档调用 AppConfig.get 会 KeyError，且无任何接线。
     from core.config import DEFAULTS as _DEF, _TYPES as _TTYPES
     for _k, _v in (("download_rate_limit", 0), ("cache_limit_mb", 2048),
+                   ("preview_cache_mode", "convert"),
                    ("logging_enabled", True)):
         assert _k in _DEF and _DEF[_k] == _v, f"DEFAULTS 缺键或默认值错误: {_k}"
     assert _TTYPES.get("logging_enabled") is bool
@@ -617,6 +618,8 @@ def main():
             self.deadlines = []
             self.prios = None
             self.cleared = 0
+            self.paused_n = 0
+            self.unset_calls: list = []
 
         def torrent_file(self):
             return self.ti
@@ -635,7 +638,7 @@ def main():
             self.prios = list(prios)
 
         def unset_flags(self, _f):
-            pass
+            self.unset_calls.append(_f)
 
         def set_flags(self, _f):
             pass
@@ -644,7 +647,7 @@ def main():
             pass
 
         def pause(self):
-            pass
+            self.paused_n += 1
 
     pl_s = 1024 * 1024
     f_sched = TorrentFile(0, "root/demo.mp4", 100 * pl_s, 0, 0, 99)   # 100 块
@@ -703,6 +706,33 @@ def main():
     assert h_sched.cleared >= 1, "seek 未清理旧 deadline"
     assert after >= {96, 97, 98, 99}, "清理后未重建尾部 moov 窗口"
     print("[3c3] 调度器预约窗口通过：seek 立即预约 / 点播有上限 / 窗口随播放位置滚动 / 跳转清理残留")
+
+    # ---------------- [3c4] 阶段 B：stop(release_only)（迅雷式转正生命周期） ----------------
+    # release_only=True：只清 deadline + 还原调度锚点——**不** pause、**不**清文件
+    # 优先级、**不**撤 auto_managed（转正后引擎继续按 file-priority 4 全量缓存）。
+    h_rel = _FakeHandle(pl_s, 3)
+    sched = PreviewScheduler()
+    sched.begin(h_rel, f_sched)
+    h_rel.prios = None                      # 探针：begin 后清计数（begin 曾置 [4,0,0]/撤 upload_mode）
+    h_rel.unset_calls.clear()
+    sched.stop(release_only=True)
+    assert h_rel.paused_n == 0, "release_only 不应 pause"
+    assert h_rel.prios is None, "release_only 不应清文件优先级"
+    assert h_rel.unset_calls == [], "release_only 不应撤 auto_managed"
+    assert h_rel.cleared >= 1, "release_only 必须清 deadline"
+    assert sched.handle is None and sched.file is None \
+        and sched._scheduled_to == -1 and sched._tail_pieces == [], \
+        "release_only 锚点状态未还原"
+    # 默认参数（hold 档）：pause 一次 + 全 0 优先级 + 撤 auto_managed——基线逐字一致
+    h_hold = _FakeHandle(pl_s, 3)
+    sched = PreviewScheduler()
+    sched.begin(h_hold, f_sched)
+    h_hold.prios = None
+    sched.stop()
+    assert h_hold.paused_n == 1, "stop() 默认参数必须 pause（基线）"
+    assert h_hold.prios == [0, 0, 0], f"stop() 默认参数必须全 0 优先级：{h_hold.prios}"
+    assert h_hold.unset_calls, "stop() 默认参数必须撤 auto_managed"
+    print("[3c4] stop(release_only) 通过：release 只清锚点不冻结，默认参数基线逐字不变")
 
     # 分块映射：连续前缀 + 任意区间可用性（moov 在尾部的判定基础）
     pl, size = 16 * 1024, 300 * 1024

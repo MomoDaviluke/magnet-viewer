@@ -25,6 +25,7 @@ import threading
 import libtorrent as lt
 
 from .cache_guard import ensure_cache_dir
+from .cache_mode import PREVIEW_CACHE_CONVERT
 from .logutil import log_exception, log_warning
 from .models import ParseResult, TorrentFile
 from .preview import PreviewCore
@@ -65,7 +66,12 @@ class SessionManager:
 
     def __init__(self, cache_dir: str, listen_port: int = 6881,
                  download_dir: str | None = None,
-                 active_downloads: int = 3):
+                 active_downloads: int = 3,
+                 cache_mode_get=None):
+        """cache_mode_get: 可选回调 -> str，预览缓存模式（preview_cache_mode）
+        的取值来源（UI 注入 AppConfig.get；core 层不 import Qt）。None/异常
+        兜底为 convert（与 DEFAULTS 一致）。"""
+        self._cache_mode_get = cache_mode_get
         self.cache_dir = os.path.abspath(cache_dir)
         self.listen_port = listen_port
         # 下载根目录（决策 D4：允许任意位置，默认 cache_dir/downloads）
@@ -425,7 +431,51 @@ class SessionManager:
         self._preview.start_preview(f)
 
     def stop_preview(self):
-        self._preview.stop_preview()
+        """停预览。阶段 B 两档语义（preview_cache_mode，下次开启预览时生效）：
+
+        - ``convert``（默认）：锁内快照 (rec, ih) → 出锁 scheduler.stop
+          (release_only=True)（只清 deadline/锚点，不 pause、不清优先级）→
+          预览态记录自动转正（D10 复用 _convert_to_download_locked，不复制
+          逻辑）→ 出锁收尾 persist/activate/request_resume（P1-4 同款编排）。
+          已是下载任务 / 元数据未就绪 / 无预览 → 仅 release，不重复转正。
+        - ``hold``：基线行为，与迁移前逐字一致（冻结暂停）。
+
+        转正后目录仍是 .preview/<ih>（沿用已落盘分块，零重下），天然进入
+        protected_dirs() 保护名单；引擎继续按 begin() 置下的 file-priority 4
+        全量缓存（A0 实证）。
+        """
+        try:
+            mode = str(self._cache_mode_get()
+                       if self._cache_mode_get else PREVIEW_CACHE_CONVERT)
+        except Exception as e:
+            log_warning("fetcher.stop_preview.mode", f"{e}，按默认 convert")
+            mode = PREVIEW_CACHE_CONVERT
+        if mode != PREVIEW_CACHE_CONVERT:
+            self._preview.stop_preview()      # hold：基线路径原样
+            return
+        reg = self._registry
+        with reg.lock:                        # 锁内零 libtorrent：只取快照
+            handle = self.scheduler.handle
+            ih = registry_hash_key(handle) if handle is not None else None
+            rec = reg.torrents.get(ih) if ih else None
+            snap = None
+            if (rec is not None and rec.handle is handle
+                    and not rec.download and rec.result is not None):
+                snap = (rec, ih)
+        self._preview.stop_preview(release_only=True)
+        if snap is None:
+            return
+        rec, ih = snap
+        # review 记录的 rec.source 从不回填（register_current 不设），兜底用
+        # 磁力链参数重建来源（转正清单的 source 是重启恢复的入料）。
+        source = rec.source or \
+            f"magnet:?xt=urn:btih:{rec.result.info_hash}"
+        with reg.lock:
+            self._taskops._convert_to_download_locked(
+                rec, ih, source, None, rec.priority, bool(rec.seed))
+        self._persist.persist_tasks()
+        self._taskops.activate_download(rec, preserve_files=True)
+        self._persist.request_resume(rec)
 
     def _find_record_for_path(self, disk_path: str):
         """磁盘路径 -> (TaskRecord, TorrentFile) 反查。实现见 core.preview。"""

@@ -171,7 +171,9 @@ def main() -> int:
         "begin": [("handle", False), ("file", False)],              # 契约 #5
         "request_range": [("start_byte", False), ("end_byte", False)],
         "seek_to_byte": [("byte_offset", False)],
-        "stop": [],
+        # 阶段 B：stop 新增可选参数 release_only（convert 档只清锚点不
+        # 冻结）。可选参数不破坏既有调用面——默认 False 行为与基线逐字一致。
+        "stop": [("release_only", True)],
         "contiguous_progress": [],
         "tail_ready": [],
         "buffer_progress": [],
@@ -280,7 +282,8 @@ def main() -> int:
     # find/piece_map/demand 的 None/False「不可判定」语义是流服务安全前提。
     sig_check("preview.PreviewCore", preview.PreviewCore, {
         "start_preview": [("f", False)],
-        "stop_preview": [],
+        # 阶段 B：可选参数 release_only（convert 档停预览不冻结）
+        "stop_preview": [("release_only", True)],
         "find_record_for_path": [("disk_path", False)],
         "piece_map_for_path": [("disk_path", False)],
         "demand_for_path": [("disk_path", False), ("start_byte", False),
@@ -308,7 +311,9 @@ def main() -> int:
         "add_task": [("source", False), ("save_subdir", True),
                      ("priority", True), ("seed", True)],
         "task_dir": [("ih", False), ("save_subdir", True)],
-        "activate_download": [("rec", False)],
+        # 阶段 B：preserve_files（convert 转正保留预览 file-priority，
+        # 且解除 upload_mode → auto_managed → resume 的调用顺序是转正生效前提）
+        "activate_download": [("rec", False), ("preserve_files", True)],
         "set_priority": [("task_id", False), ("priority", False)],
         "pause_task": [("task_id", False)],
         "resume_task": [("task_id", False)],

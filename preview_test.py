@@ -114,13 +114,15 @@ class FakeSched:
         self.active = active
         self.file = file
         self.stops = 0
+        self.stop_release: list = []   # 每次 stop 的 release_only 实参
         self.begins: list = []
 
     def begin(self, h, f):
         self.begins.append((h, f))
 
-    def stop(self):
+    def stop(self, release_only=False):
         self.stops += 1
+        self.stop_release.append(release_only)
 
     def contiguous_progress(self):
         return 150

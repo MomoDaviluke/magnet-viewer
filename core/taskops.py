@@ -254,18 +254,25 @@ class TaskOps:
         # 失败语义不变（两者内部均仅告警）。
         return ih
 
-    def activate_download(self, rec: TaskRecord) -> None:
-        """让下载任务真正开始：解除 upload_mode、按所选文件设优先级、resume。
+    def activate_download(self, rec: TaskRecord,
+                          preserve_files: bool = False) -> None:
+        """让下载任务真正开始：解除 upload_mode、resume（可选重设文件优先级）。
 
         预览任务（scheduler.begin）不在此列：它独立 unset auto_managed +
         手动 resume，保证不被 active_downloads 队列饿死（沿用既有做法）。
+
+        ``preserve_files=True``（阶段 B convert 转正）：跳过按任务清单
+        "selected" 重设文件优先级——预览态 begin() 已把目标文件置 4、其余
+        置 0，转正要延续的正是在下那些块。且 libtorrent 对 upload_mode
+        句柄的 prioritize_files 会被丢弃，这里必须**先解除 upload_mode
+        再置 auto_managed 最后 resume**，优先级才真正保留。
         """
         if rec.handle is None:
             return
         try:
             rec.handle.unset_flags(lt.torrent_flags.upload_mode)
             rec.handle.set_flags(lt.torrent_flags.auto_managed)
-            if rec.result is not None:
+            if rec.result is not None and not preserve_files:
                 ti = rec.handle.torrent_file()
                 if ti is not None:
                     ih = hash_key(rec.handle)

@@ -90,6 +90,9 @@ class FakeHandle:
     def prioritize_files(self, prio):
         self.prioritized.append(list(prio))
 
+    def clear_piece_deadlines(self):
+        pass
+
     def torrent_priority(self, p):
         self.torrent_priorities.append(p)
 
@@ -537,6 +540,67 @@ def section_facade(ck):
         shutil.rmtree(ws, ignore_errors=True)
 
 
+def section_lifecycle(ck):
+    ck.section("§I 转正生命周期（plan/06 阶段 B：convert/hold 两档，假句柄 + 真 SessionManager，不启会话）")
+    ws = tempfile.mkdtemp(prefix="mv_lifecycle_")
+    try:
+        cache = os.path.join(ws, "cache")
+        result = ParseResult(info_hash=IH, name="n", total_size=100,
+                             piece_size=16384, num_pieces=1,
+                             files=[TorrentFile(0, "n.bin", 100, 0, 0, 0)],
+                             source="magnet")
+
+        def mk_mgr(mode):
+            mgr = SessionManager(cache)
+            mgr._cache_mode_get = lambda: mode
+            h = FakeHandle(IH, num_files=1)
+            rec = TaskRecord(handle=h, result=result, state="READY",
+                             save_path=mgr._preview_dir(IH))
+            with mgr._lock:
+                mgr._registry.put_record_locked(IH, rec, make_current=True)
+            mgr.scheduler.handle = h        # 预览态：调度器锚在当前句柄
+            mgr.scheduler.file = result.files[0]
+            return mgr, h, rec
+
+        # ---- convert 档：关预览自动转正 ----
+        mgr, h, rec = mk_mgr("convert")
+        mgr.stop_preview()
+        ck.check(h.paused == 0, "convert：pause() 零调用（不冻结，引擎继续全量缓存）")
+        ck.check(not any(p and set(p) == {0} for p in h.prioritized),
+                 "convert：不清文件优先级（begin 置下的 file-priority 4 延续）")
+        ck.check(rec.download is True, "convert：rec 转正为下载任务（download=True）")
+        ck.check(IH in mgr._registry.tasks, "convert：任务清单 upsert 含该 ih")
+        ck.check(rec.save_path == mgr._preview_dir(IH),
+                 "convert：save_path 仍 .preview/<ih>（已落盘分块零重下）")
+
+        # ---- hold 档：与基线逐字一致 ----
+        mgr2, h2, rec2 = mk_mgr("hold")
+        mgr2.stop_preview()
+        ck.check(h2.paused == 1, "hold：pause 恰一次（基线）")
+        ck.check(h2.prioritized == [[0]], "hold：全 0 文件优先级（基线）")
+        ck.check(lt.torrent_flags.auto_managed in h2.unset_flags_calls,
+                 "hold：撤 auto_managed（基线）")
+        ck.check(rec2.download is False and IH not in mgr2._registry.tasks,
+                 "hold：不转正、不进任务清单（基线）")
+
+        # ---- convert 档非转正场景：已是下载任务 → 只 release 不重复转正 ----
+        mgr3 = SessionManager(cache)
+        mgr3._cache_mode_get = lambda: "convert"
+        h3 = FakeHandle(IH2, num_files=1)
+        rec3 = TaskRecord(handle=h3, result=result, state=STATE_DOWNLOADING,
+                          download=True, save_path=mgr3._task_dir(IH2))
+        with mgr3._lock:
+            mgr3._registry.put_record_locked(IH2, rec3, make_current=True)
+        mgr3.scheduler.handle = h3
+        mgr3.scheduler.file = result.files[0]
+        before = dict(mgr3._registry.tasks)
+        mgr3.stop_preview()
+        ck.check(h3.paused == 0 and mgr3._registry.tasks == before,
+                 "convert：下载任务停预览只 release，不重复转正/不改清单")
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
 def main() -> int:
     ck = ts.Checker("taskops_test（阶段 4 任务 CRUD 专项）")
     ck.section("core/taskops.py 专项验收（假句柄 + 真注册表，不联网）")
@@ -548,6 +612,7 @@ def main() -> int:
     section_focus(ck)
     section_tasks(ck)
     section_facade(ck)
+    section_lifecycle(ck)
     return ck.report()
 
 
