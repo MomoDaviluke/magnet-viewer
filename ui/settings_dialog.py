@@ -20,11 +20,16 @@ PROXY_LABELS = [("none", "不使用代理（直连）"),
 
 class SettingsDialog(QDialog):
     def __init__(self, cfg: AppConfig, cache_dir: str, on_clear_cache=None,
-                 parent=None):
+                 keep_dirs_get=None, parent=None):
         super().__init__(parent)
         self.cfg = cfg
         self.cache_dir = cache_dir
         self._on_clear_cache = on_clear_cache  # 由主窗口注入：停止预览并清缓存
+        # 阶段 C C1：活任务落盘目录提供器（主窗口注入 session.protected_dirs
+        # 闭包——UI 不直闯 core 内部）。对话框清理编辑框当前值时，命中的
+        # 目录连同内容整体跳过，防 convert 转正任务（住 .preview/<ih>）被
+        # 手动清理误删。None = 基线行为（无活任务复核）。
+        self._keep_dirs_get = keep_dirs_get
         self.setWindowTitle("设置")
         self.setMinimumWidth(460)
 
@@ -161,7 +166,9 @@ class SettingsDialog(QDialog):
         内容删除统一走 `clear_cache_contents()` 的保留名单——downloads/
         （用户下载数据）、.tasks.json（任务清单）、.resume/（续传数据）
         绝不参与清理（历史缺陷：此处曾再以 `_rmtree_quiet` 无名单清空
-        整个目录，误删用户下载数据，P0-1）。
+        整个目录，误删用户下载数据，P0-1）。阶段 C C1：清理前经注入的
+        `keep_dirs_get()` 复核活任务落盘目录（convert 转正任务住
+        .preview/<ih>，连同内容整体跳过）；未注入 = 基线行为。
         """
         target = (self.cache_edit.text().strip() or self.cache_dir)
         if not guard_ok_for_cleanup(target):
@@ -172,7 +179,12 @@ class SettingsDialog(QDialog):
             return
         if self._on_clear_cache is not None:
             self._on_clear_cache()   # 停预览等准备工作（针对当前会话目录）
-        removed = clear_cache_contents(target)
+        try:
+            keep = set(self._keep_dirs_get() or ()) if (
+                self._keep_dirs_get is not None) else set()
+        except Exception:
+            keep = set()             # 名单故障退回基线，绝不阻断清理
+        removed = clear_cache_contents(target, keep_dirs=keep)
         os.makedirs(target, exist_ok=True)
         QMessageBox.information(self, "清理完成",
                                 f"缓存已清理{'（' + str(removed) + ' 项）' if removed else ''}")

@@ -80,30 +80,69 @@ def guard_ok_for_cleanup(path: str, require_marker: bool = True) -> bool:
     return True
 
 
-def clear_cache_contents(cache_dir: str, keep: frozenset | None = None) -> int:
+def clear_cache_contents(cache_dir: str, keep: frozenset | None = None,
+                         keep_dirs: set[str] = ()) -> int:
     """清空缓存目录内容，但保留名单之外的条目一律删除（唯一清理入口）。
 
     **保留名单**（默认 CLEANUP_KEEP）：downloads/（用户下载数据）、
     .tasks.json（任务清单）、.resume/（fastresume 续传数据）、受管标记。
 
+    ``keep_dirs``（阶段 C C1）：**绝对路径集合**（调用方自
+    ``session.protected_dirs()`` 取快照）——命中目录**及其内容**整体跳过，
+    归一判定（normcase+abspath）与 cache_quota 的 keep 语义对齐。convert
+    转正任务的落盘目录仍在 ``.preview/<ih>``（沿用已下分块零重下），手动
+    清理/退出清理若不复核活任务名单会把其已缓存文件删光、引擎对着空目录
+    重下（永动机）。父目录（如 .preview）因含受保子目录转入**部分清理**
+    （只删无保兄弟）。缺省空集 = 基线行为逐字不变（无命中即每层纯 rmtree，
+    向后兼容）。
+
     调用方须先经 guard_ok_for_cleanup() 守卫（本函数不重复校验，便于
-    设置对话框对编辑框当前值先校验再清理）。返回删除的条目数，
-    目录不存在返回 -1。失败条目静默跳过（与既有清理语义一致）。
+    设置对话框对编辑框当前值先校验再清理）。返回删除的条目数（顶层
+    口径；keep_dirs 部分清理时嵌套删除数上卷），目录不存在返回 -1。
+    失败条目静默跳过（与既有清理语义一致）。
     """
     keep = CLEANUP_KEEP if keep is None else frozenset(keep)
+    keep_paths = {os.path.normcase(os.path.abspath(d))
+                  for d in keep_dirs if d}
     if not os.path.isdir(cache_dir):
         return -1
-    removed = 0
-    for name in os.listdir(cache_dir):
-        if name in keep:
-            continue
-        p = os.path.join(cache_dir, name)
+    if os.path.normcase(os.path.abspath(cache_dir)) in keep_paths:
+        return 0            # 缓存根本身是活任务落盘目录：内容全保，清理无操作
+
+    def _norm(p: str) -> str:
+        return os.path.normcase(os.path.abspath(p))
+
+    def _purge(path: str, top: bool) -> int:
+        """删 path 下无保条目。keep 名单只在顶层生效（嵌套 .preview/<ih>
+        内不豁免同名条目）；keep_paths 命中目录整棵跳过，含受保后代的目录
+        递归部分清理。keep_paths 为空时每层都是纯 rmtree → 基线行为。"""
+        removed = 0
         try:
-            if os.path.isdir(p):
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                os.remove(p)
-            removed += 1
+            names = os.listdir(path)
         except OSError:
-            pass
-    return removed
+            return 0
+        for name in names:
+            if top and name in keep:
+                continue
+            p = os.path.join(path, name)
+            norm = _norm(p)
+            if norm in keep_paths:
+                continue    # 活任务目录（含转正的 .preview/<ih>）整棵跳过
+            try:
+                if os.path.isdir(p):
+                    if any(kp.startswith(norm + os.sep)
+                           for kp in keep_paths):
+                        # 内含受保子目录：只删无保部分；父目录保留不计条目，
+                        # 但嵌套删除数上卷（口径：实删文件/目录条目总数）
+                        removed += _purge(p, False)
+                    else:
+                        shutil.rmtree(p, ignore_errors=True)
+                        removed += 1
+                else:
+                    os.remove(p)
+                    removed += 1
+            except OSError:
+                pass
+        return removed
+
+    return _purge(cache_dir, top=True)

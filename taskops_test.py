@@ -650,6 +650,153 @@ def section_lifecycle(ck):
         shutil.rmtree(ws, ignore_errors=True)
 
 
+def section_promote_cross_restart(ck):
+    ck.section("§J 转正跨重启/删任务回收闭环（plan/06 阶段 C C3，假句柄，不联网）")
+    ws = tempfile.mkdtemp(prefix="mv_promote_")
+
+    def _enforce(root, limit_mb, keep):
+        from core import cache_quota
+        return cache_quota.enforce_preview_limit(
+            root, limit_mb, keep_dirs=keep, warn=lambda m: None)
+
+    try:
+        cache = os.path.join(ws, "cache")
+        result = ParseResult(info_hash=IH, name="root", total_size=200,
+                             piece_size=16384, num_pieces=12,
+                             files=[TorrentFile(0, "root/a.bin", 100, 0, 0, 5),
+                                    TorrentFile(1, "root/b.bin", 100, 100,
+                                                6, 11)],
+                             source="magnet")
+        # ---- 1) convert 转正 → drain resume（真 TaskPersistence + 真 resume.py）----
+        mgr = SessionManager(cache)
+        mgr._cache_mode_get = lambda: "convert"
+        h = FakeHandle(IH, num_files=2)
+        saved: list = []
+        h.save_resume_data = lambda flags: saved.append(1)  # 记录转正收尾请求
+        rec = TaskRecord(handle=h, result=result, state="READY",
+                         save_path=mgr._preview_dir(IH))
+        with mgr._lock:
+            mgr._registry.put_record_locked(IH, rec, make_current=True)
+        mgr.start_preview(result.files[0])       # 真 begin()：置 [4,0]
+        mgr.stop_preview()                       # convert 转正
+        ck.check(rec.download and IH in mgr._registry.tasks,
+                 "转正：download=True 且进入任务清单")
+        ck.check(len(saved) >= 1,
+                 f"转正收尾 request_resume 打到句柄（实得 {len(saved)} 次）")
+        # drain 的等价闭环：save_resume_data_alert 数据流经真
+        # write_resume_from_alert → 真 resume.py 编解码写盘（tempfile 目录）。
+        class _Alert:
+            handle = h
+            resume_data = {b"save_path": rec.save_path.encode("utf-8"),
+                           b"peers": [], b"piece_bits": b"\xff"}
+        mgr._persist.write_resume_from_alert(_Alert())
+        rp = os.path.join(cache, ".resume", f"{IH}.fastresume")
+        ck.check(os.path.isfile(rp),
+                 f"fastresume 落盘 <cache>/.resume/{IH[:12]}….fastresume（真写盘）")
+        from core import persist as _p
+        from core.resume import decode_resume
+        raw = _p.read_resume(cache, IH)
+        ck.check(raw is not None
+                 and decode_resume(raw) == _Alert.resume_data,
+                 "fastresume 读回=写入（真 tempfile 目录编解码闭环）")
+
+        # ---- 2) 模拟 restore：safe_task_save_path 放行 .preview/<ih> ----
+        task = dict(mgr._registry.tasks[IH])
+        ck.check(_p.safe_task_save_path(cache, mgr.download_dir, IH,
+                                        task["save_path"])
+                 == os.path.normpath(os.path.abspath(mgr._preview_dir(IH))),
+                 "restore 消毒放行 .preview/<ih> save_path（is_within(cache_dir)"
+                 "成立——转正任务本就住那里，裁决=设计正确，非缺陷）")
+        restored_handle = FakeHandle(IH, num_files=2)
+
+        class _RestoreSes(FakeSes):
+            added_atp = None
+
+            def add_torrent(self, atp):
+                _RestoreSes.added_atp = atp
+                return restored_handle
+
+        class _RestoreLT:
+            """假 libtorrent：restore 磁力链分支只需 parse/read_resume_data。"""
+
+            @staticmethod
+            def parse_magnet_uri(src):
+                class P:
+                    save_path, ti, url, trackers = "", None, src, []
+                return P()
+
+            @staticmethod
+            def read_resume_data(b):
+                class RD:
+                    save_path, ti, url, trackers = "", None, "", []
+                return RD()
+
+        ses_restore = _RestoreSes()
+        orig_ses, orig_p_lt = mgr._ses, _p.lt
+        mgr._ses = ses_restore          # PersistDeps.ses_get 读宿主实时成员
+        _p.lt = _RestoreLT
+        try:
+            ok = mgr._persist.restore_task(task)
+        finally:
+            mgr._ses = orig_ses
+            _p.lt = orig_p_lt
+        ck.check(ok is True, "restore_task：转正任务恢复成功（假 lt/假会话）")
+        rec2 = mgr._registry.torrents[IH]
+        ck.check(os.path.normcase(rec2.save_path)
+                 == os.path.normcase(mgr._preview_dir(IH)),
+                 f"restore 后 rec.save_path 仍 .preview/<ih>"
+                 f"（实得 {rec2.save_path}）——零重下/保护名单一致")
+        ck.check(_RestoreSes.added_atp is not None
+                 and os.path.normcase(_RestoreSes.added_atp.save_path)
+                 == os.path.normcase(mgr._preview_dir(IH)),
+                 "atp.save_path 注入=原 .preview/<ih>（续传不另起目录）")
+        ck.check(os.path.normcase(mgr._preview_dir(IH)) in
+                 {os.path.normcase(p) for p in mgr.protected_dirs()},
+                 "restore 后的转正任务目录重新进入 protected_dirs()")
+
+        # ---- 3) 删任务（不删文件）→ 目录恢复可被 LRU 回收 ----
+        pdir = mgr._preview_dir(IH)
+        with open(os.path.join(pdir, "payload.bin"), "wb") as f:
+            f.write(b"z" * (1536 * 1024))      # 超 1MB 配额，触发回收
+        ck.check(mgr._taskops.remove_task(IH, delete_files=False) is True,
+                 "remove_task(delete_files=False) 成功")
+        ck.check(IH not in mgr._registry.torrents
+                 and IH not in mgr._registry.tasks,
+                 "删任务后注册表/清单均注销")
+        ck.check(os.path.isdir(pdir),
+                 "不删文件语义：.preview/<ih> 仍在磁盘（待 LRU 回收，非即时删）")
+        ck.check(pdir not in mgr.protected_dirs(),
+                 "删任务后目录退出 protected_dirs()（保护解除）")
+        quota_root = os.path.join(cache, ".preview")
+        total, freed0 = _enforce(quota_root, 0, set())
+        ck.check(freed0 == 0 and total >= 1536 * 1024,
+                 f"limit=0 只统计（total={total} freed={freed0}）")
+        _t, f2 = _enforce(quota_root, 1, mgr.protected_dirs())
+        ck.check(not os.path.isdir(pdir) and f2 >= 1536 * 1024,
+                 "删任务后 enforce_preview_limit 回收转正目录（LRU 复活）")
+
+        # ---- 4) D9 守卫核对：转正目录名==任务键，『删除任务和文件』放行 ----
+        IH4 = "de" * 20
+        mgr4 = SessionManager(cache)
+        mgr4._cache_mode_get = lambda: "convert"
+        h4 = FakeHandle(IH4, num_files=2)
+        rec4 = TaskRecord(handle=h4, result=ParseResult(
+            info_hash=IH4, name="root", total_size=200, piece_size=16384,
+            num_pieces=12, files=result.files, source="magnet"),
+            state="READY", save_path=mgr4._preview_dir(IH4))
+        with mgr4._lock:
+            mgr4._registry.put_record_locked(IH4, rec4, make_current=True)
+        os.makedirs(mgr4._preview_dir(IH4), exist_ok=True)
+        mgr4.start_preview(result.files[0])
+        mgr4.stop_preview()
+        ck.check(mgr4._taskops.remove_task(IH4, delete_files=True) is True,
+                 "D9：删任务+文件（转正目录名==任务键）入口放行")
+        ck.check(not os.path.isdir(mgr4._preview_dir(IH4)),
+                 "D9：转正的 .preview/<ih> 目录被守卫放行删除（非拒绝）")
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
 def main() -> int:
     ck = ts.Checker("taskops_test（阶段 4 任务 CRUD 专项）")
     ck.section("core/taskops.py 专项验收（假句柄 + 真注册表，不联网）")
@@ -662,6 +809,7 @@ def main() -> int:
     section_tasks(ck)
     section_facade(ck)
     section_lifecycle(ck)
+    section_promote_cross_restart(ck)
     return ck.report()
 
 

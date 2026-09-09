@@ -251,21 +251,145 @@ def main() -> int:
     check(not os.path.exists(os.path.join(cache_c, "scatter.bin")),
           "散文件已清除")
 
+    # ---- [4b-2] keep_dirs：活任务目录及其内容整棵跳过（阶段 C C1）----
+    # convert 转正任务落盘仍在 .preview/<ih>（零重下），「手动清理/退出清理」
+    # 必须复核 protected_dirs() 后排除活任务目录，否则引擎对着空目录重下（永动机）。
+    live = os.path.join(cache_c, ".preview", "cd" * 20)
+    os.makedirs(os.path.join(live, "sub"), exist_ok=True)
+    for rel in ("vid.bin", os.path.join("sub", "deep.bin")):
+        with open(os.path.join(live, rel), "wb") as f:
+            f.write(b"x" * 8)
+    dead = os.path.join(cache_c, ".preview", "dead" * 20)
+    os.makedirs(dead, exist_ok=True)
+    n2 = clear_cache_contents(cache_c, keep_dirs={live})
+    check(os.path.isfile(os.path.join(live, "vid.bin"))
+          and os.path.isfile(os.path.join(live, "sub", "deep.bin")),
+          "keep_dirs 命中目录连同**内容**整体幸存（嵌套子文件不删）")
+    check(not os.path.exists(dead), "同父 .preview 下的无保目录照常清除")
+    check(os.path.isdir(os.path.join(cache_c, ".preview")),
+          "父目录 .preview 因含受保子目录而保留")
+    check(os.path.isdir(os.path.join(cache_c, "downloads"))
+          and os.path.isfile(os.path.join(cache_c, ".tasks.json")),
+          "keep_dirs 不影响 CLEANUP_KEEP 保留名单")
+    check(n2 == 1, f"keep_dirs 下计数=1（dead 目录；.preview 父目录保留不计，"
+                   f"scatter.bin 已在上方基线清除中消耗，实得 {n2}）")
+    # 不传 keep_dirs：与基线逐字一致（向后兼容）——整个 .preview 连活目录清光
+    n3 = clear_cache_contents(cache_c)
+    check(not os.path.exists(os.path.join(cache_c, ".preview")),
+          "不传 keep_dirs：.preview 整棵清除（基线行为逐字一致）")
+    check(n3 == 1, f"不传 keep_dirs 顶层计数与基线一致（仅 .preview，实得 {n3}）")
+
+    # ---------------------------------------------------------------- [4b] 设置对话框清理路径
     # 设置对话框「立即清理缓存」路径：必须同样走保留名单（不误删下载数据）
     import ui.settings_dialog as _sd  # noqa: E402
     _sd.QMessageBox.information = staticmethod(lambda *a, **k: None)
     _sd.QMessageBox.warning = staticmethod(lambda *a, **k: None)
     os.makedirs(os.path.join(cache_c, ".preview", "ih2"), exist_ok=True)
+    # 注入活目录提供器（阶段 C C1：UI 不直闯 core 内部——主窗口把
+    # session.protected_dirs 闭包注入对话框）：对话框清理须跳过活转正任务目录
+    live2 = os.path.join(cache_c, ".preview", "ef" * 20)
+    os.makedirs(live2, exist_ok=True)
+    with open(os.path.join(live2, "keep.bin"), "wb") as f:
+        f.write(b"x")
     dlg = _sd.SettingsDialog(AppConfig(), cache_c, on_clear_cache=None,
-                             parent=w)
+                             keep_dirs_get=lambda: {live2}, parent=w)
     dlg.cache_edit.setText(cache_c)
     dlg._clear_cache()
     check(os.path.isdir(os.path.join(cache_c, "downloads")),
           "SettingsDialog 清理后 downloads/ 仍保留（P0-1 不误删下载数据）")
     check(os.path.isfile(os.path.join(cache_c, ".tasks.json")),
           "SettingsDialog 清理后 .tasks.json 仍保留")
+    check(not os.path.exists(os.path.join(cache_c, ".preview", "ih2")),
+          "SettingsDialog 清理已清除无保预览目录")
+    check(os.path.isfile(os.path.join(live2, "keep.bin")),
+          "SettingsDialog 经 keep_dirs_get 跳过活任务目录（C1 接线）")
+    # 未注入 keep_dirs_get（兼容旧调用方）：基线行为不变，.preview 整棵清除
+    dlg = _sd.SettingsDialog(AppConfig(), cache_c, on_clear_cache=None,
+                             parent=w)
+    dlg.cache_edit.setText(cache_c)
+    dlg._clear_cache()
     check(not os.path.exists(os.path.join(cache_c, ".preview")),
-          "SettingsDialog 清理已清除预览缓存")
+          "SettingsDialog 未注入 keep_dirs_get：.preview 整棵清除（基线兼容）")
+
+    # ---- [4b-3] MainWindow 接线：清理入口复核活任务目录 + 退出快照时机 ----
+    # 假“活转正任务”：注册表塞 save_path=.preview/<ih> 的记录（不碰引擎）。
+    ih3 = "ab" * 20
+    live3 = os.path.join(cache_c, ".preview", ih3)
+    os.makedirs(os.path.join(live3, "data"), exist_ok=True)
+    with open(os.path.join(live3, "data", "chunk.bin"), "wb") as f:
+        f.write(b"y")
+    decoy = os.path.join(cache_c, ".preview", "de" * 20)
+    os.makedirs(decoy, exist_ok=True)
+    from core.registry import TaskRecord  # noqa: E402
+    with w.session._registry.lock:
+        w.session._registry.torrents[ih3] = TaskRecord(save_path=live3)
+    try:
+        pd = {os.path.normcase(p) for p in w.session.protected_dirs()}
+        check(os.path.normcase(live3) in pd,
+              "session.protected_dirs() 含 .preview/<ih> 活任务目录（测试装置）")
+        check(os.path.normcase(live3) in
+              {os.path.normcase(p) for p in w._live_cache_dirs()},
+              "MainWindow._live_cache_dirs 与 protected_dirs 同源透传")
+
+        # 手动清理入口：_clear_cache_now 跳过活转正任务目录（C1 核心）
+        orig_cache_dir = w.cache_dir
+        orig_stop = w._stop_preview
+        try:
+            w.cache_dir = cache_c
+            w._stop_preview = lambda: None   # 避免动真实会话
+            w._clear_cache_now()
+        finally:
+            w.cache_dir = orig_cache_dir
+            w._stop_preview = orig_stop
+        check(os.path.isfile(os.path.join(live3, "data", "chunk.bin")),
+              "_clear_cache_now 跳过活转正任务目录（C1：不再互噬）")
+        check(not os.path.exists(decoy),
+              "_clear_cache_now 照常清除无保预览目录（非全保留）")
+        check(os.path.isdir(os.path.join(cache_c, "downloads")),
+              "_clear_cache_now 保留名单不倒退（downloads 仍在）")
+
+        # 退出清理时机：名单快照必须在 session.shutdown **之前**抓——
+        # shutdown 会 clear_runtime_state 清空注册表，事后 protected_dirs() 为空。
+        # 假 _sess.shutdown 复刻“清空注册表”效应，令事后快照必然失效。
+        seq: list = []
+        orig_sd = w.session._sess.shutdown
+
+        def fake_sd():
+            with w.session._registry.lock:
+                w.session._registry.torrents.clear()
+            seq.append("session.shutdown")
+        w.session._sess.shutdown = fake_sd
+        orig_srv = w.server.shutdown
+        w.server.shutdown = lambda: seq.append("server.shutdown")
+        orig_clear = w._clear_preview_cache_now
+        w._clear_preview_cache_now = lambda keep_dirs=(), log_key="": (
+            seq.append(("clear",
+                        {os.path.normcase(p) for p in keep_dirs})))
+        cfg_exit = w.cfg
+        orig_exit_flag = cfg_exit.get("clear_cache_on_exit")
+        cfg_exit.set("clear_cache_on_exit", True)
+        orig_cache_dir = w.cache_dir
+        w.cache_dir = cache_c
+        try:
+            w.close()
+            app.processEvents()
+        finally:
+            w.session._sess.shutdown = orig_sd
+            w.server.shutdown = orig_srv
+            w._clear_preview_cache_now = orig_clear
+            cfg_exit.set("clear_cache_on_exit", orig_exit_flag)
+            w.cache_dir = orig_cache_dir
+        check([s if not isinstance(s, tuple) else s[0] for s in seq]
+              == ["session.shutdown", "server.shutdown", "clear"],
+              f"closeEvent 顺序：shutdown → server → 清理（实得 {seq}）")
+        got_keep = seq[2][1] if len(seq) == 3 and isinstance(seq[2], tuple) \
+            else set()
+        check(os.path.normcase(live3) in got_keep,
+              "closeEvent：清理拿到的保护名单含活任务目录"
+              "（快照在 session.shutdown 之前抓，非事后空名单）")
+    finally:
+        with w.session._registry.lock:
+            w.session._registry.torrents.pop(ih3, None)
 
     # ---------------------------------------------------------------- [4c] 画廊隔离路径
     print("\n[4c] 画廊磁盘路径拼接（P0-2 回归）")

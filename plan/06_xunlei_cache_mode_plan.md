@@ -91,12 +91,12 @@ contract_check 扩项（preview 模块新导入常量引用、scheduler/stop 若
 
 ## 阶段 C — 配额与跨重启闭环（第三批子代理）
 
-> **挂账（阶段 B 审查 Important-2）**：convert 转正目录仍在 `.preview/`——「立即清理缓存」/退出清理会把活转正任务文件删光（保留名单不含 `.preview` 活任务），阶段 C 必须处理：转正目录改名迁入 `downloads/` 或清理入口复核 `protected_dirs`。修复前已在 `_clear_cache_now` 与 `closeEvent` 清理路径加 interim 注释标注此已知风险（只加注释不改行为）。
+> ~~**挂账（阶段 B 审查 Important-2）**：convert 转正目录仍在 `.preview/`——「立即清理缓存」/退出清理会把活转正任务文件删光（保留名单不含 `.preview` 活任务），阶段 C 必须处理：转正目录改名迁入 `downloads/` 或清理入口复核 `protected_dirs`。修复前已在 `_clear_cache_now` 与 `closeEvent` 清理路径加 interim 注释标注此已知风险（只加注释不改行为）。~~ **已收口（2026-09-09 阶段 C，裁决=清理入口复核活任务目录，不迁目录**——迁入 downloads/ 破坏零重下卖点与 save_path 一致性）：`cache_guard.clear_cache_contents` 新增可选参 `keep_dirs`（绝对路径集合，命中目录连同内容整棵跳过，父目录部分清理；缺省空集=基线逐字不变）；`_clear_cache_now`/`closeEvent`/SettingsDialog（注入 `keep_dirs_get` 闭包，UI 不直闯 core）三个清理入口全部复核 `session.protected_dirs()`。**退出清理时机结论**：shutdown 末段 `clear_runtime_state_locked()` 清空注册表→事后 protected_dirs() 必为空，故 closeEvent 在 `session.shutdown()` **之前**抓名单快照、清理仍在 shutdown 之后执行（句柄移除、文件锁释放后才删）。测试：gui_feature_test [4b-2]/[4b-3]。
 
-- **竞态修复**：`_enforce_cache_quota`（main_window.py:633-656）与 `protected_dirs()` 快照之间窗口——删除前对每个候选目录**复核** keep_dirs（cache_quota 内部二次校验即可，锁纪律不变）。
-- **转正后配额语义**：convert 生成的任务在句柄存活期受 protected_dirs 保护；用户删除该任务后目录恢复可被 LRU 回收——补一条回归断言。
-- **跨重启测试**：模拟转正→shutdown(drain resume)→restore：同 hash 再预览命中原块（download_mgr_test §5 风格，fake 依赖，不真联网）。
-- D9 守卫核对：转正任务目录名即 `<ih>`==任务键，"删除任务和文件"应放行——补断言。
+- **竞态修复**：~~`_enforce_cache_quota`（main_window.py:633-656）与 `protected_dirs()` 快照之间窗口——删除前对每个候选目录**复核** keep_dirs（cache_quota 内部二次校验即可，锁纪律不变）。~~ **已落地**：选定方案=`enforce_preview_limit` 的 `keep_dirs` 接受**零参回调**（集合形态行为不变），回调时入口取一次快照 + 每个候选目录 rmtree 前再取一次复核，回调抛异常=名单故障→本轮保守不删；main_window 传闭包 `lambda: normcase 化的 _live_cache_dirs()`。理由：真正的窗口是「取名单→磁盘扫描（出锁干活）→执行删除」，UI 层取名单后持 session 锁到删除结束会把 libtorrent 慢调用拖进锁（违并发三律）；回调复核把窗口缩到单次 rmtree 前、锁粒度不变，最小充分。测试：smoke_test [2d] C2 段（迟到登记/相对路径归一/回调异常保守）。
+- **转正后配额语义**：convert 生成的任务在句柄存活期受 protected_dirs 保护；用户删除该任务后目录恢复可被 LRU 回收——补一条回归断言。**已落地**：taskops_test §J-3（remove_task 不删文件→目录仍在磁盘→退出保护名单→enforce 可回收）。
+- **跨重启测试**：模拟转正→shutdown(drain resume)→restore：同 hash 再预览命中原块（download_mgr_test §5 风格，fake 依赖，不真联网）。**已落地**：taskops_test §J——转正→request_resume 打到句柄→真 write_resume_from_alert+真 resume.py 写读 `<cache>/.resume/<ih>.fastresume`→restore_task（假 lt/假会话）后 `rec.save_path` 仍 `.preview/<ih>`。**safe_task_save_path 裁决**：`.preview/<ih>` 在 cache_dir 内、`is_within` 放行——转正任务本就住那里，属设计正确非缺陷（§J-2 钉住）。
+- D9 守卫核对：转正任务目录名即 `<ih>`==任务键，"删除任务和文件"应放行——补断言。**已落地**：taskops_test §J-4。
 
 ## 阶段 D — 写盘失败感知 + 文案 + 文档（第四批子代理）
 

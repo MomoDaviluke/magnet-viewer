@@ -78,6 +78,20 @@ def scan_preview_dirs(preview_root: str) -> list[tuple[str, int, float]]:
     return out
 
 
+def _norm_keep(keep_dirs) -> set[str] | None:
+    """keep_dirs 归一：set/None 直取，callable 现取快照（C2）。
+
+    回调抛异常返回 None——调用方按「名单故障」保守处理（本轮不删），
+    绝不因取不到保护名单而**扩大**删除面。
+    """
+    try:
+        kd = keep_dirs() if callable(keep_dirs) else keep_dirs
+    except Exception:
+        return None
+    return {os.path.normcase(os.path.abspath(d))
+            for d in (kd or set()) if d}
+
+
 def enforce_preview_limit(preview_root: str, limit_mb: int,
                           keep_dirs: set[str] | None = None,
                           warn=None) -> tuple[int, int]:
@@ -85,9 +99,14 @@ def enforce_preview_limit(preview_root: str, limit_mb: int,
 
     返回 ``(清理后总占用字节, 本次释放字节)``。
     ``limit_mb <= 0`` 视为不限制，只统计不删除。
+
+    ``keep_dirs`` 接受**集合或零参回调**（阶段 C C2）：回调形态下入口取
+    一次快照、**每个候选目录 rmtree 前再取一次**复核——堵住「取名单 →
+    扫描 → 执行删除」窗口内新登记目录（刚开的 review / 刚转正的任务）
+    被陈旧快照误删的竞态。回调抛异常 = 名单故障 → 本轮保守不删。
+    集合形态行为与基线逐字一致（无逐项复核开销）。
     """
-    keep = {os.path.normcase(os.path.abspath(d))
-            for d in (keep_dirs or set()) if d}
+    keep = _norm_keep(keep_dirs)
     items = scan_preview_dirs(preview_root)
     total = sum(size for _p, size, _t in items)
 
@@ -97,6 +116,9 @@ def enforce_preview_limit(preview_root: str, limit_mb: int,
         except Exception:
             pass
 
+    if keep is None:
+        _warn("保护名单取用失败：本轮跳过配额删除（保守）")
+        return total, 0
     if limit_mb <= 0:
         return total, 0
     limit = int(limit_mb) * 1024 * 1024
@@ -108,8 +130,18 @@ def enforce_preview_limit(preview_root: str, limit_mb: int,
     for path, size, _t in sorted(items, key=lambda x: (x[2], x[0])):
         if total - freed <= limit:
             break
-        if os.path.normcase(os.path.abspath(path)) in keep:
+        norm = os.path.normcase(os.path.abspath(path))
+        if norm in keep:
             continue
+        if callable(keep_dirs):
+            # C2：删除动作与入口快照之间可插入新 review——rmtree 前复核
+            fresh = _norm_keep(keep_dirs)
+            if fresh is None:
+                _warn("保护名单取用失败：中止本轮剩余删除（保守）")
+                break
+            keep = fresh
+            if norm in keep:
+                continue
         try:
             shutil.rmtree(path, ignore_errors=True)
         except Exception as e:

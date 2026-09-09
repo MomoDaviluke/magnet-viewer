@@ -33,14 +33,17 @@ from ui.theme import TEXT_MUTED
 TAB_FILES, TAB_PREVIEW, TAB_DOWNLOADS = 0, 1, 2
 
 
-def _clear_preview_cache(cache_dir: str) -> int:
+def _clear_preview_cache(cache_dir: str,
+                         keep_dirs: set[str] = ()) -> int:
     """只清预览缓存内容，保留 downloads/ 与任务持久化文件。
 
     统一走 core.cache_guard.clear_cache_contents 的保留名单（决策 D8/D9）；
     返回删除的条目数。注意：设置对话框「立即清理」曾在此之后再无名单清空
     整个目录、误删用户下载数据（P0-1）——所有清理入口都必须经此函数。
+    ``keep_dirs``（阶段 C C1）：活任务落盘目录快照（protected_dirs()），
+    连同内容整体跳过——convert 转正任务的目录仍在 .preview/<ih> 下。
     """
-    return clear_cache_contents(cache_dir)
+    return clear_cache_contents(cache_dir, keep_dirs=keep_dirs)
 
 
 class _Bridge(QObject):
@@ -336,7 +339,12 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self):
         dlg = SettingsDialog(self.cfg, self.cache_dir,
-                             on_clear_cache=self._clear_cache_now, parent=self)
+                             on_clear_cache=self._clear_cache_now,
+                             # C1：注入活名单取器（UI 不直闯 core：闭包封装
+                             # session.protected_dirs），对话框清编辑框当前值时
+                             # 同样复核活任务目录（含转正的 .preview/<ih>）
+                             keep_dirs_get=self._live_cache_dirs,
+                             parent=self)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             # 代理与超时立即生效（缓存目录重启生效）
             self.session.apply_proxy(self.cfg.proxy())
@@ -356,22 +364,42 @@ class MainWindow(QMainWindow):
         决策 D8：downloads/（用户下载数据）与任务持久化文件（.tasks.json /
         .resume）不在清理范围；守卫校验不变（受管标记）。
 
-        ⚠ interim（阶段 B 审查 Important-2，阶段 C 处理）：convert 转正任务
-        目录仍在 .preview/ 下，本清理会连活转正任务的已缓存文件一起删光
-        （保留名单不含 .preview 活任务）——阶段 C 须把转正目录迁入
-        downloads/ 或在此复核 protected_dirs() 后排除活任务目录。
+        阶段 C C1（Important-2 收口）：convert 转正任务目录仍在 .preview/<ih>
+        （沿用已下分块零重下）——清理前复核 session.protected_dirs()，活任务
+        目录连同内容整体跳过，杜绝「清完引擎对着空目录重下」的互噬永动机。
         """
         self._stop_preview()
+        return self._clear_preview_cache_now(
+            keep_dirs=self._live_cache_dirs(),
+            log_key="main.clear_cache_now")
+
+    def _live_cache_dirs(self) -> set[str]:
+        """活任务落盘目录快照（protected_dirs()）——清理入口的 C1 复核名单。
+
+        会话异常（未启动/已停机竞态）兜底空集：清理退回基线行为，绝不
+        因取名单失败而阻断清理主流程（旁路纪律）。
+        """
+        try:
+            return set(self.session.protected_dirs())
+        except Exception as e:
+            log_warning("main.live_cache_dirs", f"取活任务名单失败：{e}")
+            return set()
+
+    def _clear_preview_cache_now(self, keep_dirs: set[str] = (),
+                                 log_key: str = "main.clear_cache") -> int:
+        """守卫 + 清理的统一执行段（手动清理/退出清理共用，D8/D9/C1）。
+
+        ``keep_dirs``：活任务目录快照（连同内容整体跳过清理）。返回删除
+        条目数；守卫拒绝或清理异常返回 -1（只告警）。
+        """
         if not guard_ok_for_cleanup(self.cache_dir):
-            log_warning("main.clear_cache_now",
-                        f"拒绝清理非受管缓存目录：{self.cache_dir}")
+            log_warning(log_key, f"拒绝清理非受管缓存目录：{self.cache_dir}")
             return -1
         try:
-            cleanup = _clear_preview_cache(self.cache_dir)
+            return _clear_preview_cache(self.cache_dir, keep_dirs=keep_dirs)
         except Exception as e:
-            log_warning("main.clear_cache_now", f"清理失败：{e}")
+            log_warning(log_key, f"清理失败：{e}")
             return -1
-        return cleanup
 
     # ---------- 动作 ----------
 
@@ -647,6 +675,12 @@ class MainWindow(QMainWindow):
         只动 <cache>/.preview/<ih>/；保护名单来自 session.protected_dirs()
         （活跃句柄的落盘目录），downloads/ 与任务持久化文件天然不在
         扫描范围。limit<=0 表示用户关闭了配额。
+
+        阶段 C C2：keep_dirs 传**零参回调**而非静态快照——cache_quota 在
+        每个候选目录 rmtree 前重新取名单复核，堵住「取名单 → 磁盘扫描
+        （出锁干活，耗时）→ 执行删除」窗口内刚登记的新 review 被陈旧
+        快照漏保误删的竞态（回调内部自持 registry 锁，锁内零 libtorrent，
+        符合并发三律；锁的持有粒度不变）。
         """
         limit = int(self.cfg.get("cache_limit_mb") or 0)
         if limit <= 0:
@@ -654,12 +688,15 @@ class MainWindow(QMainWindow):
         preview_root = os.path.join(self.cache_dir, ".preview")
         if not os.path.isdir(preview_root):
             return
-        keep = {os.path.normcase(p)
-                for p in self.session.protected_dirs()}
-        keep.add(os.path.normcase(self.cache_dir))
+        cache_root = os.path.normcase(self.cache_dir)
+
+        def _keep() -> set[str]:
+            # 每次解析现取（含 cache 根兜底保护，语义与原静态快照一致）
+            return {os.path.normcase(p)
+                    for p in self._live_cache_dirs()} | {cache_root}
         try:
             total, _freed = enforce_preview_limit(
-                preview_root, limit, keep,
+                preview_root, limit, _keep,
                 warn=lambda m: log_warning("main.cache_quota", m))
         except Exception as e:
             log_warning("main.cache_quota", f"配额清理异常（已忽略）：{e}")
@@ -767,20 +804,22 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            # C1 时机结论（实证 core/session.SessionCore.shutdown）：shutdown
+            # 末段 clear_runtime_state_locked() 清空注册表——**事后**
+            # protected_dirs() 必为空。名单快照必须在 shutdown 之前抓。
+            exit_keep = (self._live_cache_dirs()
+                         if self.cfg.get("clear_cache_on_exit") else set())
             self.session.shutdown()
             self.server.shutdown()
             if self.cfg.get("clear_cache_on_exit"):
                 # 决策 D8：退出清理只清预览缓存，downloads/（用户下载数据）
                 # 与任务持久化文件（.tasks.json/.resume）保留；
-                # 根目录仍须通过受管标记守卫（拒绝清非受管目录）
-                # ⚠ interim（阶段 B 审查 Important-2，阶段 C 处理）：convert
-                # 转正任务目录仍在 .preview/ 下，重启前若有活转正任务，这里
-                # 会把其已缓存文件删光（清单/.resume 保留，文件没了）——
-                # 阶段 C 须迁目录或复核 protected_dirs() 排除活任务。
-                if not guard_ok_for_cleanup(self.cache_dir):
-                    log_warning("main.close.clear_cache",
-                                f"拒绝清理非受管缓存目录：{self.cache_dir}")
-                else:
-                    _clear_preview_cache(self.cache_dir)
+                # 根目录仍须通过受管标记守卫（拒绝清非受管目录）。
+                # 阶段 C C1：清理在 shutdown（句柄已全部移除、文件锁释放）
+                # **之后**执行，但保护名单用 shutdown **之前**的快照——
+                # convert 转正任务目录（.preview/<ih>）连同内容跳过：清单与
+                # .resume 保留、重启 restore 续传，文件不被删光（防互噬）。
+                self._clear_preview_cache_now(
+                    keep_dirs=exit_keep, log_key="main.close.clear_cache")
         finally:
             super().closeEvent(event)

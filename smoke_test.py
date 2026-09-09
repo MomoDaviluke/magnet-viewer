@@ -171,6 +171,61 @@ def main():
         "无保护时应按 LRU 删较旧的 keep_dir、保留较新的 new"
     assert freed2 == 500 * 1024 and _t2 == 900 * 1024, \
         f"删除后应恰好回到上限内: total={_t2} freed={freed2}"
+    # keep_dirs 回调（callable）形态：C2——enforce 内部在**每次 rmtree 前**
+    # 重新解析名单，堵住「取名单 → 扫描 → 执行删除」窗口内新登记目录被误删。
+    # 独立目录树，避免与上方静态集合用例互相干扰。
+    q2 = os.path.join(tmp, "quota2", ".preview")
+    os.makedirs(q2, exist_ok=True)
+
+    def _mk2(ih: str, size: int, mtime: float) -> str:
+        d = os.path.join(q2, ih)
+        os.makedirs(d, exist_ok=True)
+        fp = os.path.join(d, "chunk.bin")
+        with open(fp, "wb") as fh:
+            fh.write(b"x" * size)
+        os.utime(fp, (mtime, mtime))
+        return d
+
+    race = _mk2("d" * 40, 600 * 1024, 1_000_000_000)  # 最旧（LRU 第一候选）
+    other = _mk2("e" * 40, 900 * 1024, 2_000_000_000)
+    # 第 1 次解析（enforce 入口快照）返回空集；第 2 次起（删除前复核）返回
+    # race——模拟「入口取名单之后、rmtree 之前」新登记了一个 review。
+    resolves: list[int] = []
+
+    def _late_registrar():
+        resolves.append(1)
+        return set() if len(resolves) == 1 else {os.path.normcase(race)}
+
+    _t3, freed3 = cache_quota.enforce_preview_limit(
+        q2, 1, keep_dirs=_late_registrar, warn=lambda m: None)
+    assert os.path.isdir(race), \
+        "C2 竞态：入口快照未含、删除前复核命中的活目录不得被删"
+    assert not os.path.isdir(other), \
+        f"复核只救新登记目录，无保 LRU 候选照常清理（freed={freed3}）"
+    assert freed3 == 900 * 1024, \
+        f"仅删除 other 计入 freed（实得 {freed3}）"
+    # 回调集合里的相对路径须归一命中（与入口 keep 判定同语义）：race 是最旧
+    # 候选（无保必删），relp 较新；保护生效时删 relp、race 幸存。
+    _save_cwd = os.getcwd()
+    os.chdir(q2)
+    relp = _mk2("f" * 40, 700 * 1024, 1_100_000_000)   # 较新
+    race_c = os.path.relpath(race, q2)
+    _t4, freed4 = cache_quota.enforce_preview_limit(
+        q2, 1, keep_dirs=lambda: {race_c}, warn=lambda m: None)
+    os.chdir(_save_cwd)
+    assert os.path.isdir(race), "回调返回相对路径也须命中保护（归一对齐）"
+    assert not os.path.isdir(relp), \
+        f"保护只豁免命中目录，LRU 次旧候选照常删（freed={freed4}）"
+    # 回调抛异常：保守跳过本轮全部删除（绝不因名单故障扩大删除面），不冒泡
+    big = _mk2("g" * 40, 900 * 1024, 900_000_000)      # 最旧，无保时必删
+    def _boom():
+        raise RuntimeError("名单取用失败")
+    _t5, freed5 = cache_quota.enforce_preview_limit(
+        q2, 1, keep_dirs=_boom, warn=lambda m: None)
+    assert os.path.isdir(race) and os.path.isdir(big), \
+        "keep_dirs 回调抛异常：保守不删（绝不因名单故障扩大删除面）"
+    assert freed5 == 0, f"回调异常时 freed 必须为 0（实得 {freed5}）"
+    # 静态集合形态向后兼容：上方既有用例已覆盖（keep_dirs={keep_dir}）
     print(f"[2d] 设置接线通过：限速/日志开关/配额 LRU（LRU 释放 "
           f"{human_size(freed)}）")
 
