@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QCompleter, QFileDialog, QHBoxLayout,
 
 from core.cache_guard import (clear_cache_contents, ensure_cache_dir,
                               guard_ok_for_cleanup)
+from core.cache_mode import PREVIEW_CACHE_CONVERT
 from core.cache_quota import dir_size_bytes, enforce_preview_limit
 from core.config import AppConfig
 from core.fetcher import SessionManager
@@ -74,6 +75,27 @@ def task_id(task: dict) -> str:
     """任务唯一键：id 优先，回落 info_hash（下载页契约字段）。"""
     tid = task.get("id") or task.get("info_hash") or ""
     return str(tid)
+
+
+def background_cache_text(mode: str, preview_file,
+                          file_progress: list) -> str | None:
+    """convert 档播放中的后台缓存进度文案（阶段 D D3）；其余场景 None。
+
+    引擎在预览期就按 file-priority 全量下载整个文件（A0 实证），
+    「缓冲 xx%」只反映播放位置前的连续窗口——用户看不到整文件其实
+    在攒。补一行整文件进度注记；数据源用 status() 现成的
+    file_progress 数组（零新增查询路径）。hold 档关预览即冻结、
+    播放期同样在全下但转正语义不存在，文案维持基线不变。
+    """
+    if (mode != PREVIEW_CACHE_CONVERT or preview_file is None
+            or not file_progress or preview_file.size <= 0):
+        return None
+    try:
+        done = int(file_progress[preview_file.index])
+    except (IndexError, TypeError, ValueError):
+        return None
+    pct = max(0, min(100.0, done * 100.0 / preview_file.size))
+    return f"后台缓存完整文件：{pct:.1f}%（播放位置优先）"
 
 
 class StreamCallbacks:
@@ -751,8 +773,14 @@ class MainWindow(QMainWindow):
         self.status_panel.update_status(st)
         self.preview.gallery.update_status(st)
         if self._preview_file is not None and st is not None:
-            self.preview.video.update_buffer(st.get("buffer", 0.0),
-                                             st.get("download_rate", 0))
+            self.preview.video.update_buffer(
+                st.get("buffer", 0.0),
+                st.get("download_rate", 0),
+                # D3：convert 档播放中补「后台缓存完整文件」注记（现成的
+                # file_progress 数组，零新增查询路径；hold 档恒 None）
+                background_cache_text(str(self.cfg.get("preview_cache_mode")),
+                                      self._preview_file,
+                                      st.get("file_progress") or []))
             # 进度条缓冲分段着色（一次批量取块位图，见 fetcher 注释）
             try:
                 segs = self.session.buffered_segments_of_preview()

@@ -230,18 +230,23 @@ class VideoPreviewWidget(QWidget):
         ms, self._resume_ms = self._resume_ms, None
         return ms if ms and ms > 0 else None
 
-    def update_buffer(self, progress: float, rate: int):
+    def update_buffer(self, progress: float, rate: int,
+                      bg_note: str | None = None):
+        """缓冲栏刷新。``bg_note``（阶段 D D3）：convert 档播放中的
+        「后台缓存完整文件：xx%（播放位置优先）」注记，None/空 = 基线文案。"""
         self.buffer_bar.setValue(int(progress * 1000))
         if self._jumping:
             # 跳转反馈：数据未到位前明确告知「在缓冲目标位置」，
             # 避免用户把等待误读为无响应
             self.buffer_label.setText(
-                f"跳转中，正在缓冲目标位置 · 缓冲 {progress * 100:.1f}%")
+                f"跳转中，正在缓冲目标位置 · 缓冲 {progress * 100:.1f}%"
+                + (f"  ／  {bg_note}" if bg_note else ""))
             return
         buffering = self._buffering or (progress < 0.999 and rate < 50 * 1024)
         self.buffer_label.setText(
             f"缓冲 {progress * 100:.1f}% · {human_size(rate)}/s"
-            + ("  ／ 缓冲中…" if buffering else ""))
+            + ("  ／ 缓冲中…" if buffering else "")
+            + (f"  ／  {bg_note}" if bg_note else ""))
         self._buffering = False  # 事件态只提示一次，文本由本方法统一渲染
 
     def update_segments(self, segs: list[tuple[int, int]]):

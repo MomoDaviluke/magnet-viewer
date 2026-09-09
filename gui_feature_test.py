@@ -452,6 +452,65 @@ def main() -> int:
         w.cache_dir = orig_cd
         w.cfg.set("cache_limit_mb", orig_lim)
 
+    # ---- [4b-5] 设置对话框：预览缓存模式下拉（阶段 D D2）----
+    # convert/hold 两档 UI 化（阶段 B 裁掉项）：值域来自
+    # core.cache_mode.PREVIEW_CACHE_MODES（消灭零引用常量），初值读配置、
+    # _save 回写配置。
+    print("\n[4b-5] 设置对话框「预览缓存模式」combo（D2）")
+    from core.cache_mode import (PREVIEW_CACHE_CONVERT,  # noqa: E402
+                                 PREVIEW_CACHE_HOLD, PREVIEW_CACHE_MODES)
+    cfg2 = AppConfig()
+    _orig_all2 = {k: cfg2.get(k) for k in DEFAULTS}
+    try:
+        cfg2.set("preview_cache_mode", PREVIEW_CACHE_HOLD)
+        dlg = _sd.SettingsDialog(cfg2, cache_c, on_clear_cache=None, parent=w)
+        check(hasattr(dlg, "cache_mode"),
+              "SettingsDialog 新增 cache_mode 下拉（D2）")
+        check([dlg.cache_mode.itemData(i)
+               for i in range(dlg.cache_mode.count())]
+              == list(PREVIEW_CACHE_MODES),
+              "combo 值域逐字=PREVIEW_CACHE_MODES（不自行发明第三档）")
+        check(dlg.cache_mode.currentData() == PREVIEW_CACHE_HOLD,
+              "combo 初值读自 preview_cache_mode 配置（hold）")
+        dlg.cache_mode.setCurrentIndex(
+            dlg.cache_mode.findData(PREVIEW_CACHE_CONVERT))
+        dlg._save()
+        check(AppConfig().get("preview_cache_mode") == PREVIEW_CACHE_CONVERT,
+              "_save 把 combo 选择回写 preview_cache_mode=convert")
+        dlg.deleteLater()
+    finally:
+        for k, v in _orig_all2.items():
+            cfg2.set(k, v)
+
+    # ---- [4b-6] convert 档播放中「后台缓存完整文件」文案（阶段 D D3）----
+    # 纯函数产文案，播放位置优先语义只在 convert 档出现；hold 档文案不变。
+    print("\n[4b-6] convert 档后台缓存文案（D3）")
+    from ui.main_window import background_cache_text  # noqa: E402
+    from ui.preview_player import VideoPreviewWidget  # noqa: E402
+    from core.models import TorrentFile as _TF  # noqa: E402
+    pf_d3 = _TF(1, "root/big.mkv", 1000, 0, 0, 0)
+    t1 = background_cache_text(PREVIEW_CACHE_CONVERT, pf_d3, [0, 420])
+    check(t1 == "后台缓存完整文件：42.0%（播放位置优先）",
+          f"convert 档：file_progress→百分比文案（实得 {t1!r}）")
+    check(background_cache_text(PREVIEW_CACHE_HOLD, pf_d3, [0, 420]) is None,
+          "hold 档：无后台缓存文案（行为不变）")
+    check(background_cache_text(PREVIEW_CACHE_CONVERT, pf_d3, []) is None,
+          "file_progress 缺失：宁可不显示也不误显示")
+    check(background_cache_text(PREVIEW_CACHE_CONVERT, pf_d3, [0, 1000])
+          == "后台缓存完整文件：100.0%（播放位置优先）",
+          "满进度文案照常（100.0%）")
+    check(background_cache_text(PREVIEW_CACHE_CONVERT, None, [0, 420]) is None,
+          "无预览文件：None")
+    vp8 = VideoPreviewWidget()
+    vp8.update_buffer(0.5, 200 * 1024, t1)
+    check("后台缓存完整文件：42.0%" in vp8.buffer_label.text()
+          and "缓冲 50.0%" in vp8.buffer_label.text(),
+          "update_buffer 拼接后台缓存注记（缓冲语义保留）")
+    vp8.update_buffer(0.5, 200 * 1024)
+    check("后台缓存" not in vp8.buffer_label.text(),
+          "不传注记：缓冲栏与基线文案一致")
+    vp8.deleteLater()
+
     # ---------------------------------------------------------------- [4c] 画廊隔离路径
     print("\n[4c] 画廊磁盘路径拼接（P0-2 回归）")
     import base64  # noqa: E402

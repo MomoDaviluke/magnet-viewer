@@ -11,11 +11,20 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
 
 from core.cache_guard import (CACHE_MARKER, clear_cache_contents,
                               ensure_cache_dir, guard_ok_for_cleanup)
+from core.cache_mode import PREVIEW_CACHE_MODES
 from core.config import AppConfig
 
 PROXY_LABELS = [("none", "不使用代理（直连）"),
                 ("socks5", "SOCKS5"),
                 ("http", "HTTP")]
+
+# 阶段 D D2（plan/06 阶段 B 裁掉的 UI）：预览缓存模式下拉的显示文案。
+# 值域逐字取 core.cache_mode.PREVIEW_CACHE_MODES——顺序即下拉顺序，
+# 新增第三档必先改常量，UI 永不自行发明取值。
+CACHE_MODE_LABELS = {
+    "convert": "关闭预览后继续缓存（推荐）",
+    "hold": "关闭预览即暂停",
+}
 
 
 class SettingsDialog(QDialog):
@@ -91,6 +100,20 @@ class SettingsDialog(QDialog):
             "已下载文件（downloads/）不受影响。切换预览文件时生效。")
         form.addRow("预览缓存上限", self.cache_limit)
 
+        # 阶段 D D2：预览缓存模式（convert=关预览自动转正继续缓存 / hold=冻结）
+        self.cache_mode = QComboBox()
+        for v in PREVIEW_CACHE_MODES:
+            self.cache_mode.addItem(CACHE_MODE_LABELS[v], v)
+        _mode = str(self.cfg.get("preview_cache_mode"))
+        _idx = self.cache_mode.findData(_mode)
+        self.cache_mode.setCurrentIndex(_idx if _idx >= 0 else 0)
+        self.cache_mode.setToolTip(
+            "关闭预览（停止预览按钮/切换文件）时，该文件的缓存任务：\n"
+            "继续缓存 = 自动转为持久下载任务，全量缓存到预览目录（推荐）；\n"
+            "即暂停 = 冻结现有进度，恢复下载需手动添加任务。\n"
+            "下次关闭预览时生效。")
+        form.addRow("预览缓存模式", self.cache_mode)
+
         self.concurrency = QSpinBox()
         self.concurrency.setRange(1, 16)
         self.concurrency.setValue(int(cfg.get("default_concurrency")))
@@ -126,7 +149,8 @@ class SettingsDialog(QDialog):
 
         note = QLabel("提示：代理、超时、限速与日志开关保存后立即生效；"
                       "缓存目录、默认下载目录与并发数修改需重启程序；"
-                      "预览缓存上限在下次切换预览文件时生效。设置持久化于本机"
+                      "预览缓存上限在下次切换预览文件时生效；"
+                      "预览缓存模式在下次关闭预览时生效。设置持久化于本机"
                       "（Windows 注册表 Bitseed\\MagnetViewer）。")
         note.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
         note.setWordWrap(True)
@@ -221,5 +245,6 @@ class SettingsDialog(QDialog):
         self.cfg.set("seed_after_complete", self.seed_after.isChecked())
         self.cfg.set("download_rate_limit", self.rate_limit.value())
         self.cfg.set("cache_limit_mb", self.cache_limit.value())
+        self.cfg.set("preview_cache_mode", self.cache_mode.currentData())
         self.cfg.set("logging_enabled", self.logging_enabled.isChecked())
         self.accept()
