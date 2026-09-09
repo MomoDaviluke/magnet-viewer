@@ -118,6 +118,25 @@ class FakeScheduler:
         self.stops += 1
 
 
+class _SpyRec(TaskRecord):
+    """D5-C 强探针记录：每笔 state/error 写发生的瞬间，记录是否持有 d.lock。
+
+    仿 registry_test §G 的 in_lock 手法（非重入锁 try-acquire 失败即当前线程
+    持有）：单线程测试里判读可靠；跨线程并发场景不适用（别的线程抢锁也会
+    误报持有），本模块告警分发全是单线程调用，成立。
+    """
+    def __init__(self, *a, lock_probe=None, **kw):
+        super().__init__(*a, **kw)
+        self._lock_probe = lock_probe
+        self.writes: list = []          # [(attr, in_lock_at_write)]
+
+    def __setattr__(self, name, val):
+        if (name in ("state", "error")
+                and getattr(self, "_lock_probe", None) is not None):
+            self.writes.append((name, self._lock_probe.held()))
+        super().__setattr__(name, val)
+
+
 class _FakeLT:
     """替身 libtorrent 命名空间：alert 循环的 isinstance 分支可被假告警命中。"""
 
@@ -514,17 +533,31 @@ def section_alert_dispatch(ck):
         # E6 file_error_alert（写盘失败/磁盘满，阶段 D D1）：下载任务 →
         # FAILED + rec.error + tasks 清单同步 + persist（旁路写持锁）
         class CountingLock:
-            """代理锁：计数 __enter__/acquire，验证旁路写入是否持锁（R-1）。"""
+            """代理锁：计数 __enter__/acquire/release，验证旁路写入是否持锁（R-1）。
+
+            D5-C：仅 acquires>=1 抓不住「写挪到锁外」——配 in_lock() 探针
+            （registry_test §G 手法：非重入锁 try-acquire 失败即当前线程持有）
+            观测每笔 state/error 写与 persist 回调瞬间的持锁真值。
+            """
             def __init__(self):
                 self._lk = threading.Lock()
                 self.acquires = 0
+                self.releases = 0
 
             def acquire(self, *a):
                 self.acquires += 1
                 return self._lk.acquire(*a)
 
             def release(self):
+                self.releases += 1
                 return self._lk.release()
+
+            def held(self):
+                """当前线程是否持有本锁：非重入 try-acquire 失败即持有（§G 手法）。"""
+                if self._lk.acquire(blocking=False):
+                    self._lk.release()
+                    return False
+                return True
 
             def __enter__(self):
                 self.acquire()
@@ -537,9 +570,14 @@ def section_alert_dispatch(ck):
         d, host, calls = make_deps()
         lock_probe = CountingLock()
         d.lock = lock_probe
+        persist_held = []   # persist 回调瞬间是否仍持锁（P1-4 强断言取样）
+        _orig_persist = d.persist_tasks
+        d.persist_tasks = lambda: (persist_held.append(lock_probe.held()),
+                                   _orig_persist())[1]
         core = session.SessionCore(d)
         h = FakeHandle(IH)
-        rec = TaskRecord(handle=h, download=True, state=STATE_DOWNLOADING)
+        rec = _SpyRec(handle=h, download=True, state=STATE_DOWNLOADING,
+                      lock_probe=lock_probe)
         host["torrents"][IH] = rec
         host["tasks"][IH] = {"state": STATE_DOWNLOADING, "error": ""}
         core.handle_alert(_FakeLT.file_error_alert(h, error=OSError("磁盘已满")))
@@ -549,8 +587,51 @@ def section_alert_dispatch(ck):
                  and host["tasks"][IH]["error"] == rec.error,
                  "file_error_alert：tasks 清单同步 FAILED+error（同 watchdog 惯例）")
         ck.check(calls["persist_tasks"] == [1], "file_error_alert：清单落盘恰一次")
-        ck.check(lock_probe.acquires >= 1,
-                 "file_error_alert：旁路写入经 registry 锁（R-1 纪律探针）")
+        # D5-C 强探针（替换旧 acquires>=1：它抓不住「写挪到锁外、另处白拿一次锁」）
+        ck.check(rec.writes and all(held for _a, held in rec.writes),
+                 f"D5-C：state/error 写全部在持锁区间（观测 {rec.writes}）")
+        ck.check(persist_held == [False],
+                 "D5-C：persist_tasks 回调瞬间锁已释放（P1-4 出锁落盘）")
+        ck.check(lock_probe.acquires == 1 and lock_probe.releases == 1,
+                 "D5-C：本分支恰一次成对 acquire/release（无锁段外补写）")
+        # E6a D5-A 终态守卫：迟到 file_error 不得把已完结/暂停/停止/失败任务拉回
+        for stt in (STATE_COMPLETED, STATE_PAUSED, STATE_STOPPED, STATE_FAILED):
+            d, host, calls = make_deps()
+            core = session.SessionCore(d)
+            hh = FakeHandle(IH)
+            old_err = "写入失败：旧错" if stt == STATE_FAILED else ""
+            r = TaskRecord(handle=hh, download=True, state=stt, error=old_err)
+            host["torrents"][IH] = r
+            host["tasks"][IH] = {"state": stt, "error": old_err}
+            core.handle_alert(_FakeLT.file_error_alert(hh, error=OSError("磁盘已满")))
+            ck.check(r.state == stt and r.error == old_err
+                     and calls["persist_tasks"] == []
+                     and host["tasks"][IH]["state"] == stt,
+                     f"D5-A 终态守卫：{stt} 收 file_error→状态/错误/清单原样、零 persist")
+        # E6b D5-A 幂等去重：同文案重复告警 → persist 恰一次、error 不重复写
+        d, host, calls = make_deps()
+        core = session.SessionCore(d)
+        hh = FakeHandle(IH)
+        r = TaskRecord(handle=hh, download=True, state=STATE_DOWNLOADING)
+        host["torrents"][IH] = r
+        host["tasks"][IH] = {"state": STATE_DOWNLOADING, "error": ""}
+        core.handle_alert(_FakeLT.file_error_alert(hh, error=OSError("磁盘已满")))
+        first_err = r.error
+        core.handle_alert(_FakeLT.file_error_alert(hh, error=OSError("磁盘已满")))
+        ck.check(calls["persist_tasks"] == [1],
+                 "D5-A 幂等：同文案重复告警 persist 仅一次")
+        ck.check(r.error == first_err,
+                 "D5-A 幂等：error 不被重复覆盖")
+        # E6c 预览态重复同文案告警：emit_error 只弹一次
+        d, host, calls = make_deps()
+        core = session.SessionCore(d)
+        hh = FakeHandle(IH)
+        r = TaskRecord(handle=hh, download=False, state=STATE_DOWNLOADING)
+        host["torrents"][IH] = r
+        core.handle_alert(_FakeLT.file_error_alert(hh, error=OSError("权限拒绝")))
+        core.handle_alert(_FakeLT.file_error_alert(hh, error=OSError("权限拒绝")))
+        ck.check(len(calls["errors"]) == 1,
+                 "D5-A 幂等：预览重复同文案告警 emit_error 恰一次")
         # E7 storage_failed_alert（1.x 命名）同语义；error 缺失防御兜底
         d, host, calls = make_deps()
         core = session.SessionCore(d)
@@ -560,6 +641,16 @@ def section_alert_dispatch(ck):
         core.handle_alert(_FakeLT.storage_failed_alert(h2))
         ck.check(rec2.state == STATE_FAILED and rec2.error,
                  "storage_failed_alert：同款标错，error 缺失也兜底非空")
+        # E7b Minor-e：filename 缺失 → 文案回退 operation（storage_failed 本就无 filename）
+        d, host, calls = make_deps()
+        core = session.SessionCore(d)
+        hb = FakeHandle(IH)
+        reb = TaskRecord(handle=hb, download=True, state=STATE_DOWNLOADING)
+        host["torrents"][IH] = reb
+        core.handle_alert(_FakeLT.storage_failed_alert(
+            hb, error=OSError("设备未就绪"), operation="write_file"))
+        ck.check("（操作：write_file）" in reb.error,
+                 f"D5 Minor-e：无 filename 时回退 operation（实得 {reb.error!r}）")
         # E8 预览（非下载）任务写盘失败：emit_error 弹 UI，不写清单/不落盘
         d, host, calls = make_deps()
         core = session.SessionCore(d)

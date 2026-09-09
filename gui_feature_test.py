@@ -470,8 +470,20 @@ def main() -> int:
                for i in range(dlg.cache_mode.count())]
               == list(PREVIEW_CACHE_MODES),
               "combo 值域逐字=PREVIEW_CACHE_MODES（不自行发明第三档）")
+        from ui.settings_dialog import CACHE_MODE_LABELS  # noqa: E402
+        check(set(CACHE_MODE_LABELS) == set(PREVIEW_CACHE_MODES),
+              "D5 Minor-b：CACHE_MODE_LABELS 键集与 PREVIEW_CACHE_MODES 值域"
+              "双向对齐（无孤儿标签/无缺标签模式）")
         check(dlg.cache_mode.currentData() == PREVIEW_CACHE_HOLD,
               "combo 初值读自 preview_cache_mode 配置（hold）")
+        # D5 Minor-c：存量非法值（garbage）回落：index 0 + currentData 有效
+        cfg2.set("preview_cache_mode", "garbage")
+        dlg_g = _sd.SettingsDialog(cfg2, cache_c, on_clear_cache=None, parent=w)
+        check(dlg_g.cache_mode.currentIndex() == 0
+              and dlg_g.cache_mode.currentData() in PREVIEW_CACHE_MODES,
+              "D5 Minor-c：garbage 存量值回落 index 0 且 currentData 有效")
+        dlg_g.deleteLater()
+        cfg2.set("preview_cache_mode", PREVIEW_CACHE_HOLD)
         dlg.cache_mode.setCurrentIndex(
             dlg.cache_mode.findData(PREVIEW_CACHE_CONVERT))
         dlg._save()

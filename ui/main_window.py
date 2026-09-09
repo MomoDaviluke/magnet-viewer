@@ -709,9 +709,11 @@ class MainWindow(QMainWindow):
 
         阶段 D D0（审查 Important-1）：回调**裸调** session.protected_dirs
         ——异常上抛给 cache_quota._norm_keep 的 None 分支→本轮保守不删
-        （fail-closed）。不再经 _live_cache_dirs 的空集兜底（fail-open）：
-        那个兜底只服务「清理失败不阻断主流程」的手动清理入口；LRU 自动
-        删除路径拿空名单 = 把所有活任务目录当无保候选删，方向必须相反。
+        （fail-closed 作为最后防线；protected_dirs 锁内纯读，实际不抛）。
+        不再经 _live_cache_dirs 的空集兜底（fail-open）：那个兜底只服务
+        「清理失败不阻断主流程」的手动清理入口。主要故障模式是空注册表
+        竞态（会话未起/已停机）：该场景返回空集（cache 根仍受保），维持
+        现状语义，不把空集当可疑。
         """
         limit = int(self.cfg.get("cache_limit_mb") or 0)
         if limit <= 0:
@@ -722,9 +724,10 @@ class MainWindow(QMainWindow):
         cache_root = os.path.normcase(self.cache_dir)
 
         def _keep() -> set[str]:
-            # D0 fail-closed：protected_dirs 裸调，异常透传给 cache_quota
-            # （名单故障 → 本轮零删除）；每次解析现取（含 cache 根兜底
-            # 保护，语义与原静态快照一致）。
+            # D0 fail-closed：protected_dirs 裸调——异常透传给 cache_quota
+            # 属最后防线（该方法锁内纯读，实际不抛；主要故障模式=空注册表
+            # 竞态，返回空集、维持现状语义，见 D5-B）；每次解析现取（含
+            # cache 根兜底保护，语义与原静态快照一致）。
             return {os.path.normcase(p)
                     for p in self.session.protected_dirs()} | {cache_root}
         try:

@@ -84,8 +84,11 @@ def _norm_keep(
         ) -> set[str] | None:
     """keep_dirs 归一：set/None 直取，callable 现取快照（C2）。
 
-    回调抛异常返回 None——调用方按「名单故障」保守处理（本轮不删），
-    绝不因取不到保护名单而**扩大**删除面。
+    回调抛异常返回 None——调用方按「名单故障」保守处理（本轮不删）。
+    D5-B 措辞诚实化：现网唯一名单来源 registry.protected_dirs 是锁内纯
+    dict 遍历，实际不抛异常；异常上抛透传到 None 分支只是最后防线。主要
+    故障模式是**空注册表竞态**（会话未起/已停机），该场景正常返回空集，
+    维持「无保护目录可删」的现状语义——空集不当可疑处理。
     """
     try:
         kd = keep_dirs() if callable(keep_dirs) else keep_dirs

@@ -66,7 +66,6 @@ def _write_error_kind(a) -> str | None:
     return None
 
 
-
 def build_session_settings(listen_port: int, active_downloads: int,
                            proxy: dict | None = None) -> dict:
     """会话配置字典（libtorrent 2.1.x：dict 配置已取代 settings_pack）。
@@ -307,11 +306,15 @@ class SessionCore:
         registry 锁内（告警线程与主线程交错），与 watchdog 下载分支同款
         编排：锁内改状态+同步清单，出锁再 persist / emit_error（P1-4）。
         查不到归属 = 已移除任务的迟到告警，丢弃（与 handle_alert 一致）。
+        D5-A 终态守卫（仿 watchdog 状态过滤 :366-367）：COMPLETED/FAILED/
+        PAUSED/STOPPED 一律跳过——迟到 file_error 不得把重启后恢复的完成态
+        拉回 FAILED；同文案重复告警去重（rec.error == msg 即返回，不引入
+        新字段），杜绝重复 persist 与重复弹窗。
         ``error``/``filename`` 可能缺失（no_files / metadata 阶段告警），
         一律 getattr 兜底，绝不因取字段失败而漏标错。
         """
         d = self.deps
-        kind = _write_error_kind(a) or "file_error"
+        kind = _write_error_kind(a)
         rec = d.find_record(a.handle)
         if rec is None:
             return
@@ -319,8 +322,22 @@ class SessionCore:
         detail = str(err) if err is not None else "磁盘错误或空间不足"
         filename = getattr(a, "filename", "") or ""
         label = "存储" if kind == "storage_failed_alert" else "写入"
-        msg = f"{label}失败：{detail}" + (f"（文件：{filename}）" if filename else "")
+        if filename:
+            tail = f"（文件：{filename}）"
+        else:
+            # Minor-e：filename 缺失（storage_failed 无此字段）回退 operation，
+            # 再缺则不留尾注——文案宁可少一截，不编造。
+            op = getattr(a, "operation", "") or ""
+            tail = f"（操作：{op}）" if op else ""
+        msg = f"{label}失败：{detail}{tail}"
         with d.lock:
+            # D5-A：守卫与去重必须在锁内、任何写之前——判定与写同区间，
+            # 不与并发状态迁移交错出「判时非终态、写时已终态」的窗口。
+            if rec.state in (STATE_COMPLETED, STATE_FAILED,
+                             STATE_PAUSED, STATE_STOPPED):
+                return
+            if rec.error == msg:      # 同文案重复告警（锁内去重，无新字段）
+                return
             key = d.hash_key(rec.handle) if rec.handle is not None else ""
             rec.state = STATE_FAILED
             rec.error = msg
