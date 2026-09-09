@@ -291,6 +291,11 @@ def main() -> int:
         "current_result": [],
         "status": [],
     })
+    # A1：preview 点播上限复用 scheduler.LOOKAHEAD_PIECES（scheduler 不
+    # import preview，零环保持）——常量绑定关系与取值一并冻结。
+    check(hasattr(preview, "LOOKAHEAD_PIECES")
+          and preview.LOOKAHEAD_PIECES == scheduler.LOOKAHEAD_PIECES == 60,
+          "preview.LOOKAHEAD_PIECES 绑定 scheduler 常量且取值 60（A1）")
     check(all(hasattr(fetcher_mod, n) for n in
               ("STATE_NAMES", "resolver_result_from_ti")),
           "core.fetcher 仍再导出 STATE_NAMES / resolver 纯函数别名")

@@ -469,6 +469,35 @@ def main() -> int:
     bs.deleteLater()
     vp7.deleteLater()
 
+    # ------------------------------------------------- [4f] 画廊切换配额（A2 防回归）
+    # 画廊切未下载图片直接 start_preview 会绕过 _enforce_cache_quota
+    # （对比 _open_preview 视频路径）——连刷大量图片缓存无上限增长。
+    # 修复语义：start_preview 前必须先触发配额；同文件重复点击走早退分支，
+    # 不得触发配额（也不得重复 begin 预览）。
+    print("\n[4f] 画廊切换未下载文件触发缓存配额（A2）")
+    from core.models import TorrentFile as _TF  # noqa: E402
+    _orig_start = w.session.start_preview
+    _orig_preview_file = w._preview_file
+    quota_calls, started = [], []
+    w._enforce_cache_quota = lambda: quota_calls.append(1)
+    w.session.start_preview = lambda f: started.append(f)
+    try:
+        gf1 = _TF(3, "root/pics/c.png", 4096, 0, 0, 0)
+        w._on_gallery_file(gf1)
+        check(len(quota_calls) == 1 and started == [gf1],
+              f"画廊切未下载文件：配额先触发（quota {len(quota_calls)} 次，"
+              f"start {len(started)} 次）")
+        w._on_gallery_file(gf1)   # 同文件重复点击 → 早退分支
+        check(len(quota_calls) == 1 and len(started) == 1,
+              "同文件重复点击早退：不触发配额、不重复预览")
+        gf2 = _TF(4, "root/pics/d.png", 4096, 0, 0, 0)
+        w._on_gallery_file(gf2)
+        check(len(quota_calls) == 2 and len(started) == 2,
+              "切换到另一张图再次触发配额")
+    finally:
+        w.session.start_preview = _orig_start
+        w._preview_file = _orig_preview_file
+
     # ---------------------------------------------------------------- [5] 清理
     print("\n[5] 收尾")
     w._stop_preview()

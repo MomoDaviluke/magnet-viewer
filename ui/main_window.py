@@ -622,6 +622,9 @@ class MainWindow(QMainWindow):
         """画廊中切换到未下载的图片 → 按需下载该文件。"""
         if f is None or f == self._preview_file:
             return
+        # A2：与 _open_preview（视频路径）对齐——预览启停前必须走缓存配额，
+        # 否则画廊连刷大量图片会绕过 limit 无上限增长。
+        self._enforce_cache_quota()
         try:
             self.session.start_preview(f)
             self._preview_file = f

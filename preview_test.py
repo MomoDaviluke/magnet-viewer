@@ -233,6 +233,35 @@ def section_demand(ck):
                  "区间钳制：不越界补拉其它文件的分块")
         ck.check(pv.demand_for_path(os.path.join(cache, "no"), 0, 1) is False,
                  "未命中 → False（不抛）")
+        # A1 回归：点播必须有 LOOKAHEAD_PIECES 上限（对齐 request_range，
+        # scheduler.py:156）。播放器发 `bytes=X-` 时 end_excl 到文件尾，
+        # 不截断会把剩余整文件刷 ASAP，带宽摊薄反而拖慢点播目标。
+        from core.scheduler import LOOKAHEAD_PIECES
+        big_files = [TorrentFile(0, "root/big.bin", 20000, 0, 0, 199)]
+        big_res = ParseResult(info_hash="d" * 40, name="root",
+                              total_size=20000, piece_size=100,
+                              num_pieces=200, files=big_files,
+                              source="magnet")
+        big_dir = os.path.join(cache, "downloads", "d" * 40)
+        os.makedirs(big_dir, exist_ok=True)
+        bh = FakeHandle("d" * 40, file=FakeTI())
+        with reg.lock:
+            reg.put_record_locked("d" * 40, TaskRecord(
+                handle=bh, result=big_res, save_path=big_dir,
+                download=True))
+        h.deadlines.clear()
+        pv.demand_for_path(os.path.join(big_dir, "root", "big.bin"),
+                           0, 20000)          # 整文件点播（bytes=0- 语义）
+        ck.check(len(bh.deadlines) <= LOOKAHEAD_PIECES,
+                 f"单次 demand 覆盖块数 ≤ LOOKAHEAD_PIECES"
+                 f"（实际 {len(bh.deadlines)}）")
+        ck.check(bh.deadlines == [(p, 0) for p in range(LOOKAHEAD_PIECES)],
+                 f"大区间只从头部连续预约 {LOOKAHEAD_PIECES} 块（尾部不刷 ASAP）")
+        bh.deadlines.clear()
+        pv.demand_for_path(os.path.join(big_dir, "root", "big.bin"),
+                           15000, 20000)      # 尾部小区间（50 块 < 60）
+        ck.check(bh.deadlines == [(p, 0) for p in range(150, 200)],
+                 "小区间不受截断影响（尾部 50 块全预约）")
         h._pl_bad = True
         h.file = type("T", (), {"piece_length": staticmethod(lambda: 0)})()
         ck.check(pv.demand_for_path(

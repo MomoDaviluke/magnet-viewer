@@ -108,7 +108,11 @@ class PreviewScheduler:
     # ---------- 生命周期 ----------
 
     def begin(self, handle, file) -> None:
-        """开始预览指定文件。"""
+        """开始预览指定文件。
+
+        注（A0 真链路确证，2026-09-09 本机做种实证）：ASAP 窗口只管**顺序**，
+        全文件由 file-priority 4 负责持续落盘——窗口外块照常下载，只是不插队。
+        """
         ti = handle.torrent_file()
         if ti is None:
             raise RuntimeError("元数据尚未就绪")

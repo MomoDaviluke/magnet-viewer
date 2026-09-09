@@ -29,6 +29,7 @@ import libtorrent as lt
 from .logutil import log_warning
 from .models import ParseResult, PieceMap, TorrentFile, have_from_bitmap
 from .registry import TaskRecord, TaskRegistry
+from .scheduler import LOOKAHEAD_PIECES
 
 STATE_NAMES = {
     getattr(lt.torrent_status, k, None): k.replace("_", " ")
@@ -110,6 +111,12 @@ class PreviewCore:
 
         与 scheduler.request_range 语义一致，但作用于任意下载任务句柄
         （流服务 demand_cb 对非预览文件的请求也生效）。
+
+        单次点播同样**必须有 LOOKAHEAD_PIECES 上限**（对齐
+        scheduler.py:156 及其注释的论证）：FFmpeg 拖动发的是 `bytes=X-`
+        （X 到文件尾），不截断会把剩余整文件全刷成 ASAP——带宽摊到几百
+        MB 上反而拖慢点播目标本身。全量落盘由 file-priority 负责，
+        点播只是临时插队，不需要也不应该包揽整文件。
         """
         hit = self.find_record_for_path(disk_path)
         if hit is None:
@@ -123,6 +130,7 @@ class PreviewCore:
                         f.start_piece + max(0, start_byte) // pl)
             last = min(f.end_piece,
                        f.start_piece + max(0, end_excl - 1) // pl)
+            last = min(last, first + LOOKAHEAD_PIECES - 1)
             for p in range(first, last + 1):
                 rec.handle.set_piece_deadline(p, 0)
             return True
