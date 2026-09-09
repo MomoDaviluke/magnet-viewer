@@ -391,6 +391,67 @@ def main() -> int:
         with w.session._registry.lock:
             w.session._registry.torrents.pop(ih3, None)
 
+    # ---- [4b-4] LRU 配额保护名单 fail-closed（阶段 D D0，审查 Important-1）----
+    # _enforce_cache_quota 的 keep 回调必须**裸调** protected_dirs：会话异常
+    # 时上抛 → cache_quota._norm_keep 的 None 分支 → 本轮保守不删。旧的
+    # _live_cache_dirs 空集兜底（fail-open，只该服务手动清理入口）在 LRU
+    # 路径上会把「名单故障」放大成「全部活目录无保可删」，方向相反。
+    print("\n[4b-4] LRU keep 回调 fail-closed（D0）")
+    import ui.main_window as _mw  # noqa: E402
+    quota_cache = os.path.join(tmp, "cache_d0")
+    proot = os.path.join(quota_cache, ".preview")
+    os.makedirs(proot, exist_ok=True)
+    for _ih, _mt in (("a1" * 20, 1_000_000_000), ("b2" * 20, 2_000_000_000)):
+        _d = os.path.join(proot, _ih)
+        os.makedirs(_d, exist_ok=True)
+        _fp = os.path.join(_d, "chunk.bin")
+        with open(_fp, "wb") as _f:
+            _f.write(b"x" * 900 * 1024)          # 两份都超 1MB 上限
+        os.utime(_fp, (_mt, _mt))
+    orig_cd, orig_lim = w.cache_dir, w.cfg.get("cache_limit_mb")
+    w.cache_dir = quota_cache
+    w.cfg.set("cache_limit_mb", 1)
+    try:
+        def _boom_dirs():
+            raise RuntimeError("会话已停机")
+        _orig_pd = w.session.protected_dirs
+        w.session.protected_dirs = _boom_dirs
+        try:
+            w._enforce_cache_quota()      # 异常必须被 fail-closed 消化，不外抛
+        finally:
+            w.session.protected_dirs = _orig_pd
+        check(os.path.isdir(os.path.join(proot, "a1" * 20))
+              and os.path.isdir(os.path.join(proot, "b2" * 20)),
+              "protected_dirs 抛异常：LRU 本轮零删除（fail-closed，活目录全幸存）")
+
+        # 白盒：装配进 cache_quota 的闭包确实透传异常（UI 层不吞）。
+        # spy 截获 enforce_preview_limit 收到的 keep 回调后单独引爆。
+        captured: dict = {}
+        _orig_enforce = _mw.enforce_preview_limit
+
+        def _spy(root, limit_mb, keep_dirs=None, warn=None):
+            captured["keep"] = keep_dirs
+            return 0, 0
+        _mw.enforce_preview_limit = _spy
+        w.session.protected_dirs = _boom_dirs
+        raised = False
+        try:
+            w._enforce_cache_quota()
+            # 闭包在调用时才取 protected_dirs：须在还原前引爆
+            try:
+                captured["keep"]()
+            except RuntimeError:
+                raised = True
+        finally:
+            _mw.enforce_preview_limit = _orig_enforce
+            w.session.protected_dirs = _orig_pd
+        check("keep" in captured and raised,
+              "_enforce_cache_quota 透传的 keep 闭包裸调 protected_dirs："
+              "异常上抛给 cache_quota（不经 _live_cache_dirs 空集兜底）")
+    finally:
+        w.cache_dir = orig_cd
+        w.cfg.set("cache_limit_mb", orig_lim)
+
     # ---------------------------------------------------------------- [4c] 画廊隔离路径
     print("\n[4c] 画廊磁盘路径拼接（P0-2 回归）")
     import base64  # noqa: E402

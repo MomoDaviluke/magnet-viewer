@@ -13,7 +13,8 @@
 - §C 热更新：apply_proxy / apply_rate_limit 的 ses=None 跳过与异常吞
 - §D shutdown：scheduler.stop→落盘→请求 resume（仅 download+result）→
      running 置否→join(timeout)→drain→remove_torrent(handle,0)→复位→ses 置空
-- §E handle_alert 分发：五类告警的归属过滤·迟到告警丢弃·file_completed 仅当前任务
+- §E handle_alert 分发：五类告警的归属过滤·迟到告警丢弃·file_completed 仅当前任务·
+     写盘失败告警（file_error/storage_failed）标错（D1）
 - §F metadata_watchdog：per-task 超时·记录级 timeout 覆盖·暂停/停止/完成/失败
      不看门·非下载 emit_error·下载任务 FAILED+写清单+幂等（二次扫不重复发射）
 - §G resume_sweep：60s 节流·仅 DOWNLOADING+handle+download
@@ -140,6 +141,18 @@ class _FakeLT:
     class save_resume_data_failed_alert:
         def __init__(self, handle):
             self.handle = handle
+
+    class file_error_alert:
+        def __init__(self, handle, error=None, filename="data.mkv"):
+            self.handle = handle
+            self.error = error
+            self.filename = filename
+
+    class storage_failed_alert:
+        def __init__(self, handle, error=None, operation=None):
+            self.handle = handle
+            self.error = error
+            self.operation = operation
 
     class save_resume_flags_t:
         flush_disk_cache = "FLUSH"
@@ -440,7 +453,7 @@ def section_shutdown(ck):
 # --------------------------------------------------------------------------
 
 def section_alert_dispatch(ck):
-    ck.section("§E handle_alert：五类告警归属分发")
+    ck.section("§E handle_alert：告警归属分发（含 D1 写盘失败标错）")
     real_lt = session.lt
     try:
         session.lt = _FakeLT
@@ -497,6 +510,73 @@ def section_alert_dispatch(ck):
         # E5 未知类型告警静默忽略
         core.handle_alert(object())
         ck.check(True, "未知告警类型静默忽略")
+
+        # E6 file_error_alert（写盘失败/磁盘满，阶段 D D1）：下载任务 →
+        # FAILED + rec.error + tasks 清单同步 + persist（旁路写持锁）
+        class CountingLock:
+            """代理锁：计数 __enter__/acquire，验证旁路写入是否持锁（R-1）。"""
+            def __init__(self):
+                self._lk = threading.Lock()
+                self.acquires = 0
+
+            def acquire(self, *a):
+                self.acquires += 1
+                return self._lk.acquire(*a)
+
+            def release(self):
+                return self._lk.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                self.release()
+                return False
+
+        d, host, calls = make_deps()
+        lock_probe = CountingLock()
+        d.lock = lock_probe
+        core = session.SessionCore(d)
+        h = FakeHandle(IH)
+        rec = TaskRecord(handle=h, download=True, state=STATE_DOWNLOADING)
+        host["torrents"][IH] = rec
+        host["tasks"][IH] = {"state": STATE_DOWNLOADING, "error": ""}
+        core.handle_alert(_FakeLT.file_error_alert(h, error=OSError("磁盘已满")))
+        ck.check(rec.state == STATE_FAILED and rec.error,
+                 "file_error_alert：下载任务 FAILED + rec.error 非空")
+        ck.check(host["tasks"][IH]["state"] == STATE_FAILED
+                 and host["tasks"][IH]["error"] == rec.error,
+                 "file_error_alert：tasks 清单同步 FAILED+error（同 watchdog 惯例）")
+        ck.check(calls["persist_tasks"] == [1], "file_error_alert：清单落盘恰一次")
+        ck.check(lock_probe.acquires >= 1,
+                 "file_error_alert：旁路写入经 registry 锁（R-1 纪律探针）")
+        # E7 storage_failed_alert（1.x 命名）同语义；error 缺失防御兜底
+        d, host, calls = make_deps()
+        core = session.SessionCore(d)
+        h2 = FakeHandle(IH2)
+        rec2 = TaskRecord(handle=h2, download=True, state=STATE_DOWNLOADING)
+        host["torrents"][IH2] = rec2
+        core.handle_alert(_FakeLT.storage_failed_alert(h2))
+        ck.check(rec2.state == STATE_FAILED and rec2.error,
+                 "storage_failed_alert：同款标错，error 缺失也兜底非空")
+        # E8 预览（非下载）任务写盘失败：emit_error 弹 UI，不写清单/不落盘
+        d, host, calls = make_deps()
+        core = session.SessionCore(d)
+        h3 = FakeHandle(IH)
+        rec3 = TaskRecord(handle=h3, download=False, state=STATE_DOWNLOADING)
+        host["torrents"][IH] = rec3
+        core.handle_alert(_FakeLT.file_error_alert(h3, error=OSError("权限拒绝")))
+        ck.check(rec3.state == STATE_FAILED, "预览任务写盘失败 → FAILED")
+        ck.check(len(calls["errors"]) == 1 and "权限拒绝" in calls["errors"][0],
+                 "预览任务写盘失败：emit_error 文案含错误原因（仿 watchdog 分支）")
+        ck.check(calls["persist_tasks"] == [], "预览任务不写下载清单")
+        # E9 迟到告警（查无归属）丢弃
+        d, host, calls = make_deps()
+        core = session.SessionCore(d)
+        core.handle_alert(_FakeLT.file_error_alert(FakeHandle("f" * 40)))
+        ck.check(calls["errors"] == [] and calls["persist_tasks"] == [],
+                 "file_error 迟到告警查无归属：静默丢弃")
     finally:
         session.lt = real_lt
 

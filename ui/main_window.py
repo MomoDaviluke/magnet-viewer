@@ -374,10 +374,13 @@ class MainWindow(QMainWindow):
             log_key="main.clear_cache_now")
 
     def _live_cache_dirs(self) -> set[str]:
-        """活任务落盘目录快照（protected_dirs()）——清理入口的 C1 复核名单。
+        """活任务落盘目录快照（protected_dirs()）——**手动/退出清理入口**的
+        C1 复核名单。
 
         会话异常（未启动/已停机竞态）兜底空集：清理退回基线行为，绝不
-        因取名单失败而阻断清理主流程（旁路纪律）。
+        因取名单失败而阻断清理主流程（旁路纪律，fail-open 有意为之）。
+        注意：LRU 配额（_enforce_cache_quota）不走本方法——那条路必须
+        fail-closed（名单故障→零删除），见 D0（审查 Important-1）。
         """
         try:
             return set(self.session.protected_dirs())
@@ -681,6 +684,12 @@ class MainWindow(QMainWindow):
         （出锁干活，耗时）→ 执行删除」窗口内刚登记的新 review 被陈旧
         快照漏保误删的竞态（回调内部自持 registry 锁，锁内零 libtorrent，
         符合并发三律；锁的持有粒度不变）。
+
+        阶段 D D0（审查 Important-1）：回调**裸调** session.protected_dirs
+        ——异常上抛给 cache_quota._norm_keep 的 None 分支→本轮保守不删
+        （fail-closed）。不再经 _live_cache_dirs 的空集兜底（fail-open）：
+        那个兜底只服务「清理失败不阻断主流程」的手动清理入口；LRU 自动
+        删除路径拿空名单 = 把所有活任务目录当无保候选删，方向必须相反。
         """
         limit = int(self.cfg.get("cache_limit_mb") or 0)
         if limit <= 0:
@@ -691,9 +700,11 @@ class MainWindow(QMainWindow):
         cache_root = os.path.normcase(self.cache_dir)
 
         def _keep() -> set[str]:
-            # 每次解析现取（含 cache 根兜底保护，语义与原静态快照一致）
+            # D0 fail-closed：protected_dirs 裸调，异常透传给 cache_quota
+            # （名单故障 → 本轮零删除）；每次解析现取（含 cache 根兜底
+            # 保护，语义与原静态快照一致）。
             return {os.path.normcase(p)
-                    for p in self._live_cache_dirs()} | {cache_root}
+                    for p in self.session.protected_dirs()} | {cache_root}
         try:
             total, _freed = enforce_preview_limit(
                 preview_root, limit, _keep,

@@ -52,6 +52,21 @@ def alert_category_mask() -> int:
     return mask
 
 
+def _write_error_kind(a) -> str | None:
+    """写盘失败类告警识别：命中返回类型名，否则 None。
+
+    ``file_error_alert``（1.2+ 现名，吞并了旧 ``storage_failed_alert``）与
+    ``storage_failed_alert``（1.1 旧名）都要认——getattr 探测，本环境
+    libtorrent 2.1 没有后者也不报错；两代版本与测试替身共用此入口。
+    """
+    for name in ("file_error_alert", "storage_failed_alert"):
+        cls = getattr(lt, name, None)
+        if cls is not None and isinstance(a, cls):
+            return name
+    return None
+
+
+
 def build_session_settings(listen_port: int, active_downloads: int,
                            proxy: dict | None = None) -> dict:
     """会话配置字典（libtorrent 2.1.x：dict 配置已取代 settings_pack）。
@@ -278,6 +293,58 @@ class SessionCore:
         elif isinstance(a, lt.save_resume_data_failed_alert):
             log_warning("fetcher.resume.failed",
                         f"{d.hash_key(a.handle)[:12]}…")
+        elif _write_error_kind(a) is not None:
+            # 阶段 D D1：磁盘满/写失败告警（file_error / storage_failed）。
+            # 以前无分支 → 后台满速缓存撞盘时任务静默卡 DOWNLOADING。
+            self._handle_write_error(a)
+
+    def _handle_write_error(self, a) -> None:
+        """写盘失败告警（磁盘满/权限/IO 错误）→ 归属任务标错。
+
+        磁盘满或写失败后 libtorrent 会暂停对应文件 IO，但不会自己把任务
+        置 FAILED——不处理就是「卡 DOWNLOADING 假死」（plan/06 关键事实 6）。
+        R-1 纪律：rec.state/rec.error 与 tasks 清单的旁路写入必须在
+        registry 锁内（告警线程与主线程交错），与 watchdog 下载分支同款
+        编排：锁内改状态+同步清单，出锁再 persist / emit_error（P1-4）。
+        查不到归属 = 已移除任务的迟到告警，丢弃（与 handle_alert 一致）。
+        ``error``/``filename`` 可能缺失（no_files / metadata 阶段告警），
+        一律 getattr 兜底，绝不因取字段失败而漏标错。
+        """
+        d = self.deps
+        kind = _write_error_kind(a) or "file_error"
+        rec = d.find_record(a.handle)
+        if rec is None:
+            return
+        err = getattr(a, "error", None)
+        detail = str(err) if err is not None else "磁盘错误或空间不足"
+        filename = getattr(a, "filename", "") or ""
+        label = "存储" if kind == "storage_failed_alert" else "写入"
+        msg = f"{label}失败：{detail}" + (f"（文件：{filename}）" if filename else "")
+        with d.lock:
+            key = d.hash_key(rec.handle) if rec.handle is not None else ""
+            rec.state = STATE_FAILED
+            rec.error = msg
+            is_download = rec.download
+            is_current = rec is d.current_record()
+            was_resolving = rec.resolving
+            if was_resolving:
+                rec.resolving = False
+                rec.resolve_started = 0.0
+                if is_current:
+                    d.clear_resolving()
+            if is_download:
+                tasks = d.tasks_get()
+                if key and key in tasks:
+                    tasks[key]["state"] = STATE_FAILED
+                    tasks[key]["error"] = msg
+        log_warning("fetcher.storage_error",
+                    f"{(key[:12] + '…') if key else '?'} {msg}")
+        if is_download:
+            d.persist_tasks()      # 出锁落盘（P1-4：同步 I/O 不在锁内）
+        elif not was_resolving:
+            # 预览任务：无下载清单可写，经 emit_error 通道弹 UI（仿 watchdog
+            # 非下载分支）；已在 resolving（元数据阶段）的预览错误不重复弹窗。
+            d.emit_error(msg)
 
     def metadata_watchdog(self, now: float | None = None) -> None:
         """per-task 元数据超时看门狗（替代旧的全局单计时）。
