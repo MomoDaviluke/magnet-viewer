@@ -128,12 +128,19 @@ def probe_seek(url: str, seek_sec: float, timeout: float = 60.0) -> tuple[int, s
     定位说明：**正向验证**（渐进服务下 seek 能解码成功），不是旧行为的回归
     判据 —— 实测命令行 FFmpeg 收到 416 后会回退为顺序读取，因此关闭渐进
     服务本用例仍会通过。真实差异取决于下载速度与文件大小（见 qt 用例说明）。
+
+    FFmpeg 8 兼容（2026-09 阶段 Z 实证）：8.x 对 HTTP 探测只解析出「partial
+    file / unspecified size」，隐式映射会把无法确定尺寸的流整个丢弃，null
+    输出报 "Output file does not contain any stream" → EINVAL（与流服务无关
+    ——同一命令打在标准库 http.server 的完整文件上同样失败，7.1 则通过）。
+    必须显式 -map 0:v:0 强制映射，用例才只检验它真正要检验的东西：seek 后
+    能否解码出一帧。
     """
     exe = find_ffmpeg_exe()
     if exe is None:
         return -1, "no ffmpeg available"
     cmd = [exe, "-v", "error", "-ss", f"{seek_sec}", "-i", url,
-           "-frames:v", "1", "-f", "null", "-"]
+           "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                            env=_subprocess_env())

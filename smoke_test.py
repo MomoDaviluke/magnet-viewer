@@ -745,6 +745,10 @@ def main():
     except urllib.error.HTTPError as e:
         assert e.code == 416 and e.headers.get("Content-Range") == f"bytes */{size}", \
             (e.code, e.headers.get("Content-Range"))
+        # A3：HTTP/1.1 keep-alive 下 416 必须带 Content-Length: 0，
+        # 否则复用连接上的后续响应帧错位
+        assert e.headers.get("Content-Length") == "0", \
+            ("416 缺少 Content-Length: 0", dict(e.headers))
     srv3.shutdown()
     print("[3e] 分块级流服务通过：206 就绪区间 / 416 空洞 / 后缀相对逻辑大小")
 

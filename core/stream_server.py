@@ -73,8 +73,6 @@ class _StreamHandler(BaseHTTPRequestHandler):
     wait_timeout = 20.0  # 未就绪区间的等待上限（秒）；0 = 不等待（测试用）
     token = ""          # 由 StreamServer 注入：每会话随机鉴权 token
 
-    protocol_version = "HTTP/1.1"
-
     def log_message(self, *args):  # 静默访问日志
         pass
 
@@ -161,10 +159,13 @@ class _StreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _respond_416(self, logical: int):
-        # 请求区间数据未就绪/不可满足：告知逻辑总长，客户端可重试或等待
+        # 请求区间数据未就绪/不可满足：告知逻辑总长，客户端可重试或等待。
+        # Content-Length: 0 必须有 —— HTTP/1.1 keep-alive 下无长度语义的
+        # 4xx 会让复用连接上的后续响应帧错位（A3）。
         self.send_response(416)
         self._security_headers()
         self.send_header("Content-Range", f"bytes */{logical}")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _respond_range(self, fp: str, start: int, end: int, logical: int,
