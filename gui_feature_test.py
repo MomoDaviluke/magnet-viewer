@@ -1072,28 +1072,14 @@ def main() -> int:
     from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox,  # noqa: E402
                                    QGridLayout, QGroupBox, QLineEdit,
                                    QProxyStyle, QPushButton, QScrollArea,
-                                   QSpinBox, QVBoxLayout, QWidget)
+                                   QSpinBox, QStyle, QStyleOptionComboBox,
+                                   QStyleOptionSpinBox, QVBoxLayout, QWidget)
 
     def _dist(c, hexs) -> int:
         """QColor 与目标色值的 |ΔR|+|ΔG|+|ΔB|（0 = 完全一致）。"""
         w_ = QColor(hexs)
         return (abs(c.red() - w_.red()) + abs(c.green() - w_.green())
                 + abs(c.blue() - w_.blue()))
-
-    def _nonbg(sub, bg, x0, x1, y0, y1):
-        """区域里与 ``bg`` 距离 > 60 的「墨迹」像素。
-
-        阈值 60 是刻意的：右侧分区底（浅 #eef0f3）与输入底（#ffffff）只差
-        44，分区**本身不算墨迹**；而雪佛龙（#5b6472）差 452、边框差 79，
-        都稳稳过线。
-        """
-        out = []
-        for y in range(y0, y1):
-            for x in range(x0, x1):
-                c = sub.pixelColor(x, y)
-                if _dist(c, bg.name()) > 60:
-                    out.append((x, y, c))
-        return out
 
     def _eq_pts(sub, hexs, x0, x1, y0, y1, tol=2):
         """区域里与目标色值距离 <= tol 的像素点（用于「某色真的被画出来」断言）。"""
@@ -1136,91 +1122,324 @@ def main() -> int:
     check("qlineargradient" not in _q_light and "box-shadow" not in _q_light,
           "不用渐变/阴影（靠圆角 + 柔和边框 + hover/pressed 色阶做平滑感）")
 
-    # ---- ② 箭头 QSS 必须**静默**（有任何 ::down-arrow/drop-down/up-button 规则
-    #         都会让 QStyleSheetStyle 不再转发箭头 primitive → 方块或消失）----
-    _arrow_rules = [ln.strip() for ln in (_q_light + _q_dark).splitlines()
-                    if ln.strip().startswith(("QComboBox::", "QSpinBox::"))]
-    check("border-left: 5px solid transparent" not in _q_light
-          and "border-top: 6px solid" not in _q_light
-          and not _arrow_rules,
-          f"已清掉 CSS 三角 hack 且不再声明箭头子控件规则"
-          f"（实得 {_arrow_rules or '无'}）")
-    check(issubclass(_style.ChevronStyle, QProxyStyle)
-          and callable(getattr(_style, "install", None)),
-          "ui/style.py 导出 ChevronStyle(QProxyStyle) + install(app)")
-    check(_style.CHEVRON_W <= 6 and _style.CHEVRON_H <= 4
-          and 1.0 <= _style.CHEVRON_STROKE <= 2.0,
-          f"雪佛龙规格=细（宽 {_style.CHEVRON_W} 高 {_style.CHEVRON_H} "
-          f"描边 {_style.CHEVRON_STROKE}）")
+    # ---- ② 箭头/分区改由 **QSS 子控件 + SVG 资源** 承担 ----
+    #    上一轮用 QProxyStyle 自算几何（分区矩形 / 对半分 / 分隔线 / 雪佛龙坐标）
+    #    实测算错位：分区只画出右上角一小块、箭头不垂直居中、微调的分隔线横穿
+    #    到输入框外。本轮**作废自绘几何**，改回 Qt 标准做法（几何由样式引擎算）。
+    #    断言面：① QSS 里确有 drop-down / up-button / down-button / *-arrow 规则
+    #    且规格齐全；② ui/style.py 里再没有任何箭头/分区绘制；③ 资源文件与
+    #    asset_path() 解析（打包自检的前置）。
+    def _flat(text):
+        return " ".join(text.split())
 
-    # ---- ③ 箭头像素证据：形状（空心折线）+ 颜色（现读色板，浅深各一）----
+    def _no_comments(text):
+        """去掉 /* ... */ 注释：断言只针对**规则本身**，注释里引用的反例
+        （如「实测 height: 50% 被当 50px」）不该把断言自己绊倒。"""
+        out, i, n = [], 0, len(text)
+        while i < n:
+            if text.startswith("/*", i):
+                j = text.find("*/", i + 2)
+                i = n if j < 0 else j + 2
+                continue
+            out.append(text[i])
+            i += 1
+        return "".join(out)
+
+    _qf = _flat(_no_comments(_q_light))    # 浅色 QSS 规则压成单行，便于逐字符断言
+    _qfd = _flat(_no_comments(_q_dark))
+    _R = theme.R_MD
+    _dn_l = theme.asset_path("chevron-down-light.svg").replace("\\", "/")
+    _up_l = theme.asset_path("chevron-up-light.svg").replace("\\", "/")
+    _dn_d = theme.asset_path("chevron-down-dark.svg").replace("\\", "/")
+
+    check(f"QComboBox::drop-down {{ subcontrol-origin: border; "
+          f"subcontrol-position: top right; width: 26px; "
+          f"height: {theme.FIELD_H}px; "
+          f"background: {LIGHT['bg_compartment']}; "
+          f"border-left: 1px solid {LIGHT['border']}; "
+          f"border-top-right-radius: {_R}px; "
+          f"border-bottom-right-radius: {_R}px; }}" in _qf
+          and f"QGroupBox QComboBox::drop-down {{ height: {theme.FIELD_H_GB}px; }}" in _qf,
+          f"下拉分区：QSS ::drop-down 贴右上 / 宽 26px / **height 显式写死 "
+          f"{theme.FIELD_H}px（分组框内 {theme.FIELD_H_GB}px）= 控件总高** / "
+          f"bg_compartment / 左边 1px 分隔线 / 右侧两角圆角 8")
+    check(theme.FIELD_H == theme.FIELD_CONTENT_H + 2 * theme.FIELD_PAD_V + 2
+          and theme.FIELD_H_GB == theme.FIELD_CONTENT_H_GB + 2 * theme.FIELD_PAD_V_GB + 2,
+          f"分区高度常量由「内容高 + 上下 padding + 上下 border」推出"
+          f"（独立 {theme.FIELD_CONTENT_H}+{theme.FIELD_PAD_V}×2+2={theme.FIELD_H}，"
+          f"分组框 {theme.FIELD_CONTENT_H_GB}+{theme.FIELD_PAD_V_GB}×2+2="
+          f"{theme.FIELD_H_GB}）")
+    check(f"QComboBox {{ max-height: {theme.FIELD_CONTENT_H}px; }}" in _qf
+          and f"QSpinBox {{ min-height: {theme.FIELD_CONTENT_H}px; "
+              f"max-height: {theme.FIELD_CONTENT_H}px; }}" in _qf
+          and f"QGroupBox QComboBox {{ max-height: {theme.FIELD_CONTENT_H_GB}px; }}" in _qf
+          and f"QGroupBox QSpinBox {{ min-height: {theme.FIELD_CONTENT_H_GB}px;" in _qf
+          and theme.FIELD_H % 2 == 0 and theme.FIELD_H_GB % 2 == 0,
+          f"输入类总高**钉死**（min == max）且与下拉同高：独立 {theme.FIELD_H}px / "
+          f"分组框 {theme.FIELD_H_GB}px，均为**偶数** → 基样式对半分不留 1px 接缝")
+
+    # 「Qt 样式表不认百分比长度」的**实测**依据（不是理论推断）：临时追加一条
+    # 百分比高度规则，看 QStyleSheetStyle 真的给出什么高度。这正是上一轮
+    # `height: 50%` 把分隔线顶出控件外的根因。
+    _pct_holder = QWidget()
+    _pct_holder.setFixedSize(320, 120)
+    _pct_lay = QVBoxLayout(_pct_holder)
+    _pct_combo = QComboBox()
+    _pct_combo.addItem("A")
+    _pct_lay.addWidget(_pct_combo)
+    _pct_holder.show()
+    app.processEvents()
+    _pct = {}
+    for _spec in ("100%", "50%"):
+        app.setStyleSheet(theme.QSS
+                          + f"QComboBox::drop-down {{ height: {_spec}; }}")
+        app.processEvents()
+        _ocp = QStyleOptionComboBox()
+        _pct_combo.initStyleOption(_ocp)
+        _pct[_spec] = QApplication.style().subControlRect(
+            QStyle.CC_ComboBox, _ocp, QStyle.SC_ComboBoxArrow, _pct_combo)
+    app.setStyleSheet(theme.QSS)
+    app.processEvents()
+    _ocp = QStyleOptionComboBox()
+    _pct_combo.initStyleOption(_ocp)
+    _dd_std = QApplication.style().subControlRect(
+        QStyle.CC_ComboBox, _ocp, QStyle.SC_ComboBoxArrow, _pct_combo)
+    check(_pct["100%"].height() == 100 and _pct["50%"].height() == 50
+          and _pct["100%"].height() != _pct_combo.height(),
+          f"实测：Qt 把百分比长度当 **px** 吃掉（height:100% → "
+          f"{_pct['100%'].height()}px、50% → {_pct['50%'].height()}px，控件高 "
+          f"{_pct_combo.height()}px）→ 分区高度只能写绝对像素")
+    check(_pct_combo.height() == theme.FIELD_H
+          and _dd_std.height() == theme.FIELD_H
+          and _dd_std.top() == 0 and _dd_std.bottom() == _pct_combo.height() - 1,
+          f"独立下拉：控件总高 {_pct_combo.height()}px == 声明分区高 "
+          f"{theme.FIELD_H}px，分区矩形 {_dd_std.getRect()} **满高**"
+          f"（顶 {_dd_std.top()} vs 控件顶+1 容差内；底 {_dd_std.bottom()} == "
+          f"控件底 {_pct_combo.height() - 1}）")
+    _pct_holder.close()
+    _pct_holder.deleteLater()
+    app.processEvents()
+    check(f'QComboBox::down-arrow {{ image: url("{_dn_l}"); '
+          f"width: 12px; height: 12px; }}" in _qf,
+          f"下拉箭头：::down-arrow image 指向 SVG 资源（不是 CSS 三角 hack）")
+    check(f"QSpinBox::up-button {{ subcontrol-origin: border; "
+          f"subcontrol-position: top right; width: 26px; "
+          f"background: {LIGHT['bg_compartment']}; "
+          f"border-left: 1px solid {LIGHT['border']}; "
+          f"border-bottom: 1px solid {LIGHT['border']}; "
+          f"border-top-right-radius: {_R}px; }}" in _qf
+          and f"QSpinBox::down-button {{ subcontrol-origin: border; "
+              f"subcontrol-position: bottom right; width: 26px; "
+              f"background: {LIGHT['bg_compartment']}; "
+              f"border-left: 1px solid {LIGHT['border']}; "
+              f"border-bottom-right-radius: {_R}px; }}" in _qf,
+          "微调分区：::up-button / ::down-button **同宽 26px + 同底 + 同圆角**"
+          "（与下拉完全一致），中间以 1px border 分隔")
+    check(f'QSpinBox::up-arrow {{ image: url("{_up_l}"); width: 12px; height: 12px; }}' in _qf
+          and f'QSpinBox::down-arrow {{ image: url("{_dn_l}"); width: 12px; height: 12px; }}' in _qf,
+          "微调箭头：up/down-arrow 指向对应 SVG，尺寸与下拉**同为 12×12**")
+    check(f"QComboBox::drop-down:hover {{ background: {LIGHT['bg_hover']}; }}" in _qf
+          and f"QSpinBox::up-button:hover {{ background: {LIGHT['bg_hover']}; }}" in _qf
+          and f"QSpinBox::down-button:hover {{ background: {LIGHT['bg_hover']}; }}" in _qf,
+          "三处分区 hover 均转 bg_hover（悬停反馈一致）")
+    check("height: 50%" not in _qf and "height: 100%" not in _qf
+          and "%" not in _qf.split("QComboBox::drop-down")[1].split("}")[0],
+          "分区高度**不写百分比**（Qt 样式表把 100% 当 100px：见下方实测断言），"
+          "对半分交给基样式")
+    check("chevron-down-light.svg" in _qf and "chevron-up-light.svg" in _qf
+          and "chevron-down-dark.svg" in _qfd and "chevron-up-dark.svg" in _qfd
+          and "chevron-down-dark.svg" not in _qf
+          and "chevron-down-light.svg" not in _qfd
+          and "dark" not in _dn_l and "dark" in _dn_d,
+          "浅/深两套 QSS 各自指向对应 SVG（浅→-light、深→-dark，不串色）")
+
+    # ui/style.py 已删净箭头/分区绘制（源码级：这些名字一个都不许留）
+    _style_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "ui", "style.py"), encoding="utf-8").read()
+    _dead = [t for t in ("PE_IndicatorArrow", "PE_IndicatorSpin", "COMPARTMENT_W",
+                         "_compartment_rect", "_half_rect", "_paint_compartment",
+                         "_paint_divider", "_draw_chevron", "_chevron(", "CHEVRON_W",
+                         "_paint_corner_cleanup")
+             if t in _style_src]
+    check(not _dead,
+          f"ui/style.py 已删净箭头/分区绘制（残留 {_dead or '无'}）")
+    check(issubclass(_style.ChevronStyle, QProxyStyle)
+          and callable(getattr(_style, "install", None))
+          and not hasattr(_style, "COMPARTMENT_W")
+          and not hasattr(_style, "CHEVRON_W")
+          and _style.INDICATOR_SIZE == 16,
+          "ui/style.py 只剩复选框/单选指示器自绘（ChevronStyle + install(app)，"
+          "16×16 指示器；分区常量已随绘制一起删除）")
+
+    # 资源文件（打包 datas 的前置）+ asset_path 缺文件时的告警钩子
+    check(len(theme.ASSET_FILES) == 4
+          and all(os.path.isfile(theme.asset_path(n)) for n in theme.ASSET_FILES),
+          f"ui/assets 4 个箭头资源齐备（{', '.join(theme.ASSET_FILES)}）")
+    _svg_facts = {}
+    for _n in theme.ASSET_FILES:
+        _txt = open(theme.asset_path(_n), encoding="utf-8").read()
+        _svg_facts[_n] = ('viewBox="0 0 12 12"' in _txt
+                          and 'stroke-width="1.6"' in _txt
+                          and 'stroke-linecap="round"' in _txt
+                          and 'fill="none"' in _txt and _txt.count("<path") == 1
+                          and (LIGHT["text_muted"] in _txt if "light" in _n
+                               else DARK["text_muted"] in _txt))
+    check(all(_svg_facts.values()),
+          f"4 个 SVG 规格：12×12 视窗 / 无填充 / stroke 1.6 圆头 / 描边 = 对应主题 "
+          f"text_muted（浅 {LIGHT['text_muted']}、深 {DARK['text_muted']}）")
+    _warns = []
+    _orig_lw = theme.log_warning
+    theme.log_warning = lambda tag, msg: _warns.append((tag, msg))
+    try:
+        _miss = theme.asset_path("definitely-missing.svg")
+    finally:
+        theme.log_warning = _orig_lw
+    check(len(_warns) == 1 and _warns[0][0] == "ui.theme.asset_path"
+          and not os.path.isfile(_miss),
+          f"asset_path 缺文件时 log_warning（打包后资源自检靠它）：{_warns[:1]}")
+
+    # ---- ③ 箭头像素证据（QSS 子控件 + SVG 渲染）：居中 / 尺寸 / 颜色 ----
+    #    分区矩形取样式引擎自己的 subControlRect（QSS 的几何就是它算的），再在
+    #    渲染图上逐像素核对：分区底 == bg_compartment、箭头质心落在分区中心
+    #    ±2px、下拉与微调的箭头包围盒**逐像素等大**、描边色 == 色板 text_muted。
+    def _compartment_rects(combo, spin):
+        st = QApplication.style()
+        oc = QStyleOptionComboBox()
+        combo.initStyleOption(oc)
+        os_ = QStyleOptionSpinBox()
+        spin.initStyleOption(os_)
+        return (st.subControlRect(QStyle.CC_ComboBox, oc,
+                                  QStyle.SC_ComboBoxArrow, combo),
+                st.subControlRect(QStyle.CC_SpinBox, os_,
+                                  QStyle.SC_SpinBoxUp, spin),
+                st.subControlRect(QStyle.CC_SpinBox, os_,
+                                  QStyle.SC_SpinBoxDown, spin))
+
+    def _ink(sub, rect, ref, y0=None, y1=None):
+        """分区矩形里的「墨迹」=（与分区底距离 > 120）的像素，即箭头本身。"""
+        pts = []
+        for y in range(rect.top() if y0 is None else y0,
+                       (rect.bottom() + 1) if y1 is None else y1):
+            for x in range(rect.left(), rect.right() + 1):
+                if _dist(sub.pixelColor(x, y), ref) > 120:
+                    pts.append((x, y))
+        return pts
+
+    def _bbox(pts):
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return (min(xs), min(ys), max(xs) - min(xs) + 1, max(ys) - min(ys) + 1)
+
     def _arrow_probe(mode_name):
         theme.apply_theme(app, mode_name)
         pal = theme.current_palette()
         holder = QWidget()
-        holder.setFixedSize(320, 240)
+        holder.setFixedSize(320, 260)
         lay = QVBoxLayout(holder)
+        # 放进 QGroupBox：与设置面板同上下文（微调框的偶数高度规则由
+        # `QGroupBox QSpinBox` 命中，上下半才严丝合缝无接缝）
+        box = QGroupBox("外观")
+        box_lay = QVBoxLayout(box)
         combo = QComboBox()
         combo.addItems(["浅色 Light（默认）", "深色 Dark"])
-        lay.addWidget(combo)
+        box_lay.addWidget(combo)
         spin = QSpinBox()
         spin.setRange(0, 600)
         spin.setValue(600)
-        lay.addWidget(spin)
+        box_lay.addWidget(spin)
+        lay.addWidget(box)
         holder.show()
         app.processEvents()
-        _style.ChevronStyle.draw_calls = 0
         img = holder.grab().toImage()
-        calls = _style.ChevronStyle.draw_calls
-        origin = combo.mapTo(holder, QPoint(0, 0))
-        sub = img.copy(origin.x(), origin.y(), combo.width(), combo.height())
-        bg = sub.pixelColor(6, combo.height() // 2)
-        mid = combo.height() // 2
-        pts = _nonbg(sub, bg, combo.width() - 26, combo.width() - 4,
-                     mid - 10, mid + 11)
-        s_origin = spin.mapTo(holder, QPoint(0, 0))
-        s_sub = img.copy(s_origin.x(), s_origin.y(), spin.width(), spin.height())
-        s_pts = _nonbg(s_sub, s_sub.pixelColor(6, spin.height() // 2),
-                       spin.width() - 26, spin.width() - 4,
-                       3, spin.height() - 3)
+        co = combo.mapTo(holder, QPoint(0, 0))
+        so = spin.mapTo(holder, QPoint(0, 0))
+        csub = img.copy(co.x(), co.y(), combo.width(), combo.height())
+        ssub = img.copy(so.x(), so.y(), spin.width(), spin.height())
+        c_rect, up_rect, dn_rect = _compartment_rects(combo, spin)
+        mid = spin.height() // 2
+        out = (csub, ssub, c_rect, up_rect, dn_rect,
+               _ink(csub, c_rect, pal["bg_compartment"]),
+               _ink(ssub, up_rect, pal["bg_compartment"], up_rect.top(), mid),
+               _ink(ssub, dn_rect, pal["bg_compartment"], mid, spin.height()),
+               pal)
         holder.close()
         holder.deleteLater()
         app.processEvents()
-        return calls, pts, s_pts, bg, pal
+        return out
 
     _arrow_color = {}
+    _arrow_box = {}
     for _mode in ("light", "dark"):
-        _calls, _pts, _s_pts, _bg, _pal = _arrow_probe(_mode)
-        check(_calls >= 3,
-              f"[{_mode}] ChevronStyle 被调用 {_calls} 次（下拉 1 + 微调上下 2）")
-        check(len(_pts) > 0 and len(_s_pts) > 0,
-              f"[{_mode}] 下拉与微调箭头区都有绘制像素"
-              f"（{len(_pts)} / {len(_s_pts)} 个）")
-        if _pts:
-            _rows = {}
-            for _x, _y, _c in _pts:
-                _rows.setdefault(_y, []).append((_x, _c))
-            _order = sorted(_rows)
-            _span = {y: max(p[0] for p in _rows[y]) - min(p[0] for p in _rows[y]) + 1
-                     for y in _order}
-            _best = min(_pts, key=lambda p: _dist(p[2], _pal["text_muted"]))
-            _arrow_color[_mode] = _best[2].name()
-            check(_dist(_best[2], _pal["text_muted"]) == 0,
-                  f"[{_mode}] 箭头色 == 色板 TEXT_MUTED（{_best[2].name()}）"
-                  f"——绘制时现读，热切换跟随")
-            check(all(len(_rows[y]) < _span[y] for y in _order[:2]),
-                  f"[{_mode}] 雪佛龙是**空心折线**（顶部两行有中缝："
-                  f"{[ (len(_rows[y]), _span[y]) for y in _order[:2] ]}）"
-                  f"——实心三角/方块不会有缝")
-            check(_span[_order[-1]] <= 3 and _span[_order[0]] >= 4,
-                  f"[{_mode}] 收成顶点（顶行跨度 {_span[_order[0]]} → "
-                  f"末行 {_span[_order[-1]]}）")
-            check(len(_pts) <= 40,
-                  f"[{_mode}] 细线（非背景像素仅 {len(_pts)} 个，方块会成片）")
-    check(len(_arrow_color) == 2
-          and _arrow_color.get("light") != _arrow_color.get("dark"),
-          f"箭头色随主题：浅 {_arrow_color.get('light')} / "
-          f"深 {_arrow_color.get('dark')}")
+        (_csub, _ssub, _crect, _uprect, _dnrect,
+         _cink, _uink, _dink, _pal) = _arrow_probe(_mode)
+        check(_dist(_csub.pixelColor(_crect.left() + 3, _crect.top() + 3),
+                    _pal["bg_compartment"]) == 0
+              and _dist(_ssub.pixelColor(_uprect.left() + 3, _uprect.top() + 3),
+                        _pal["bg_compartment"]) == 0
+              and _dist(_ssub.pixelColor(_dnrect.left() + 3, _dnrect.bottom() - 3),
+                        _pal["bg_compartment"]) == 0,
+              f"[{_mode}] 下拉分区与微调上下半分区底 == bg_compartment "
+              f"（{_pal['bg_compartment']}）")
+        check(_crect.right() == _csub.width() - 1
+              and _uprect.right() == _dnrect.right() == _ssub.width() - 1,
+              f"[{_mode}] 分区右边缘 == 控件右边缘 - 1px 边框"
+              f"（下拉 {_crect.right()}/{_csub.width() - 1}，"
+              f"微调 {_uprect.right()}/{_ssub.width() - 1}）")
+        check(_crect.width() == _uprect.width() == _dnrect.width()
+              and _crect.left() == _uprect.left() == _dnrect.left()
+              and _uprect.bottom() + 1 == _dnrect.top(),
+              f"[{_mode}] 下拉与微调分区**同宽同左缘**（各 {_crect.width()}px = QSS 声明 "
+              f"26px + 1px 左分隔线；左缘 {_crect.left()}），微调上下半**严丝合缝**"
+              f"（up {_uprect.top()}..{_uprect.bottom()} / down {_dnrect.top()}.."
+              f"{_dnrect.bottom()}，无 1px 接缝）")
+        check(len(_cink) >= 6 and len(_uink) >= 6 and len(_dink) >= 6,
+              f"[{_mode}] 三处箭头都有真实绘制像素"
+              f"（下拉 {len(_cink)} / 微调↑ {len(_uink)} / 微调↓ {len(_dink)}）")
+        for _nm, _pts, _rect in (("下拉", _cink, _crect),
+                                 ("微调↑", _uink, _uprect),
+                                 ("微调↓", _dink, _dnrect)):
+            if not _pts:
+                continue
+            _cx = sum(p[0] for p in _pts) / len(_pts)
+            _cy = sum(p[1] for p in _pts) / len(_pts)
+            _ex = (_rect.left() + _rect.right()) / 2.0
+            _ey = (_rect.top() + _rect.bottom()) / 2.0
+            check(abs(_cx - _ex) <= 2 and abs(_cy - _ey) <= 2,
+                  f"[{_mode}] {_nm}箭头居中于分区（质心 {_cx:.1f},{_cy:.1f} vs "
+                  f"分区中心 {_ex:.1f},{_ey:.1f}，Δ ≤ 2px）")
+        _arrow_box[_mode] = (_bbox(_cink), _bbox(_uink), _bbox(_dink))
+        _best = min(_cink, key=lambda p: _dist(_csub.pixelColor(*p),
+                                               _pal["text_muted"]))
+        _arrow_color[_mode] = _csub.pixelColor(*_best).name()
+        check(_dist(_csub.pixelColor(*_best), _pal["text_muted"]) == 0
+              and sum(1 for p in _cink
+                      if _dist(_csub.pixelColor(*p), _pal["text_muted"]) <= 2) >= 3,
+              f"[{_mode}] 箭头描边色 == 色板 text_muted"
+              f"（{_csub.pixelColor(*_best).name()}，核心 {len(_cink)} 像素中有 "
+              f"{sum(1 for p in _cink if _dist(_csub.pixelColor(*p), _pal['text_muted']) <= 2)}"
+              f" 个完全同色）")
+        _rows = {}
+        for _x, _y in _cink:
+            _rows.setdefault(_y, []).append(_x)
+        _ord = sorted(_rows)
+        _span = {y: max(_rows[y]) - min(_rows[y]) + 1 for y in _ord}
+        check(len(_ord) >= 3
+              and all(len(_rows[y]) < _span[y] for y in _ord[:2])
+              and _span[_ord[-1]] <= 2 and _span[_ord[0]] >= 6,
+              f"[{_mode}] 雪佛龙是**空心折线**（首行跨度 {_span[_ord[0]]} 只有 "
+              f"{len(_rows[_ord[0]])} 个像素 → 两臂分离；末行跨度 {_span[_ord[-1]]} "
+              f"收成顶点）——实心三角/方块不会有缝")
+    check(_arrow_color.get("light") == LIGHT["text_muted"]
+          and _arrow_color.get("dark") == DARK["text_muted"],
+          f"箭头色随主题：浅 {_arrow_color.get('light')}（={LIGHT['text_muted']}）/ "
+          f"深 {_arrow_color.get('dark')}（={DARK['text_muted']}）")
+    check(_arrow_box["light"][0][2:] == _arrow_box["light"][1][2:]
+          == _arrow_box["light"][2][2:]
+          and _arrow_box["dark"][0][2:] == _arrow_box["dark"][1][2:],
+          f"下拉与微调箭头包围盒尺寸**逐像素相等**（下拉 "
+          f"{_arrow_box['light'][0][2:]} / 微调↑ {_arrow_box['light'][1][2:]} / "
+          f"微调↓ {_arrow_box['light'][2][2:]}）——上一轮 12/10 混用正是"
+          f"「两套样子不一致」的来源")
 
     # ---- ④ 按钮 hover/pressed 真上色（QTest 真鼠标移动 + QMouseEvent 按下）----
     def _btn_probe(mode_name, object_name=None):
@@ -1390,19 +1609,67 @@ def main() -> int:
               and f"QWidget#formRow {{ background: transparent; }}" in qss(LIGHT),
               "QSS：QCheckBox/QRadioButton 与 #formRow 均显式 transparent")
 
-        # ② 下拉/微调右侧分区：底 == bg_compartment、分隔线 == border、
-        #    雪佛龙内缩到分区中心（不再贴边）、两者同宽同底
-        _cw = _style.COMPARTMENT_W
-        _comp_combo = _style._compartment_rect(dlg.theme)
-        _comp_spin = _style._compartment_rect(dlg.rate_limit)
-        check(_comp_combo.width() == _comp_spin.width() == _cw and 22 <= _cw <= 28,
-              f"下拉与微调分区**同宽** {_cw}px（≈26px 档；实得 combo "
-              f"{_comp_combo.width()} / spin {_comp_spin.width()}）")
-        check(abs(_comp_combo.height() - (dlg.theme.height() - 2)) <= 1
-              and _comp_combo.right() == dlg.theme.width() - 2
-              and _comp_combo.left() == dlg.theme.width() - 1 - _cw,
-              f"分区几何：贴右内缘（right={_comp_combo.right()} / "
-              f"widget w={dlg.theme.width()}）、上下各内缩 1px")
+        # ② 下拉/微调右侧「按钮」区（QSS 子控件 + SVG 资源）——像素级断言：
+        #    分区底 == bg_compartment、微调中缝 1px == border 且**不越界**、
+        #    下拉与微调**同宽/同左缘/同底色**、上下半严丝合缝、控件左 2/3 无
+        #    游离线条（旧 bug：自绘的分隔线横穿输入框）。
+        #    几何取样式引擎自己的 subControlRect —— QSS 的几何就是它算的；
+        #    上一轮自绘几何算错位，本轮**不自己算**。
+        _st = QApplication.style()
+        _oc = QStyleOptionComboBox()
+        dlg.theme.initStyleOption(_oc)
+        _osb = QStyleOptionSpinBox()
+        dlg.rate_limit.initStyleOption(_osb)
+        _cc = _st.subControlRect(QStyle.CC_ComboBox, _oc,
+                                 QStyle.SC_ComboBoxArrow, dlg.theme)
+        _cu = _st.subControlRect(QStyle.CC_SpinBox, _osb,
+                                 QStyle.SC_SpinBoxUp, dlg.rate_limit)
+        _cd = _st.subControlRect(QStyle.CC_SpinBox, _osb,
+                                 QStyle.SC_SpinBoxDown, dlg.rate_limit)
+        check(_cc.width() == _cu.width() == _cd.width() == 26 + 1
+              and _cc.left() == _cu.left() == _cd.left(),
+              f"下拉与微调分区**同宽同左缘**（各 {_cc.width()}px = QSS 声明 26px + "
+              f"1px 左分隔线；左缘 x={_cc.left()}）——上一轮两套各自算几何，参差")
+        check(_cc.right() == dlg.theme.width() - 1
+              and _cu.right() == _cd.right() == dlg.rate_limit.width() - 1,
+              f"分区右边缘 == 控件右边缘 - 1px 边框（下拉 {_cc.right()}/"
+              f"{dlg.theme.width() - 1}，微调 {_cu.right()}/{dlg.rate_limit.width() - 1}）")
+        check(_cu.bottom() + 1 == _cd.top()
+              and _cd.bottom() == dlg.rate_limit.height() - 1
+              and _cu.height() == _cd.height(),
+              f"微调上下半**严丝合缝**（up {_cu.top()}..{_cu.bottom()} / down "
+              f"{_cd.top()}..{_cd.bottom()}，各 {_cu.height()}px；控件高 "
+              f"{dlg.rate_limit.height()} 为偶数 → 基样式对半分不留 1px 接缝）")
+        check(_cc.height() == dlg.theme.height() == theme.FIELD_H_GB
+              and _cc.bottom() == _cc.height() - 1
+              and _cu.height() + _cd.height() == dlg.rate_limit.height(),
+              f"**声明分区高 == 实测控件总高**（下拉 {_cc.height()}px == "
+              f"FIELD_H_GB {theme.FIELD_H_GB}px == 控件高 {dlg.theme.height()}px，"
+              f"分区底 {_cc.bottom()} = 控件底 {dlg.theme.height() - 1}；"
+              f"微调上半 {_cu.height()} + 下半 {_cd.height()} == 整高 "
+              f"{dlg.rate_limit.height()}）")
+        _mid_w = (dlg.rate_limit.height() - 1) / 2.0
+        check(abs(_cu.bottom() - _mid_w) <= 1,
+              f"微调中缝分隔线落在**控件垂直中心** ±1px（分隔线 y={_cu.bottom()} vs "
+              f"中心 {_mid_w}）")
+
+        # 空白文本控件：专门用于「左 2/3 有无游离线条」——正文会干扰判定
+        _holder = QWidget()
+        _holder.setFixedSize(320, 200)
+        _hlay = QVBoxLayout(_holder)
+        _ecombo = QComboBox()
+        _ecombo.addItem("")
+        _espin = QSpinBox()
+        _espin.setRange(0, 600)
+        _espin.setSpecialValueText(" ")          # 空显示（纯空格：不落墨）
+        _espin.setValue(0)
+        _hlay.addWidget(_ecombo)
+        _hlay.addWidget(_espin)
+        _holder.show()
+        app.processEvents()
+        _ecombo.setFocus()          # 焦点移开微调框：不画文本光标（否则左 2/3
+        app.processEvents()         # 会有一条 1×6 的竖线，污染「无游离像素」判定）
+
         for _mode in ("light", "dark"):
             theme.apply_theme(app, _mode)
             app.processEvents()
@@ -1414,50 +1681,95 @@ def main() -> int:
                 return _img.copy(o.x(), o.y(), w.width(), w.height())
 
             _scombo = _sub_of(dlg.theme)
-            _area = _comp_combo.width() * (_comp_combo.height() - 2)
-            _bgpts = _eq_pts(_scombo, _pal["bg_compartment"],
-                             _comp_combo.left(), _comp_combo.right() + 1,
-                             _comp_combo.top() + 1, _comp_combo.bottom(), 2)
-            check(len(_bgpts) >= int(_area * 0.75),
-                  f"[{_mode}] 下拉分区底像素 {len(_bgpts)}/{_area} == "
-                  f"bg_compartment（{_pal['bg_compartment']}）")
-            _area_s = _comp_spin.width() * (_comp_spin.height() - 2)
             _sspin = _sub_of(dlg.rate_limit)
-            _bgs = _eq_pts(_sspin, _pal["bg_compartment"],
-                           _comp_spin.left(), _comp_spin.right() + 1,
-                           _comp_spin.top() + 1, _comp_spin.bottom(), 2)
-            check(len(_bgs) >= int(_area_s * 0.6),
-                  f"[{_mode}] 微调分区底像素 {len(_bgs)}/{_area_s} == "
-                  f"bg_compartment（同底色，风格统一）")
-            _mid = _comp_spin.top() + _comp_spin.height() // 2
-            _dv = _eq_pts(_sspin, _pal["border"], _comp_spin.left(),
-                          _comp_spin.right() + 1, _mid, _mid + 1, 1)
-            check(len(_dv) >= _cw - 6,
-                  f"[{_mode}] 微调分区中间 1px 分隔线 == border"
-                  f"（{_pal['border']}：命中 {len(_dv)}/{_cw}）")
+            check(_dist(_scombo.pixelColor(_cc.left() + 3, _cc.top() + 3),
+                        _pal["bg_compartment"]) == 0
+                  and _dist(_sspin.pixelColor(_cu.left() + 3, _cu.top() + 3),
+                            _pal["bg_compartment"]) == 0
+                  and _dist(_sspin.pixelColor(_cd.left() + 3, _cd.bottom() - 3),
+                            _pal["bg_compartment"]) == 0,
+                  f"[{_mode}] 下拉分区·微调上半·微调下半**底均为 bg_compartment**"
+                  f"（{_pal['bg_compartment']}）")
+            check(_scombo.pixelColor(_cc.left() + 3, _cc.top() + 3).name()
+                  == _sspin.pixelColor(_cu.left() + 3, _cu.top() + 3).name(),
+                  f"[{_mode}] 下拉与微调分区**底色相同**"
+                  f"（{_scombo.pixelColor(_cc.left() + 3, _cc.top() + 3).name()}）")
 
-            # 雪佛龙质心：必须落在分区中心（旧版贴右边缘 4px 内）。
-            # 判定用「分区内的墨迹」（与分区底距离 > 120 的像素），
-            # 比按 TEXT_MUTED 精确配色更稳（反锯齿边不算，浅深都不挑容差）。
-            _chev = []
-            for _y in range(_comp_combo.top() + 1, _comp_combo.bottom()):
-                for _x in range(_comp_combo.left(), _comp_combo.right() + 1):
-                    if _dist(_scombo.pixelColor(_x, _y),
-                             _pal["bg_compartment"]) > 120:
-                        _chev.append((_x, _y))
-            check(len(_chev) >= 6,
-                  f"[{_mode}] 下拉雪佛龙像素 {len(_chev)} 个落在分区内")
-            if _chev:
-                _cx = sum(p[0] for p in _chev) / len(_chev)
-                _cy = sum(p[1] for p in _chev) / len(_chev)
-                _d_comp = _comp_combo.right() - _cx
-                _d_edge = (dlg.theme.width() - 1) - _cx
-                check(7 <= _d_comp <= 14 and _d_edge >= 9,
-                      f"[{_mode}] 雪佛龙内缩到分区中心：质心 x={_cx:.1f}，"
-                      f"距分区右缘 {_d_comp:.1f}px / 距控件右缘 {_d_edge:.1f}px"
-                      f"（目标 ≈10±3）")
-                check(_comp_combo.top() + 2 <= _cy <= _comp_combo.bottom() - 2,
-                      f"[{_mode}] 雪佛龙纵向居中于分区（质心 y={_cy:.1f}）")
+            _area = _cc.width() * (_cc.height() - 2)
+            _bgpts = _eq_pts(_scombo, _pal["bg_compartment"],
+                             _cc.left(), _cc.right() + 1,
+                             _cc.top() + 1, _cc.bottom(), 2)
+            check(len(_bgpts) >= int(_area * 0.6),
+                  f"[{_mode}] 下拉分区底覆盖率 {len(_bgpts)}/{_area} == "
+                  f"bg_compartment（≥60%；缺口是圆角与雪佛龙本身）")
+            _upa = _cu.width() * _cu.height()
+            _dna = _cd.width() * _cd.height()
+            _bps = _eq_pts(_sspin, _pal["bg_compartment"], _cu.left(),
+                           _cu.right() + 1, _cu.top(), _cu.bottom() + 1, 2)
+            _bpd = _eq_pts(_sspin, _pal["bg_compartment"], _cd.left(),
+                           _cd.right() + 1, _cd.top(), _cd.bottom() + 1, 2)
+            check(len(_bps) >= int(_upa * 0.6) and len(_bpd) >= int(_dna * 0.6),
+                  f"[{_mode}] 微调上半 {len(_bps)}/{_upa}、下半 {len(_bpd)}/{_dna} "
+                  f"像素 == bg_compartment（同底色）")
+
+            _drow = _cu.bottom()
+            _dv = [x for x in range(_cu.left(), _cu.right() + 1)
+                   if _dist(_sspin.pixelColor(x, _drow), _pal["border"]) <= 1]
+            check(len(_dv) == _cu.width(),
+                  f"[{_mode}] 微调中缝 1px 分隔线 == border 且**贯穿整条分区**"
+                  f"（{_pal['border']}：{len(_dv)}/{_cu.width()} 像素，行 y={_drow}）")
+            _stray = [(x, y) for y in range(3, dlg.rate_limit.height() - 3)
+                      for x in range(3, _cu.left() - 2)
+                      if _dist(_sspin.pixelColor(x, y), _pal["border"]) <= 1]
+            check(not _stray,
+                  f"[{_mode}] 分隔线**不越界**：分区左缘（x={_cu.left()}）以左无任何 "
+                  f"border 色像素（旧 bug 回归防护；异常 {_stray[:3]} 共 {len(_stray)}）")
+
+            # 反向断言：控件左 2/3 内部不得有任何非背景像素（没有横穿输入框的线）
+            # 微调框需先清空内部编辑框文本：specialValueText(" ") 的空白字符在
+            # **无字体的离屏环境**会渲染成豆腐方块（10×10 方框），污染判定。
+            _espin.lineEdit().clear()
+            app.processEvents()
+            # 下拉分区满高（不允许「锚在右上角的小块」）：按行统计分区列的底色
+            _rows_ok = [_y for _y in range(_cc.top() + 1, _cc.bottom())
+                        if _dist(_scombo.pixelColor(_cc.left() + 3, _y),
+                                 _pal["bg_compartment"]) == 0]
+            check(len(_rows_ok) >= _cc.height() - 4 and _rows_ok[0] <= _cc.top() + 2
+                  and _rows_ok[-1] >= _cc.bottom() - 2,
+                  f"[{_mode}] 下拉分区**满高**（{len(_rows_ok)}/{_cc.height()} 行 == "
+                  f"bg_compartment，覆盖 y {_rows_ok[0]}..{_rows_ok[-1]}）——"
+                  f"判据：分区行覆盖 ≥ 控件高 − 4，且两端各留 ≤ 2px 圆角")
+            _himg = _holder.grab().toImage()
+            _oc_e = QStyleOptionComboBox()
+            _ecombo.initStyleOption(_oc_e)
+            _osp_e = QStyleOptionSpinBox()
+            _espin.initStyleOption(_osp_e)
+            _edges = {
+                "下拉(空文本)": _st.subControlRect(QStyle.CC_ComboBox, _oc_e,
+                                                   QStyle.SC_ComboBoxArrow, _ecombo),
+                "微调(空文本)": _st.subControlRect(QStyle.CC_SpinBox, _osp_e,
+                                                   QStyle.SC_SpinBoxUp, _espin)}
+            for _nm, _w in (("下拉(空文本)", _ecombo), ("微调(空文本)", _espin)):
+                _o = _w.mapTo(_holder, QPoint(0, 0))
+                _eb = _himg.copy(_o.x(), _o.y(), _w.width(), _w.height())
+                _bad = [(x, y) for y in range(3, _w.height() - 3)
+                        for x in range(3, _w.width() * 2 // 3)
+                        if _dist(_eb.pixelColor(x, y), _pal["bg_input"]) > 24]
+                check(not _bad,
+                      f"[{_mode}] {_nm} 左 2/3 无游离像素（旧 bug：分割线横穿输入框）"
+                      f"；异常 {_bad[:3]} 共 {len(_bad)}")
+                # 控件**中心行**上、分区左边界以左不得有任何非背景像素
+                _crow = _w.height() // 2
+                _lft = _edges[_nm].left()
+                _rowbad = [(x, _crow) for x in range(3, max(3, _lft - 2))
+                           if _dist(_eb.pixelColor(x, _crow), _pal["bg_input"]) > 24]
+                check(not _rowbad,
+                      f"[{_mode}] {_nm} 中心行 y={_crow}、分区左缘 x={_lft} 以左无"
+                      f"背景外像素（游离线回归防护；异常 {_rowbad[:3]} 共 "
+                      f"{len(_rowbad)}）")
+        _holder.close()
+        _holder.deleteLater()
+        app.processEvents()
 
         # ③ 复选框指示器自绘（启用态）：选中 = accent 实底 + 白色对勾；
         #    未选 = border_strong 描边。禁用态另算（灰底灰勾），见下。

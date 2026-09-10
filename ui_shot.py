@@ -12,8 +12,10 @@
     04-downloads 下载页：任务列表 + 详情（演示数据，不连网、不起真实下载）
     05-settings  设置对话框：四个分组（界面/网络与代理/缓存与预览/下载）+ 中文按钮
                  （真构造 SettingsDialog，不 exec 模态；高度 = 内容自然高度）
-    05b-settings-zoom  05 的 3× 放大裁剪（只裁微调框右侧分区 + 复选框行）：
-                 像素级核对分区底/分隔线/雪佛龙内缩、复选框行无灰带、指示器配色
+    05b-settings-zoom  05 的 3× 放大裁剪（只裁相邻两行：微调框「预览缓存上限」
+                 + 下拉框「预览缓存模式」的右侧按钮区）：像素级核对两种控件的
+                 分区同宽/同底/同圆角、箭头各自居中且包围盒等大、微调上下半
+                 严丝合缝（无游离分割线）、下拉分区无越界线条
 
 为什么不是空壳截图：改造前版本只截了空窗口，看不出配色/控件/字号改动。本工具
 用 ``test_support.build_payload`` 造离线载荷（1 大视频 + 2 图 + 1 文本），
@@ -274,16 +276,18 @@ def main() -> int:
         paths.append(_shot(app, dlg, out, SHOTS[4]))  # 05 设置面板
         settings_h = dlg.height()
 
-        # 05b 放大裁剪（3×）：只裁「微调框 / 下拉右侧分区」与「复选框行」两处，
-        # 便于控制方按像素核对本轮改动（分区底/分隔线/雪佛龙内缩、复选框行
-        # 不再有灰带、指示器 accent 实底 + 白对勾）。用 QWidget.grab(QRect)。
-        _spin = dlg.proxy_port
-        _cb = dlg.proxy_peer
+        # 05b 放大裁剪（3×）：只裁「微调框 + 下拉框右侧**按钮区**」相邻两行，
+        # 便于控制方按像素核对本轮改动（分区底 = bg_compartment、微调中缝 1px
+        # 分隔线不越界、箭头居中且**两套包围盒等大**、上下半严丝合缝无接缝）。
+        # 用 QWidget.grab(QRect)。选「预览缓存上限（微调）+ 预览缓存模式（下拉）」
+        # 这对相邻行：同一张图里就能对比两种控件的分区是否同宽同底同箭头。
+        _spin = dlg.cache_limit
+        _combo = dlg.cache_mode
         _so = _spin.mapTo(dlg, QPoint(0, 0))
-        _co = _cb.mapTo(dlg, QPoint(0, 0))
+        _co = _combo.mapTo(dlg, QPoint(0, 0))
         _top = max(0, min(_so.y(), _co.y()) - 6)
         _bot = min(dlg.height(), max(_so.y() + _spin.height(),
-                                     _co.y() + _cb.height()) + 6)
+                                     _co.y() + _combo.height()) + 6)
         _crop = dlg.grab(QRect(16, _top, dlg.width() - 32, _bot - _top)).toImage()
         _zoom = _crop.scaled(_crop.width() * 3, _crop.height() * 3,
                              Qt.IgnoreAspectRatio, Qt.FastTransformation)
