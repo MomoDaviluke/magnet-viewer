@@ -40,15 +40,24 @@ def result_from_torrent_info(ti, info_hash: str) -> ParseResult:
     """libtorrent torrent_info → ParseResult（历史上 P0-1/P0-2 缺陷现场）。
 
     - 单文件种子：path 不套前缀（libtorrent 存 save_path/root）；
-    - 多文件：剥根目录段；safe_rel_path 兜底恶意路径不逃缓存目录；
+    - 「真多文件」（含**单文件套在子目录里**的种子）：剥根目录段，与
+      parser.py 的 ``b"files" in info`` 判别口径对齐；
+    - safe_rel_path 兜底恶意路径不逃缓存目录；
     - total_size 排除 .pad（BEP-47）。
     """
     fs = ti.files()
     pl = ti.piece_length()
     root = ti.name()
     files, offset = [], 0
-    multi = fs.num_files() > 1
-    for i in range(fs.num_files()):
+    n = fs.num_files()
+    fp0 = fs.file_path(0).replace("\\", "/") if n else ""
+    # 「真多文件」判别与 parser.py（b"files" in info）口径对齐：单文件种子若
+    # **套在子目录里**（info 含 files 键、num_files()==1），file_path(0) 形如
+    # root/sub/demo.mp4 含分隔符——只按 num_files()>1 判别会把 path 错误截成
+    # 根目录（应用认定磁盘路径是目录、真文件在下一层，预览/流服务取不到文件）。
+    # 真单文件种子的 file_path(0) 就是种子名本身（无分隔符），行为逐字不变。
+    multi = n > 1 or "/" in fp0
+    for i in range(n):
         size = fs.file_size(i)
         fp = fs.file_path(i).replace("\\", "/")
         inner = fp if not multi else fp.split("/", 1)[-1] if "/" in fp else fp

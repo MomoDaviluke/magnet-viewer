@@ -18,6 +18,9 @@
      清单 finished_at、落盘+请求 resume
 - §H result_from_torrent_info：单文件不套前缀（P0-1 防回归）、多文件剥根、
      恶意路径净化、total_size 排除 .pad
+- §J result_from_torrent_info 真种子路径（F1）：单文件**套在目录里**的种子
+     path 与 parser 口径对齐（num_files()==1 但 file_path(0) 含分隔符）、
+     真单文件 / 多文件行为逐字不变——真 libtorrent 构种，秒级
 - §I Facade 接线：SessionManager 公开面打到 ResolverCore；session 的
      on_metadata_received/on_download_finished 注入线经委托到 resolver
 
@@ -38,7 +41,8 @@ try:
     import libtorrent as lt
 
     import test_support as ts
-    from core.models import ParseResult, TorrentFile
+    from core.models import ParseResult, TorrentFile, file_disk_path
+    from core.parser import parse_torrent_file
     from core.persist import TaskPersistence
     from core.registry import TaskRecord, TaskRegistry
     from core.resolver import ResolverCore, result_from_torrent_info
@@ -539,6 +543,76 @@ def section_pure_ti(ck):
              f"total_size 排除 .pad（实得 {r3.total_size}，应=50）")
 
 
+def section_real_paths(ck):
+    ck.section("§J result_from_torrent_info 真种子路径（F1 单文件套目录对齐 parser）")
+    import warnings as _w
+    ws = tempfile.mkdtemp(prefix="mv_resolver_realti_")
+    try:
+        def _build(fs_paths, parent):
+            """真 libtorrent 构种：返回 (torrent_info, .torrent 字节)。"""
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", DeprecationWarning)
+                fs = lt.file_storage()
+                for p in fs_paths:
+                    lt.add_files(fs, p)
+                ct = lt.create_torrent(fs, 16 * 1024)
+                lt.set_piece_hashes(ct, parent)
+                raw = ct.generate()
+            return lt.torrent_info(raw), lt.bencode(raw)
+
+        # ① 单文件但套在目录里：info 含 files 键、num_files()==1，
+        #    磁盘布局 payload/movie/demo.mp4 —— F1 修复现场
+        sub = os.path.join(ws, "sub")
+        demo = os.path.join(sub, "payload", "movie", "demo.mp4")
+        os.makedirs(os.path.dirname(demo), exist_ok=True)
+        with open(demo, "wb") as fh:
+            fh.write(os.urandom(400 * 1024))
+        tp = os.path.join(ws, "nested.torrent")
+        ti, raw = _build([os.path.join(sub, "payload")], sub)
+        with open(tp, "wb") as fh:
+            fh.write(raw)
+        ck.check(ti.files().num_files() == 1,
+                 "构造：单文件套目录 num_files()==1（判别退化条件已就位）")
+        r = result_from_torrent_info(ti, str(ti.info_hash()))
+        pr = parse_torrent_file(tp)
+        ck.check(r.files[0].path == "payload/movie/demo.mp4",
+                 f"resolver path 未被截成目录（实得 {r.files[0].path!r}）")
+        ck.check(r.files[0].path == pr.files[0].path,
+                 f"两入口同资源 path 判别一致（parser={pr.files[0].path!r}）")
+        ck.check(os.path.isfile(file_disk_path(sub, r.files[0])),
+                 "file_disk_path 拼接指向实际落盘文件（isfile=True）")
+
+        # ② 真单文件种子（无子目录）：行为逐字不变
+        sf = os.path.join(ws, "single.bin")
+        with open(sf, "wb") as fh:
+            fh.write(os.urandom(300 * 1024))
+        ti2, _ = _build([sf], ws)
+        ck.check(ti2.files().num_files() == 1
+                 and "\\" not in ti2.files().file_path(0)
+                 and "/" not in ti2.files().file_path(0),
+                 "构造：真单文件 file_path(0) 不含分隔符")
+        r2 = result_from_torrent_info(ti2, str(ti2.info_hash()))
+        ck.check(r2.files[0].path == "single.bin",
+                 f"真单文件 path 不套前缀（实得 {r2.files[0].path!r}）")
+        ck.check(os.path.isfile(file_disk_path(ws, r2.files[0])),
+                 "真单文件磁盘路径不变（isfile=True）")
+
+        # ③ 多文件（>1）行为不变：剥根但保留根前缀 + .pad 仍排除
+        pay = ts.build_payload(os.path.join(ws, "multi"))
+        ti3 = ts.make_torrent(pay)
+        r3 = result_from_torrent_info(ti3, str(ti3.info_hash()))
+        paths3 = [f.path for f in r3.files]
+        ck.check(all(p.startswith("multi/") for p in paths3),
+                 f"多文件保留根前缀（实得 {paths3[:3]}…）")
+        ck.check(all(os.path.isfile(file_disk_path(os.path.dirname(pay), f))
+                     for f in r3.view_files),
+                 "多文件非 .pad 磁盘路径全部命中（isfile=True）")
+        ck.check(r3.total_size == sum(f.size for f in r3.files if not f.is_pad),
+                 "多文件 total_size 排除 .pad（行为不变）")
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
 def section_facade(ck):
     ck.section("§I Facade 接线")
     ws = tempfile.mkdtemp(prefix="mv_resolver_facade_")
@@ -592,6 +666,7 @@ def main() -> int:
     section_metadata(ck)
     section_finished(ck)
     section_pure_ti(ck)
+    section_real_paths(ck)
     section_facade(ck)
     return ck.report()
 
