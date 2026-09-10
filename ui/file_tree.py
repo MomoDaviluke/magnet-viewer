@@ -71,7 +71,7 @@ class FileTreeWidget(QTreeView):
                     parent.appendRow(row)          # 关键：目录行必须挂到父节点
                     dir_items[acc] = row[0]
                 parent = dir_items[acc]
-            icon = "🎬" if f.is_video else ("🖼" if f.is_image else "📄")
+            icon = "🎬" if f.is_video else ("🖼️" if f.is_image else "📄")
             row = self._make_row(f"{icon} {f.name}", human_size(f.size),
                                  f"{f.size / total * 100:.1f}%")
             row[0].setData(f, Qt.UserRole)

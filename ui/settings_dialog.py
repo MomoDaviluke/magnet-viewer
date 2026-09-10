@@ -1,13 +1,14 @@
-"""设置对话框：代理 / 元数据超时 / 缓存目录 / 退出清理。"""
+"""设置对话框：代理 / 元数据超时 / 缓存目录 / 退出清理 / 界面主题。"""
 from __future__ import annotations
 
-from ui.theme import SP_LG, SP_MD, SP_XL
 import os
 
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QMessageBox, QPushButton, QSpinBox,
-                               QVBoxLayout)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
+                               QDialogButtonBox, QFileDialog, QFormLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QPushButton, QSpinBox, QVBoxLayout)
+
+from ui.theme import SP_LG, SP_MD, SP_XL, THEME_MODES, apply_theme
 
 from core.cache_guard import (CACHE_MARKER, clear_cache_contents,
                               ensure_cache_dir, guard_ok_for_cleanup)
@@ -24,6 +25,15 @@ PROXY_LABELS = [("none", "不使用代理（直连）"),
 CACHE_MODE_LABELS = {
     "convert": "关闭预览后继续缓存（推荐）",
     "hold": "关闭预览即暂停",
+}
+
+# 双主题（用户拍板：「浅色为主、深色保留可切」）：界面主题下拉的显示文案。
+# 值域逐字取 ui.theme.THEME_MODES——顺序即下拉顺序，新增档位必先改常量，
+# UI 永不自行发明取值。中英对照写清，避免用户看不懂档位差异。
+THEME_LABELS = {
+    "light": "浅色 Light（默认）",
+    "dark": "深色 Dark",
+    "system": "跟随系统 System（随 Windows 深浅色自动切换）",
 }
 
 
@@ -45,6 +55,25 @@ class SettingsDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(SP_MD)
         form.setContentsMargins(SP_XL, SP_LG, SP_XL, SP_LG)
+
+        # 双主题：界面主题下拉（值域 = ui.theme.THEME_MODES；保存即热切换）
+        self.theme = QComboBox()
+        for v in THEME_MODES:
+            self.theme.addItem(THEME_LABELS[v], v)
+        _theme = str(cfg.get("ui_theme") or "light").strip().lower()
+        _theme_idx = self.theme.findData(_theme)
+        self.theme.setCurrentIndex(_theme_idx if _theme_idx >= 0 else 0)
+        self.theme.setToolTip(
+            "浅色 Light：亮色界面（默认）；\n"
+            "深色 Dark：暗色界面（视频场景观感）；\n"
+            "跟随系统 System：随 Windows 应用深浅色自动切换。\n"
+            "**选择后点保存立即生效**，无需重启。")
+        form.addRow("界面主题", self.theme)
+        theme_note = QLabel("界面主题保存后立即生效（无需重启）："
+                            "「跟随系统」按 Windows 浅色/深色设置自动选择。")
+        theme_note.setObjectName("fieldNote")   # 样式：ui/theme.py #fieldNote
+        theme_note.setWordWrap(True)
+        form.addRow("", theme_note)
 
         self.proxy_type = QComboBox()
         for value, label in PROXY_LABELS:
@@ -162,7 +191,7 @@ class SettingsDialog(QDialog):
             "（单文件 1 MB，保留 3 份）。开关保存后立即生效。")
         form.addRow("", self.logging_enabled)
 
-        note = QLabel("提示：代理、超时、限速与日志开关保存后立即生效；"
+        note = QLabel("提示：代理、超时、限速、日志开关与界面主题保存后立即生效；"
                       "缓存目录、默认下载目录与并发数修改需重启程序；"
                       "预览缓存上限在下次切换预览文件时生效；"
                       "预览缓存模式在下次关闭预览时生效。设置持久化于本机"
@@ -265,4 +294,10 @@ class SettingsDialog(QDialog):
         self.cfg.set("cache_limit_mb", self.cache_limit.value())
         self.cfg.set("preview_cache_mode", self.cache_mode.currentData())
         self.cfg.set("logging_enabled", self.logging_enabled.isChecked())
+        # 双主题：写配置 + **保存即热切换**（重建 QSS 挂回 QApplication，
+        # 已存在控件由 Qt re-polish + theme._repaint_open_widgets 立即换色，
+        # 无需重启；system 档在此刻解析为实际深浅）。
+        mode = self.theme.currentData() or "light"
+        self.cfg.set("ui_theme", mode)
+        apply_theme(QApplication.instance(), str(mode))
         self.accept()

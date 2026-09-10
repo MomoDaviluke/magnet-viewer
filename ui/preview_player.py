@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QProgressBar, QPushButton,
                                QVBoxLayout, QWidget)
 
 from core.models import human_size
-from ui.theme import SLIDER_SEGMENT, SP_MD
+import ui.theme as theme          # 自绘控件须读模块属性（切主题后取新值）
+from ui.theme import SP_MD, SP_XS
 
 
 def fmt_time(ms: int) -> str:
@@ -47,7 +48,9 @@ class BufferedSlider(QSlider):
 
     分段由会话层按 piece 落盘状态合并而来（fetcher.buffered_segments_of_preview），
     以文件内字节区间传入、换算为 0~1 比例绘制在 groove 上；handle 最后重画一次，
-    避免被分段盖住。半透明中灰在明暗主题下均可辨识。
+    避免被分段盖住。分段色**在绘制时**读 ``ui.theme.SLIDER_SEGMENT``（双主题：
+    浅色板半透明黑 (0,0,0,40) / 深色板半透明白 (255,255,255,46)）——不能
+    `from ui.theme import SLIDER_SEGMENT` 固化导入期快照，否则切主题后不跟随。
     """
 
     def __init__(self, parent=None):
@@ -79,7 +82,7 @@ class BufferedSlider(QSlider):
             return
         painter = QPainter(self)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(*SLIDER_SEGMENT))
+        painter.setBrush(QColor(*theme.SLIDER_SEGMENT))
         bar_h = max(4, groove.height() // 3)
         bar_y = groove.center().y() - bar_h / 2
         w = groove.width()
@@ -155,7 +158,7 @@ class VideoPreviewWidget(QWidget):
         self._last_scrub = 0.0
         self.slider.setRange(0, 0)
         self.time_label = QLabel("00:00 / 00:00")
-        self.time_label.setObjectName("metaLabel")
+        self.time_label.setObjectName("timeLabel")   # 样式：ui/theme.py #timeLabel
         self.volume = QSlider(Qt.Horizontal)
         self.volume.setRange(0, 100)
         self.volume.setValue(80)
@@ -164,6 +167,7 @@ class VideoPreviewWidget(QWidget):
         self.volume.valueChanged.connect(lambda v: self.audio.setVolume(v / 100))
 
         ctrl = QHBoxLayout()
+        ctrl.setContentsMargins(0, SP_XS, 0, SP_XS)   # 控制行内边距 +4px
         ctrl.setSpacing(SP_MD)
         ctrl.addWidget(self.btn_play)
         ctrl.addWidget(self.slider, 1)

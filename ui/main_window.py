@@ -192,7 +192,10 @@ class MainWindow(QMainWindow):
         self._shutdown_label = None
         self._shutdown_timer = None
         self.setWindowTitle("磁力链实时解析查看器 Magnet Viewer")
-        self.resize(1040, 700)
+        # 双主题 + 视觉规格（用户拍板）：更大的默认窗口让文件树/画廊有呼吸感，
+        # 并给最小尺寸兜底（小于此值布局会挤成一团）。
+        self.resize(1200, 800)
+        self.setMinimumSize(960, 640)
         self._setup_core()
         # ---- UI ----
         self._build_ui()
@@ -340,17 +343,18 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget(self)
         root = QVBoxLayout(central)
-        # 顶栏 / 状态栏做成通栏色带（圆角卡片由 QSS #topBar 负责），
-        # 内容区靠控件自身内边距留白 → 根布局不加外边距
+        # 顶栏 / 状态栏做成通栏色带（圆角卡片由 QSS #topBar 负责）：
+        # 外边距保持 0（通栏），纵向间距 12px 给三段色带之间留呼吸感
+        # （旧版 0 间距，界面挤在一起）。
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        root.setSpacing(SP_MD)
 
         # 顶栏（#topBar：面板底色 + 下边框）
         bar_wrap = QWidget()
         bar_wrap.setObjectName("topBar")
         bar = QHBoxLayout(bar_wrap)
         bar.setContentsMargins(SP_LG, SP_MD, SP_LG, SP_MD)
-        bar.setSpacing(SP_SM)
+        bar.setSpacing(SP_MD)
         self.input = QLineEdit()
         self.input.setObjectName("urlInput")
         self.input.setPlaceholderText("粘贴 magnet:?xt=urn:btih:... 磁力链接，或点击右侧按钮选择 .torrent 文件")

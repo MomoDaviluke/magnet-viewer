@@ -12,9 +12,13 @@
   R1  ui/*.py（除 theme.py）不得出现 hex 色值（#rgb / #rrggbb / #rrggbbaa）
   R2  ui/*.py（除 theme.py）不得调用 setStyleSheet
       （仅注释里提到该名字 → 警告不失败，避免文档误伤）
-  R3  ui/theme.py 必须导出约定 token：BG/BG_PANEL/BG_INPUT/BG_HOVER/BORDER/
-      TEXT/TEXT_MUTED/TEXT_DIM/ACCENT/OK/WARN/DANGER 与 SP_XS..SP_XL /
-      R_SM..R_LG
+  R3  ui/theme.py 必须导出约定 token：BG/BG_PANEL/BG_INPUT/BG_HOVER/
+      BG_SELECTED/BORDER/BORDER_STRONG/TEXT/TEXT_MUTED/TEXT_DIM/ACCENT/
+      ACCENT_HOVER/ACCENT_PRESSED/OK/WARN/DANGER/SLIDER_SEGMENT 与
+      SP_XS..SP_XL / R_SM..R_LG
+  R4  双主题：LIGHT/DARK 两套调色板键集一致且覆盖固定色键；qss(palette) 可
+      按色板生成且两套产出可辨（浅色板 QSS 不含深色板底色，反之亦然）；
+      apply_theme 可接受 mode（light/dark/system）——热切换入口存在
 
 用法
 ----
@@ -25,6 +29,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import os
 import re
 import sys
@@ -45,10 +50,20 @@ MENTION_RE = re.compile(r"setStyleSheet")
 
 # R3：约定 token（token 名 = 对外词汇，改名前必须同步本清单与 plan）
 REQUIRED_TOKENS = [
-    "BG", "BG_PANEL", "BG_INPUT", "BG_HOVER", "BORDER",
-    "TEXT", "TEXT_MUTED", "TEXT_DIM", "ACCENT", "OK", "WARN", "DANGER",
+    "BG", "BG_PANEL", "BG_INPUT", "BG_HOVER", "BG_SELECTED",
+    "BORDER", "BORDER_STRONG",
+    "TEXT", "TEXT_MUTED", "TEXT_DIM", "ACCENT", "ACCENT_HOVER",
+    "ACCENT_PRESSED", "OK", "WARN", "DANGER", "SLIDER_SEGMENT",
     "SP_XS", "SP_SM", "SP_MD", "SP_LG", "SP_XL",
     "R_SM", "R_MD", "R_LG",
+]
+
+# R4：双主题调色板的固定色键（两套必须完全一致，且覆盖这些键）
+PALETTE_KEYS = [
+    "bg", "bg_panel", "bg_input", "bg_hover", "bg_selected",
+    "border", "border_strong", "text", "text_muted", "text_dim",
+    "accent", "accent_hover", "accent_pressed", "ok", "warn", "danger",
+    "segment",
 ]
 
 OK: list[str] = []
@@ -101,8 +116,8 @@ def rule2(sources: list[tuple[str, str]]) -> None:
         print(f"      · {c}")
 
 
-def rule3() -> None:
-    """R3：theme.py 必须导出约定 token（并已被 import 成功）。"""
+def rule3():
+    """R3：theme.py 必须导出约定 token（并已被 import 成功）；返回模块对象。"""
     try:
         sys.path.insert(0, ROOT)
         import ui.theme as theme
@@ -116,7 +131,52 @@ def rule3() -> None:
     check(isinstance(getattr(theme, "QSS", None), str)
           and len(getattr(theme, "QSS", "")) > 0, "R3 ui/theme.py 导出非空 QSS")
     check(callable(getattr(theme, "apply_theme", None)),
-          "R3 ui/theme.py 导出 apply_theme(app)")
+          "R3 ui/theme.py 导出 apply_theme(app, mode)")
+    return theme
+
+
+def rule4(theme) -> None:
+    """R4：双主题色板 / qss(palette) / 热切换入口（浅色为默认）。"""
+    light = getattr(theme, "LIGHT", None)
+    dark = getattr(theme, "DARK", None)
+    check(isinstance(light, dict) and isinstance(dark, dict),
+          "R4 ui/theme.py 导出 LIGHT / DARK 两套调色板（dict）")
+    if not (isinstance(light, dict) and isinstance(dark, dict)):
+        return
+    miss_l = [k for k in PALETTE_KEYS if k not in light]
+    miss_d = [k for k in PALETTE_KEYS if k not in dark]
+    check(not miss_l and not miss_d,
+          f"R4 两套色板覆盖固定色键（{len(PALETTE_KEYS)} 项）")
+    if miss_l or miss_d:
+        print(f"      · 缺失：light={miss_l} dark={miss_d}")
+    check(set(light) == set(dark),
+          "R4 两套色板键集一致（新增键必须两套同步，防止 KeyError 落到运行时）")
+    check(getattr(theme, "DEFAULT_MODE", None) == "light",
+          "R4 默认主题 = light（用户拍板：浅色为主）")
+    fn_qss = getattr(theme, "qss", None)
+    check(callable(fn_qss), "R4 导出 qss(palette) 按色板生成 QSS")
+    if callable(fn_qss):
+        q_light, q_dark = fn_qss(light), fn_qss(dark)
+        check(isinstance(q_light, str) and len(q_light) > 0
+              and isinstance(q_dark, str) and len(q_dark) > 0,
+              "R4 qss(LIGHT) / qss(DARK) 均非空")
+        check(light["bg"] in q_light and dark["bg"] not in q_light,
+              f"R4 浅色 QSS 含浅底色 {light['bg']} 且不含深底色 {dark['bg']}")
+        check(dark["bg"] in q_dark and light["bg"] not in q_dark,
+              f"R4 深色 QSS 含深底色 {dark['bg']} 且不含浅底色 {light['bg']}")
+        check(light["segment"] != dark["segment"],
+              "R4 缓冲分段色随主题不同（浅=半透明黑 / 深=半透明白）")
+    fn_apply = getattr(theme, "apply_theme", None)
+    if callable(fn_apply):
+        try:
+            params = list(inspect.signature(fn_apply).parameters)
+        except (TypeError, ValueError):
+            params = []
+        check("mode" in params,
+              f"R4 apply_theme 接受 mode 参数（热切换入口；实得 {params}）")
+    modes = getattr(theme, "THEME_MODES", ())
+    check(tuple(modes) == ("light", "dark", "system"),
+          f"R4 THEME_MODES 值域 = light/dark/system（实得 {tuple(modes)}）")
 
 
 def main() -> int:
@@ -129,7 +189,8 @@ def main() -> int:
           + (f"，白名单 {sorted(ALLOW)}" if ALLOW else "") + "）")
     rule1(sources)
     rule2(sources)
-    rule3()
+    theme_mod = rule3()
+    rule4(theme_mod)
     for w in WARN:
         print(f"  [WARN] {w}")
     print(f"\n=== 主题门禁：OK {len(OK)} / FAIL {len(FAIL)} ===")

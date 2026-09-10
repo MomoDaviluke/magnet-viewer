@@ -31,6 +31,8 @@ DEFAULTS: dict = {
     # 下次关闭预览时生效（stop_preview 现读现判，审查 Minor-8 修正措辞）；
     # 值域即两常量（cache_mode.py），不新增校验逻辑。
     "logging_enabled": True,       # 运行日志开关（core.logutil；关闭后全部记录降为空操作）
+    "ui_theme": "light",           # 界面主题：light（默认浅色）| dark | system（跟随系统）
+                                   # 保存设置即热切换（ui.theme.apply_theme），无需重启
 }
 
 _TYPES: dict = {

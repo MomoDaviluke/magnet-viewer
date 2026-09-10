@@ -932,6 +932,99 @@ def main() -> int:
         w._preview_file = _orig_preview_file
         w._shutdown_started = _saved_started   # 还原守卫标志（见本段开头注释）
 
+    # ---------------------------------------------------------------- [4g] 双主题
+    # 用户拍板：浅色为主（默认）+ 深色保留可切 + system 跟随；运行时可热切换。
+    # 断言面：配置默认值 / 色板与 QSS 生成 / apply_theme 热切换（app.styleSheet
+    # 真的换）/ 模块级常量同步（自绘控件读得到新色）/ 设置面板保存即生效。
+    print("\n[4g] 双主题：色板 / QSS / 热切换 / 配置默认值（浅色为默认）")
+    import ui.theme as _theme  # noqa: E402
+    from ui.theme import (DARK, DEFAULT_MODE, LIGHT, THEME_MODES,  # noqa: E402
+                          apply_theme, qss)
+    from ui.settings_dialog import THEME_LABELS  # noqa: E402
+    from ui.downloads_pane import _state_meta  # noqa: E402
+    cfg_t = AppConfig()
+    _orig_theme_all = {k: cfg_t.get(k) for k in DEFAULTS}
+    try:
+        check(DEFAULTS["ui_theme"] == "light" and DEFAULT_MODE == "light",
+              "ui_theme 配置默认值 = light（浅色为默认主题，用户拍板）")
+        check(list(THEME_MODES) == ["light", "dark", "system"],
+              f"主题值域 light/dark/system（实得 {list(THEME_MODES)}）")
+
+        # ① 色板驱动：qss(LIGHT) 含浅底色且不含深底色（反向同理）
+        q_light, q_dark = qss(LIGHT), qss(DARK)
+        check(LIGHT["bg"] in q_light and DARK["bg"] not in q_light,
+              f"qss(LIGHT) 含浅底色 {LIGHT['bg']} 且不含深底色 {DARK['bg']}")
+        check(DARK["bg"] in q_dark and LIGHT["bg"] not in q_dark,
+              f"qss(DARK) 含深底色 {DARK['bg']} 且不含浅底色 {LIGHT['bg']}")
+
+        # ② 热切换：apply_theme 重建样式表，app.styleSheet() 真的换掉
+        check(apply_theme(app, "dark") == "dark",
+              "apply_theme(app,'dark') 生效并返回实际主题名")
+        ss_dark = app.styleSheet()
+        check(DARK["bg"] in ss_dark and DARK["bg_panel"] in ss_dark
+              and LIGHT["bg"] not in ss_dark,
+              f"切深色后 app.styleSheet() 含深色 token"
+              f"（{DARK['bg']} / {DARK['bg_panel']}）")
+        check(_theme.BG == DARK["bg"]
+              and _theme.SLIDER_SEGMENT == DARK["segment"],
+              "模块级常量随激活色板同步（BG / SLIDER_SEGMENT = 深色板）")
+        check(apply_theme(app, "light") == "light"
+              and LIGHT["bg"] in app.styleSheet()
+              and DARK["bg"] not in app.styleSheet(),
+              "切回浅色：app.styleSheet() 含浅色 token 且深色 token 消失")
+        check(_theme.BG == LIGHT["bg"]
+              and _theme.SLIDER_SEGMENT == (0, 0, 0, 40),
+              "浅色板常量同步（缓冲分段 = 半透明黑，深色板为半透明白）")
+        # ③ system 档解析为实际深浅；非法值回退 light（存量脏配置不崩）
+        got_sys = apply_theme(app, "system")
+        check(got_sys in ("light", "dark"),
+              f"apply_theme(app,'system') 解析为实际深浅（实得 {got_sys!r}）")
+        check(apply_theme(app, "garbage") == "light",
+              "非法主题值回退 light（不抛错）")
+        # ④ 自绘控件取色：下载页状态色现读激活色板（热切换后跟着变）
+        apply_theme(app, "dark")
+        check(_state_meta("PAUSED")[2] == DARK["text_dim"]
+              and _state_meta("DOWNLOADING")[2] == DARK["accent"],
+              "下载页状态色跟随激活色板（深色板取值）")
+        apply_theme(app, "light")
+        check(_state_meta("DOWNLOADING")[2] == LIGHT["accent"],
+              "切回浅色后状态色随之更新（未固化导入期快照）")
+
+        # ⑤ 设置面板：三项中英对照下拉 + **保存即热切换**
+        cfg_t.set("ui_theme", "dark")
+        cfg_t.set("proxy_type", "none")     # 避免代理校验弹模态（本段只测主题）
+        dlg_t = _sd.SettingsDialog(cfg_t, w.cache_dir, on_clear_cache=None,
+                                   parent=w)
+        check([dlg_t.theme.itemData(i) for i in range(dlg_t.theme.count())]
+              == list(THEME_MODES),
+              "设置面板「界面主题」下拉值域逐字 = THEME_MODES（不发明取值）")
+        check(set(THEME_LABELS) == set(THEME_MODES)
+              and "Light" in THEME_LABELS["light"]
+              and "Dark" in THEME_LABELS["dark"]
+              and "System" in THEME_LABELS["system"],
+              "下拉文案中英对照（浅色 Light / 深色 Dark / 跟随系统 System）")
+        check(dlg_t.theme.currentData() == "dark",
+              "下拉初值读自 ui_theme 配置（dark）")
+        apply_theme(app, "light")           # 先从浅色起，验证 _save 切到深色
+        dlg_t.theme.setCurrentIndex(dlg_t.theme.findData("dark"))
+        dlg_t._save()
+        check(AppConfig().get("ui_theme") == "dark",
+              "_save 把选择回写 ui_theme=dark")
+        check(DARK["bg"] in app.styleSheet(),
+              "_save 立即重建样式表（保存即热切换，无需重启）")
+        cfg_t.set("ui_theme", "garbage")
+        dlg_g = _sd.SettingsDialog(cfg_t, w.cache_dir, on_clear_cache=None,
+                                   parent=w)
+        check(dlg_g.theme.currentIndex() == 0
+              and dlg_g.theme.currentData() in THEME_MODES,
+              "存量非法 ui_theme 回落 index 0 且 currentData 有效")
+        dlg_g.deleteLater()
+        dlg_t.deleteLater()
+    finally:
+        for k, v in _orig_theme_all.items():
+            cfg_t.set(k, v)
+        apply_theme(app, "light")     # 收尾恢复默认浅色（后续用例不受影响）
+
     # ---------------------------------------------------------------- [5] 清理
     print("\n[5] 收尾")
     w._stop_preview()

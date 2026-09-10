@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from core.models import human_size
-from ui.theme import SP_LG, SP_SM, SP_XS
+from ui.theme import SP_LG, SP_MD, SP_SM, SP_XS
 
 
 class StatusPanel(QWidget):
@@ -28,7 +28,7 @@ class StatusPanel(QWidget):
         self.cache.hide()        # 无占用信息时不占位
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(SP_SM, SP_XS, SP_SM, SP_XS)
+        row.setContentsMargins(SP_MD, SP_SM, SP_MD, SP_SM)
         row.setSpacing(SP_LG)
         row.addWidget(self.state, 1)
         row.addWidget(self.cache)

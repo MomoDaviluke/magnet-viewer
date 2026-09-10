@@ -19,30 +19,40 @@ from PySide6.QtWidgets import (QApplication, QLabel, QMenu, QMessageBox,
                                QStyledItemDelegate, QStyleOptionProgressBar,
                                QTreeView, QVBoxLayout, QWidget)
 
-from ui.theme import ACCENT, DANGER, OK, TEXT_DIM, TEXT_MUTED
+import ui.theme as theme          # 状态色在**调用时**读（双主题热切换需跟随）
 from core.models import human_size
 
 COL_NAME, COL_SIZE, COL_PROGRESS, COL_SPEED = 0, 1, 2, 3
 COLUMNS = ["名称", "大小", "进度", "速度·ETA"]
 
-# 状态 -> (emoji, 中文名, 前景色)：⏳白 / ⏸灰 / ✅绿 / ❌红 / 🌱做种蓝
+# 状态 -> (emoji, 中文名, 色板常量名)：⏳白 / ⏸灰 / ✅绿 / ❌红 / 🌱做种蓝。
+# 第三项是 **ui/theme 的常量名**而非色值——色值在绘制/写格时现读
+# （`getattr(theme, ...)`），双主题热切换后任务列表状态色立刻跟随；
+# 若在此固化色值（导入期快照），切到深色板后浅色板配色会残留在表里。
 STATE_META: dict = {
-    "QUEUED":      ("⏳", "排队中", TEXT_MUTED),
-    "META_FETCH":  ("⏳", "获取元数据", TEXT_MUTED),
-    "VALIDATE":    ("⏳", "校验中", TEXT_MUTED),
-    "DOWNLOADING": ("⏬", "下载中", ACCENT),
-    "PAUSED":      ("⏸", "已暂停", TEXT_DIM),
-    "STOPPED":     ("⏹", "已停止", TEXT_DIM),
-    "COMPLETED":   ("✅", "已完成", OK),
-    "SEEDING":     ("🌱", "做种中", ACCENT),
-    "FAILED":      ("❌", "失败", DANGER),
-    "DELETED":     ("🗑️", "已删除", TEXT_MUTED),
+    "QUEUED":      ("⏳", "排队中", "TEXT_MUTED"),
+    "META_FETCH":  ("⏳", "获取元数据", "TEXT_MUTED"),
+    "VALIDATE":    ("⏳", "校验中", "TEXT_MUTED"),
+    "DOWNLOADING": ("⏬", "下载中", "ACCENT"),
+    "PAUSED":      ("⏸️", "已暂停", "TEXT_DIM"),
+    "STOPPED":     ("⏹️", "已停止", "TEXT_DIM"),
+    "COMPLETED":   ("✅", "已完成", "OK"),
+    "SEEDING":     ("🌱", "做种中", "ACCENT"),
+    "FAILED":      ("❌", "失败", "DANGER"),
+    "DELETED":     ("🗑️", "已删除", "TEXT_MUTED"),
 }
-UNKNOWN_STATE = ("⏳", "未知", TEXT_MUTED)
+UNKNOWN_STATE = ("⏳", "未知", "TEXT_MUTED")
+
+
+def _color(const_name: str) -> str:
+    """按常量名现读当前激活色板的色值（切主题后即时生效）。"""
+    return getattr(theme, const_name)
 
 
 def _state_meta(state: str) -> tuple:
-    return STATE_META.get(str(state or "").upper(), UNKNOWN_STATE)
+    emoji, label, const_name = STATE_META.get(str(state or "").upper(),
+                                              UNKNOWN_STATE)
+    return emoji, label, _color(const_name)
 
 
 def _progress_value(task: dict) -> float:
@@ -98,22 +108,23 @@ class ProgressDelegate(QStyledItemDelegate):
         opt.text = f"{value:.0f}%"
         opt.textVisible = True
         opt.state = QStyle.State_Enabled
-        pal = QPalette(option.palette)
-        if state == "COMPLETED":
-            pal.setBrush(QPalette.Highlight, QColor(OK))
-        elif state in ("PAUSED", "STOPPED"):
-            pal.setBrush(QPalette.Highlight, QColor(TEXT_DIM))
-        elif state == "FAILED":
-            pal.setBrush(QPalette.Highlight, QColor(DANGER))
-        else:
-            pal.setBrush(QPalette.Highlight, QColor(ACCENT))
-        opt.palette = pal
-        QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter,
-                                         self.parent())
-        # 聚焦/选中背景仍由默认绘制负责：进度条外沿补绘制选中底色
+        # 选中底色先铺（进度条外边距 6/4 就是留给它的外沿）：必须在 drawControl
+        # **之前**——旧顺序把整块矩形盖在进度条与百分比文字上，选中行看不到进度。
         if option.state & QStyle.State_Selected:
             painter.fillRect(option.rect,
                              option.palette.highlight().color().lighter(160))
+        pal = QPalette(option.palette)
+        if state == "COMPLETED":
+            pal.setBrush(QPalette.Highlight, QColor(theme.OK))
+        elif state in ("PAUSED", "STOPPED"):
+            pal.setBrush(QPalette.Highlight, QColor(theme.TEXT_DIM))
+        elif state == "FAILED":
+            pal.setBrush(QPalette.Highlight, QColor(theme.DANGER))
+        else:
+            pal.setBrush(QPalette.Highlight, QColor(theme.ACCENT))
+        opt.palette = pal
+        QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter,
+                                         self.parent())
 
 
 class DownloadsPane(QWidget):
@@ -273,7 +284,7 @@ class DownloadsPane(QWidget):
         state = str(task.get("state", "")).upper()
 
         menu = QMenu(self)
-        act_pause = menu.addAction("⏸ 暂停")
+        act_pause = menu.addAction("⏸️ 暂停")
         act_resume = menu.addAction("▶ 恢复")
         menu.addSeparator()
         act_prio_up = menu.addAction("优先级 ↑")

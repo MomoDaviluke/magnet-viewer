@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QPushButton,
 from core.models import TorrentFile, human_size
 from ui.gallery import GalleryWidget
 from ui.preview_player import VideoPreviewWidget
+from ui.theme import SP_XS
 
 PAGE_VIDEO, PAGE_GALLERY = 0, 1
 
@@ -39,6 +40,8 @@ class PreviewPane(QWidget):
         self.btn_stop.clicked.connect(self.stop_requested.emit)
 
         bar = QHBoxLayout()
+        # 标题行内边距（视觉规格 +4px）：标题与下方内容之间有呼吸感
+        bar.setContentsMargins(0, SP_XS, 0, SP_XS)
         bar.addWidget(self.title, 1)
         bar.addWidget(self.btn_to_download)
         bar.addWidget(self.btn_stop)
