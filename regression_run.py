@@ -47,6 +47,7 @@ SUITES = [
     "moov_stream_test",
     "qt_stream_open_test",
     "download_mgr_test",
+    "cache_mode_e2e_test",  # plan/06 缓存模式真链路：转正/续传/清理保护（真 libtorrent）
 ]
 
 NAME = {
