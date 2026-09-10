@@ -1069,10 +1069,10 @@ def main() -> int:
     from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
     from PySide6.QtGui import QColor, QMouseEvent  # noqa: E402
     from PySide6.QtTest import QTest  # noqa: E402
-    from PySide6.QtWidgets import (QComboBox, QDialogButtonBox,  # noqa: E402
-                                   QFormLayout, QGroupBox, QProxyStyle,
-                                   QPushButton, QScrollArea, QSpinBox,
-                                   QVBoxLayout, QWidget)
+    from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox,  # noqa: E402
+                                   QGridLayout, QGroupBox, QLineEdit,
+                                   QProxyStyle, QPushButton, QScrollArea,
+                                   QSpinBox, QVBoxLayout, QWidget)
 
     def _dist(c, hexs) -> int:
         """QColor 与目标色值的 |ΔR|+|ΔG|+|ΔB|（0 = 完全一致）。"""
@@ -1081,12 +1081,27 @@ def main() -> int:
                 + abs(c.blue() - w_.blue()))
 
     def _nonbg(sub, bg, x0, x1, y0, y1):
+        """区域里与 ``bg`` 距离 > 60 的「墨迹」像素。
+
+        阈值 60 是刻意的：右侧分区底（浅 #eef0f3）与输入底（#ffffff）只差
+        44，分区**本身不算墨迹**；而雪佛龙（#5b6472）差 452、边框差 79，
+        都稳稳过线。
+        """
         out = []
         for y in range(y0, y1):
             for x in range(x0, x1):
                 c = sub.pixelColor(x, y)
-                if _dist(c, bg.name()) > 45:
+                if _dist(c, bg.name()) > 60:
                     out.append((x, y, c))
+        return out
+
+    def _eq_pts(sub, hexs, x0, x1, y0, y1, tol=2):
+        """区域里与目标色值距离 <= tol 的像素点（用于「某色真的被画出来」断言）。"""
+        out = []
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                if _dist(sub.pixelColor(x, y), hexs) <= tol:
+                    out.append((x, y))
         return out
 
     # ---- ① 色板/按钮 QSS 条款（不写渐变/阴影：Qt QSS 不支持 box-shadow）----
@@ -1283,21 +1298,33 @@ def main() -> int:
         _groups = dlg.findChildren(QGroupBox)
         check([g.title() for g in _groups] == ["界面", "网络与代理", "缓存与预览", "下载"],
               f"设置面板分四组（实得 {[g.title() for g in _groups]}）")
-        _forms = [g.layout() for g in _groups]
-        check(all(isinstance(f, QFormLayout) for f in _forms),
-              "每组一个 QFormLayout")
-        check(all(f.spacing() == 10 and f.contentsMargins().left() == 12
+        _grids = [g.layout() for g in _groups]
+        check(all(isinstance(f, QGridLayout) for f in _grids),
+              "每组一个 QGridLayout（v3：标签列/控件列两列，跨列行不再留空标签列）")
+        check(all(f.spacing() == 8 and f.contentsMargins().left() == 12
                   and f.contentsMargins().top() == 12
                   and f.contentsMargins().right() == 12
-                  and f.contentsMargins().bottom() == 12 for f in _forms),
-              "表单规格：spacing=10 / contentsMargins=(12,12,12,12)")
-        check(all(f.fieldGrowthPolicy()
-                  == QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-                  for f in _forms),
-              "表单规格：AllNonFixedFieldsGrow（输入控件拉满宽度）")
-        check(all(f.labelAlignment() == (Qt.AlignRight | Qt.AlignVCenter)
-                  for f in _forms),
+                  and f.contentsMargins().bottom() == 12 for f in _grids),
+              "表单规格：spacing=8（SP_SM）/ contentsMargins=(12,12,12,12)（SP_MD）")
+        check(all(f.columnMinimumWidth(0) == 112 and f.columnStretch(1) == 1
+                  for f in _grids),
+              "表单规格：标签列最小宽 112（四组同值）+ 控件列 stretch=1")
+        _labb = [(f.itemAtPosition(0, 0).widget().width(),
+                  f.itemAtPosition(0, 0).widget().x()) for f in _grids]
+        check(len(set(_labb)) == 1 and _labb[0][0] == 112,
+              f"四组标签列**实测**等宽（宽/起点 {_labb}）——v2 每组各算各的，参差不齐")
+        check(all(f.itemAtPosition(0, 0).widget().alignment()
+                  == (Qt.AlignRight | Qt.AlignVCenter) for f in _grids),
               "表单规格：标签右对齐垂直居中")
+        check(all(f.itemAtPosition(0, 1) is not None
+                  and f.itemAtPosition(0, 1).widget() is not None for f in _grids),
+              "表单规格：控件落在第 1 列（四组列位一致）")
+        # 组内上下内边距 / 卡片间距 = 12（token，非魔法数）
+        check(dlg._content.layout().spacing() == 12,
+              f"四组卡片间距统一 12px（实得 {dlg._content.layout().spacing()}）")
+        check("QGroupBox::title" in qss(LIGHT)
+              and "font-weight: 600" in qss(LIGHT).split("QGroupBox::title")[1].split("}")[0],
+              "分组标题字重 600（QGroupBox::title font-weight）")
 
         check(isinstance(dlg._scroll, QScrollArea)
               and dlg.height() <= max(360, int(
@@ -1314,8 +1341,7 @@ def main() -> int:
               f"全展开（{dlg.height()}px）→ 无需滚动"
               f"（滚动条上限 {dlg._scroll.verticalScrollBar().maximum()}）")
         check(dlg.full_height() < 1400,
-              f"设置面板总高 {dlg.full_height()}px < 旧版 ~1440px（用户截图）"
-              f"：分组 + 行距 12→10 + 行高 46→38")
+              f"设置面板总高 {dlg.full_height()}px < 旧版 ~1440px（用户截图）")
         _bb = dlg.findChild(QDialogButtonBox)
         _tl = _bb.mapTo(dlg, QPoint(0, 0))
         check(dlg.width() - (_tl.x() + _bb.width()) <= 24
@@ -1328,6 +1354,222 @@ def main() -> int:
               and dlg.cache_edit.text() != "",
               f"路径类输入框光标停在开头（光标 {dlg.cache_edit.cursorPosition()}，"
               f"文本 {dlg.cache_edit.text()!r}）")
+
+        # ------------------------------------------------------------ [4h-v3]
+        # 用户反馈「设置面板还是没改好」后按控制方定位的三条根因修完的**像素/
+        # 属性证据**：①复选框行灰带（QCheckBox 漏 transparent）②微调/下拉右侧
+        # 分区与箭头（QProxyStyle 绘制，QSS 不能碰）③复选框选中色跟主题；
+        # 外加四条真实瑕疵：标签列宽对齐 / 直连禁用代理字段 / 密码掩码 /
+        # 路径 tooltip。全部为运行时断言，缺一即 FAIL。
+        print("\n[4h-v3] 设置面板：灰带 / 分区 / 指示器 / 联动 / 掩码 / tooltip")
+
+        # ① 复选框行背景 == 卡片底（浅色必须是 #ffffff，不是窗口灰底 #f4f5f7）
+        for _mode in ("light", "dark"):
+            theme.apply_theme(app, _mode)
+            app.processEvents()
+            _pal = theme.current_palette()
+            _img = dlg.grab().toImage()
+            _bad = []
+            for _cb in (dlg.proxy_peer, dlg.clear_on_exit, dlg.seed_after,
+                        dlg.logging_enabled):
+                _o = _cb.mapTo(dlg, QPoint(0, 0))
+                _y = _o.y() + _cb.height() // 2
+                for _fx in (0.78, 0.9, 0.98):
+                    _px = _img.pixelColor(_o.x() + int(_cb.width() * _fx), _y)
+                    if _dist(_px, _pal["bg_panel"]) != 0:
+                        _bad.append((_cb.text()[:8], _fx, _px.name()))
+            check(not _bad,
+                  f"[{_mode}] 复选框行底 == 卡片底 {_pal['bg_panel']}"
+                  f"（灰带根因：QCheckBox 曾漏 background:transparent；"
+                  f"异常点 {_bad[:3]} 共 {len(_bad)}）")
+        check(_dist(QColor(LIGHT["bg"]), LIGHT["bg_panel"]) > 0
+              and QColor(DARK["bg"]) != QColor(DARK["bg_panel"]),
+              f"断言有效性：窗口底与卡片底本就可辨（浅 {LIGHT['bg']} vs "
+              f"{LIGHT['bg_panel']}）——若漏 transparent 必然被抓到")
+        check("QCheckBox, QRadioButton { background: transparent;" in qss(LIGHT)
+              and f"QWidget#formRow {{ background: transparent; }}" in qss(LIGHT),
+              "QSS：QCheckBox/QRadioButton 与 #formRow 均显式 transparent")
+
+        # ② 下拉/微调右侧分区：底 == bg_compartment、分隔线 == border、
+        #    雪佛龙内缩到分区中心（不再贴边）、两者同宽同底
+        _cw = _style.COMPARTMENT_W
+        _comp_combo = _style._compartment_rect(dlg.theme)
+        _comp_spin = _style._compartment_rect(dlg.rate_limit)
+        check(_comp_combo.width() == _comp_spin.width() == _cw and 22 <= _cw <= 28,
+              f"下拉与微调分区**同宽** {_cw}px（≈26px 档；实得 combo "
+              f"{_comp_combo.width()} / spin {_comp_spin.width()}）")
+        check(abs(_comp_combo.height() - (dlg.theme.height() - 2)) <= 1
+              and _comp_combo.right() == dlg.theme.width() - 2
+              and _comp_combo.left() == dlg.theme.width() - 1 - _cw,
+              f"分区几何：贴右内缘（right={_comp_combo.right()} / "
+              f"widget w={dlg.theme.width()}）、上下各内缩 1px")
+        for _mode in ("light", "dark"):
+            theme.apply_theme(app, _mode)
+            app.processEvents()
+            _pal = theme.current_palette()
+            _img = dlg.grab().toImage()
+
+            def _sub_of(w):
+                o = w.mapTo(dlg, QPoint(0, 0))
+                return _img.copy(o.x(), o.y(), w.width(), w.height())
+
+            _scombo = _sub_of(dlg.theme)
+            _area = _comp_combo.width() * (_comp_combo.height() - 2)
+            _bgpts = _eq_pts(_scombo, _pal["bg_compartment"],
+                             _comp_combo.left(), _comp_combo.right() + 1,
+                             _comp_combo.top() + 1, _comp_combo.bottom(), 2)
+            check(len(_bgpts) >= int(_area * 0.75),
+                  f"[{_mode}] 下拉分区底像素 {len(_bgpts)}/{_area} == "
+                  f"bg_compartment（{_pal['bg_compartment']}）")
+            _area_s = _comp_spin.width() * (_comp_spin.height() - 2)
+            _sspin = _sub_of(dlg.rate_limit)
+            _bgs = _eq_pts(_sspin, _pal["bg_compartment"],
+                           _comp_spin.left(), _comp_spin.right() + 1,
+                           _comp_spin.top() + 1, _comp_spin.bottom(), 2)
+            check(len(_bgs) >= int(_area_s * 0.6),
+                  f"[{_mode}] 微调分区底像素 {len(_bgs)}/{_area_s} == "
+                  f"bg_compartment（同底色，风格统一）")
+            _mid = _comp_spin.top() + _comp_spin.height() // 2
+            _dv = _eq_pts(_sspin, _pal["border"], _comp_spin.left(),
+                          _comp_spin.right() + 1, _mid, _mid + 1, 1)
+            check(len(_dv) >= _cw - 6,
+                  f"[{_mode}] 微调分区中间 1px 分隔线 == border"
+                  f"（{_pal['border']}：命中 {len(_dv)}/{_cw}）")
+
+            # 雪佛龙质心：必须落在分区中心（旧版贴右边缘 4px 内）。
+            # 判定用「分区内的墨迹」（与分区底距离 > 120 的像素），
+            # 比按 TEXT_MUTED 精确配色更稳（反锯齿边不算，浅深都不挑容差）。
+            _chev = []
+            for _y in range(_comp_combo.top() + 1, _comp_combo.bottom()):
+                for _x in range(_comp_combo.left(), _comp_combo.right() + 1):
+                    if _dist(_scombo.pixelColor(_x, _y),
+                             _pal["bg_compartment"]) > 120:
+                        _chev.append((_x, _y))
+            check(len(_chev) >= 6,
+                  f"[{_mode}] 下拉雪佛龙像素 {len(_chev)} 个落在分区内")
+            if _chev:
+                _cx = sum(p[0] for p in _chev) / len(_chev)
+                _cy = sum(p[1] for p in _chev) / len(_chev)
+                _d_comp = _comp_combo.right() - _cx
+                _d_edge = (dlg.theme.width() - 1) - _cx
+                check(7 <= _d_comp <= 14 and _d_edge >= 9,
+                      f"[{_mode}] 雪佛龙内缩到分区中心：质心 x={_cx:.1f}，"
+                      f"距分区右缘 {_d_comp:.1f}px / 距控件右缘 {_d_edge:.1f}px"
+                      f"（目标 ≈10±3）")
+                check(_comp_combo.top() + 2 <= _cy <= _comp_combo.bottom() - 2,
+                      f"[{_mode}] 雪佛龙纵向居中于分区（质心 y={_cy:.1f}）")
+
+        # ③ 复选框指示器自绘（启用态）：选中 = accent 实底 + 白色对勾；
+        #    未选 = border_strong 描边。禁用态另算（灰底灰勾），见下。
+        dlg.proxy_type.setCurrentIndex(dlg.proxy_type.findData("socks5"))
+        dlg.proxy_peer.setChecked(True)
+        dlg.seed_after.setChecked(False)
+        app.processEvents()
+        check(all(w.isEnabled() for w in dlg.proxy_fields()),
+              "指示器用例前置：代理字段已启用（禁用态画的是灰底灰勾）")
+        for _mode in ("light", "dark"):
+            theme.apply_theme(app, _mode)
+            app.processEvents()
+            _pal = theme.current_palette()
+            _img = dlg.grab().toImage()
+
+            def _ind(w):
+                o = w.mapTo(dlg, QPoint(0, 0))
+                return _img.copy(o.x(), o.y(), 22, w.height())
+
+            _on = _ind(dlg.proxy_peer)
+            _off = _ind(dlg.seed_after)
+            _acc = _eq_pts(_on, _pal["accent"], 0, 20, 0, _on.height(), 8)
+            _stroke = _eq_pts(_off, _pal["border_strong"], 0, 20, 0,
+                              _off.height(), 30)
+            check(len(_acc) >= 40,
+                  f"[{_mode}] 选中指示器 accent 实底 {len(_acc)}px"
+                  f"（{_pal['accent']}，跟随主题）")
+            check(len(_stroke) >= 4,
+                  f"[{_mode}] 未选指示器描边 == border_strong"
+                  f"（{_pal['border_strong']}：{len(_stroke)}px）")
+            check(_style.INDICATOR_SIZE == 16
+                  and _style.INDICATOR_RADIUS == 4,
+                  f"[{_mode}] 指示器规格 16×16 圆角 4（模块常量）")
+            if _acc:
+                _ax0 = min(p[0] for p in _acc)
+                _ax1 = max(p[0] for p in _acc)
+                _ay0 = min(p[1] for p in _acc)
+                _ay1 = max(p[1] for p in _acc)
+                check(_ax1 - _ax0 >= 11 and _ay1 - _ay0 >= 11,
+                      f"[{_mode}] 指示器实底 {_ax1 - _ax0 + 1}×{_ay1 - _ay0 + 1}"
+                      f"（纯 accent 核心；外接含 1.4px 描边 ≈16×16）")
+                _mark = _eq_pts(_on, _theme.ON_ACCENT, _ax0 + 2, _ax1 - 1,
+                                _ay0 + 2, _ay1 - 1, 8)
+                check(len(_mark) >= 3,
+                      f"[{_mode}] 选中指示器内有白色对勾 {len(_mark)}px"
+                      f"（{_theme.ON_ACCENT}）")
+        # 切回浅色：accent 实底仍在（证明颜色是绘制时现读，不是导入期快照）
+        theme.apply_theme(app, "light")
+        app.processEvents()
+        _img_l = dlg.grab().toImage()
+        _o_l = dlg.proxy_peer.mapTo(dlg, QPoint(0, 0))
+        _on_l = _img_l.copy(_o_l.x(), _o_l.y(), 22, dlg.proxy_peer.height())
+        _acc_light = _eq_pts(_on_l, LIGHT["accent"], 0, 20, 0, _on_l.height(), 8)
+        check(len(_acc_light) >= 40, "切回浅色仍是 accent 实底（颜色绘制时现读）")
+
+        # ③b 禁用态指示器：灰底 + 灰勾（不再是 accent）
+        for _mode in ("light", "dark"):
+            theme.apply_theme(app, _mode)
+            dlg.proxy_type.setCurrentIndex(dlg.proxy_type.findData("none"))
+            app.processEvents()
+            _pal = theme.current_palette()
+            _img = dlg.grab().toImage()
+            _o = dlg.proxy_peer.mapTo(dlg, QPoint(0, 0))
+            _dis = _img.copy(_o.x(), _o.y(), 22, dlg.proxy_peer.height())
+            _grey = _eq_pts(_dis, _pal["bg_hover"], 0, 20, 0, _dis.height(), 8)
+            _noacc = _eq_pts(_dis, _pal["accent"], 0, 20, 0, _dis.height(), 8)
+            check(len(_grey) >= 40 and len(_noacc) == 0,
+                  f"[{_mode}] 禁用态指示器：灰底 bg_hover {len(_grey)}px / "
+                  f"accent {len(_noacc)}px（禁用不再用强调色）")
+            dlg.proxy_type.setCurrentIndex(dlg.proxy_type.findData("socks5"))
+            app.processEvents()
+
+        # ④ 直连时代理字段禁用 / 切回可用；密码掩码；路径 tooltip
+        check(len(dlg.proxy_fields()) == 5,
+              f"代理联动覆盖 5 个控件（{len(dlg.proxy_fields())}）")
+        dlg.proxy_type.setCurrentIndex(dlg.proxy_type.findData("none"))
+        app.processEvents()
+        check(all(not w.isEnabled() for w in dlg.proxy_fields()),
+              "代理类型=不使用代理（直连）→ 5 个代理控件全部 isEnabled()==False")
+        dlg.proxy_type.setCurrentIndex(dlg.proxy_type.findData("socks5"))
+        app.processEvents()
+        check(all(w.isEnabled() for w in dlg.proxy_fields()),
+              "切回 SOCKS5 → 5 个代理控件全部恢复 isEnabled()==True")
+        dlg.proxy_type.setCurrentIndex(dlg.proxy_type.findData("http"))
+        app.processEvents()
+        check(all(w.isEnabled() for w in dlg.proxy_fields()),
+              "再切 HTTP → 仍全部可用（HTTP 也走代理）")
+        dlg.proxy_type.setCurrentIndex(dlg.proxy_type.findData("none"))
+        app.processEvents()
+        check(all(not w.isEnabled() for w in dlg.proxy_fields()),
+              "再切回直连 → 重新全部禁用（联动是双向的）")
+
+        check(dlg.proxy_pass.echoMode() == QLineEdit.Password,
+              f"密码框掩码：echoMode == Password（实得 {dlg.proxy_pass.echoMode()}）")
+        check(dlg.cache_edit.toolTip() == dlg.cache_edit.text()
+              and dlg.download_edit.toolTip() == dlg.download_edit.text()
+              and dlg.cache_edit.text() != "",
+              f"路径框 tooltip == 完整路径（缓存 {dlg.cache_edit.toolTip()[:36]!r}…）")
+        _newpath = os.path.join(tmp, "very", "long", "path", "for", "tooltip")
+        dlg.cache_edit.setText(_newpath)
+        app.processEvents()
+        check(dlg.cache_edit.toolTip() == _newpath,
+              "路径框 tooltip 随内容更新（textChanged → setToolTip）")
+
+        # ⑤「不限」语义：限速 0 值显示「不限」（存取语义不变，仍是 KB/s 的 0）
+        dlg.rate_limit.setValue(0)
+        app.processEvents()
+        check(dlg.rate_limit.specialValueText() == "不限"
+              and dlg.rate_limit.text() == "不限" and dlg.rate_limit.value() == 0,
+              f"下载限速 0 值显示「{dlg.rate_limit.text()}」（specialValueText 生效）")
+        check(dlg.cache_limit.specialValueText() == "不限制",
+              f"缓存上限 0 值显示「{dlg.cache_limit.specialValueText()}」")
         dlg.deleteLater()
     finally:
         for k, v in _orig_p.items():
