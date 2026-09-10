@@ -10,7 +10,8 @@ moov_stream_test 端到端覆盖，此处专攻「磁盘路径 → 任务 → �
 - §B piece_map_for_path：命中构造 PieceMap（offset/区间透传）、
      未命中 None、torrent_file 抛 → None（绝不整文件可用）
 - §C demand_for_path：字节区间 → 分块 deadline 集合（首/尾钳制到文件
-     区间）、pl<=0 → False、未命中 False、句柄炸 False 不抛
+     区间；deadline 自区间头**递增**，plan/07 阶段 2）、pl<=0 → False、
+     未命中 False、句柄炸 False 不抛
 - §D have_piece / piece_length：无当前句柄 False/None、has_metadata=False
      → None、句柄抛 → 降级值
 - §E start/stop_preview：无句柄或无结果 → RuntimeError("请先解析种子")；
@@ -116,6 +117,7 @@ class FakeSched:
         self.stops = 0
         self.stop_release: list = []   # 每次 stop 的 release_only 实参
         self.begins: list = []
+        self.entry = True              # tail_entry_ready() 可编程返回
 
     def begin(self, h, f):
         self.begins.append((h, f))
@@ -129,6 +131,9 @@ class FakeSched:
 
     def tail_ready(self):
         return True
+
+    def tail_entry_ready(self):
+        return self.entry
 
 
 def mk_env():
@@ -223,22 +228,23 @@ def section_demand(ck):
         rec, result, h = add_task_rec(reg, task_dir)
         # start_byte 语义 = 文件相对字节（与 scheduler.request_range 一致）；
         # f1 占分块 2~3，相对 [50,150) → piece {2,3}
+        from core.scheduler import DEADLINE_STEP_MS, LOOKAHEAD_PIECES
         ck.check(pv.demand_for_path(
             os.path.join(task_dir, "root", "f1.bin"), 50, 150) is True,
             "命中返回 True")
-        ck.check(h.deadlines == [(2, 0), (3, 0)],
-                 "相对字节→分块 {2,3}，deadline 即时（0ms）")
+        ck.check(h.deadlines == [(2, 0), (3, DEADLINE_STEP_MS)],
+                 "相对字节→分块 {2,3}，deadline 递增（首块 0ms 插队立即、"
+                 "第 2 块 400ms；plan/07 阶段 2 起不再全 0）")
         h.deadlines.clear()
         pv.demand_for_path(os.path.join(task_dir, "root", "f1.bin"),
                            0, 9999)   # 越界钳制到文件区间
-        ck.check(h.deadlines == [(2, 0), (3, 0)],
+        ck.check(h.deadlines == [(2, 0), (3, DEADLINE_STEP_MS)],
                  "区间钳制：不越界补拉其它文件的分块")
         ck.check(pv.demand_for_path(os.path.join(cache, "no"), 0, 1) is False,
                  "未命中 → False（不抛）")
         # A1 回归：点播必须有 LOOKAHEAD_PIECES 上限（对齐 request_range，
         # scheduler.py:156）。播放器发 `bytes=X-` 时 end_excl 到文件尾，
         # 不截断会把剩余整文件刷 ASAP，带宽摊薄反而拖慢点播目标。
-        from core.scheduler import LOOKAHEAD_PIECES
         big_files = [TorrentFile(0, "root/big.bin", 20000, 0, 0, 199)]
         big_res = ParseResult(info_hash="d" * 40, name="root",
                               total_size=20000, piece_size=100,
@@ -257,13 +263,16 @@ def section_demand(ck):
         ck.check(len(bh.deadlines) <= LOOKAHEAD_PIECES,
                  f"单次 demand 覆盖块数 ≤ LOOKAHEAD_PIECES"
                  f"（实际 {len(bh.deadlines)}）")
-        ck.check(bh.deadlines == [(p, 0) for p in range(LOOKAHEAD_PIECES)],
-                 f"大区间只从头部连续预约 {LOOKAHEAD_PIECES} 块（尾部不刷 ASAP）")
+        ck.check(bh.deadlines == [(p, p * DEADLINE_STEP_MS)
+                                  for p in range(LOOKAHEAD_PIECES)],
+                 f"大区间只从头部连续预约 {LOOKAHEAD_PIECES} 块且 deadline "
+                 f"从区间头递增（尾部不刷 ASAP）")
         bh.deadlines.clear()
         pv.demand_for_path(os.path.join(big_dir, "root", "big.bin"),
                            15000, 20000)      # 尾部小区间（50 块 < 60）
-        ck.check(bh.deadlines == [(p, 0) for p in range(150, 200)],
-                 "小区间不受截断影响（尾部 50 块全预约）")
+        ck.check(bh.deadlines == [(p, (p - 150) * DEADLINE_STEP_MS)
+                                  for p in range(150, 200)],
+                 "小区间不受截断影响（尾部 50 块全预约，deadline 自区间头递增）")
         h._pl_bad = True
         h.file = type("T", (), {"piece_length": staticmethod(lambda: 0)})()
         ck.check(pv.demand_for_path(
@@ -345,8 +354,16 @@ def section_status(ck):
         ck.check(st["resolving"] is True and 1.5 < st["elapsed"] < 3.0,
                  "resolving/elapsed 走 registry 一致快照（R-1 家族）")
         ck.check(st["file_progress"] == [1, 2] and st["tail_ready"] is True
+                 and st["tail_entry_ready"] is True
                  and st["preview_file"] is result.files[0],
-                 "file_progress/tail_ready/preview_file 装配")
+                 "file_progress/tail_ready/tail_entry_ready/preview_file 装配")
+        # plan/07 阶段 2：门控字段 tail_entry_ready 与 tail_ready 独立装配
+        # （整尾窗未齐但入口就绪时，门控必须放行）
+        sched.entry = False
+        st3 = pv.status()
+        ck.check(st3["tail_entry_ready"] is False and st3["tail_ready"] is True,
+                 "tail_entry_ready 独立于 tail_ready（入口未就绪 ≠ 整尾窗未就绪）")
+        sched.entry = True
 
         class BadFP(FakeHandle):
             def file_progress(self):

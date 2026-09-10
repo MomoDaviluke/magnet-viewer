@@ -183,6 +183,29 @@ def main() -> int:
           and scheduler.window_pieces(4 * 1024 * 1024) == 4
           and scheduler.window_pieces(8 * 1024 * 1024) == 4,
           "window_pieces 换算表冻结（16KB→60 上限 / 1MB→16 / 4MB→4 / 8MB→4 下限）")
+    # plan/07 阶段 2：尾窗按字节收敛（大块种子整尾窗 44MB→≈10MB）+ 开播门控
+    # 改判「尾部入口」（最末 2MB 覆盖块）。纯函数签名 + 常量 + 换算表同手法冻结。
+    sig_check("scheduler.tail_window_bytes", scheduler, {
+        "tail_window_bytes": [("size", False)],
+    })
+    sig_check("scheduler.tail_entry_pieces", scheduler, {
+        "tail_entry_pieces": [("file", False), ("piece_length", False)],
+    })
+    check(scheduler.TAIL_BYTES_MIN == 2 * 1024 * 1024
+          and scheduler.TAIL_BYTES_MAX == 16 * 1024 * 1024
+          and scheduler.TAIL_RATIO == 0.0025
+          and scheduler.TAIL_ENTRY_BYTES == 2 * 1024 * 1024
+          and scheduler.TAIL_MAX_PIECES == 128,
+          "阶段 2 尾窗常量冻结（下限 2MB / 上限 16MB / 0.25% / 入口 2MB / 块上限 128）")
+    check(scheduler.tail_window_bytes(500 * 1024 * 1024) == 2 * 1024 * 1024
+          and scheduler.tail_window_bytes(1024 ** 3) == int(1024 ** 3 * 0.0025)
+          and scheduler.tail_window_bytes(int(4.1 * 1024 ** 3))
+          == int(int(4.1 * 1024 ** 3) * 0.0025)
+          and scheduler.tail_window_bytes(100 * 1024) == 100 * 1024
+          and scheduler.tail_window_bytes(100 * 1024 ** 3) == 16 * 1024 * 1024
+          and scheduler.tail_window_bytes(0) == 0,
+          "tail_window_bytes 换算表冻结（4.1GB→0.25%≈10.5MB / 1GB→2.56MB / "
+          "500MB→2MB 下限 / 100KB→自身 / 上限 16MB / size<=0→0）")
     sig_check("PreviewScheduler", scheduler.PreviewScheduler, {
         "begin": [("handle", False), ("file", False)],              # 契约 #5
         "request_range": [("start_byte", False), ("end_byte", False)],
@@ -192,6 +215,9 @@ def main() -> int:
         "stop": [("release_only", True)],
         "contiguous_progress": [],
         "tail_ready": [],
+        # plan/07 阶段 2：门控改用的新方法（tail_ready 保留不删，仍供
+        # tick() 判断是否继续补拉整尾窗）。
+        "tail_entry_ready": [],
         "buffer_progress": [],
     })
     sig_check("stream_server", stream_server, {

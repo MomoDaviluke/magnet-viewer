@@ -714,14 +714,19 @@ def main():
     # 不再是固定 60 块——旧断言 range(0,61) 是 4MB 块下 240MB 全 ASAP
     # 洪泛的来源，已由 playback_window_test 专项覆盖。
     assert dl >= set(range(0, 16)), "开播顺序窗口未预约"
-    assert dl >= {96, 97, 98, 99}, "尾部 moov 窗口未预约"
+    # plan/07 阶段 2：尾窗按字节收敛（100MB → max(2MB, 0.25%·size)=2MB = 2 块），
+    # 旧断言 {96..99}（4MB 尾窗）随之收窄；尾部**入口**（最末 2MB）另行由
+    # tail_entry_ready 门控，整尾窗仍在此预约。
+    assert dl >= {98, 99}, f"尾部 moov 窗口未预约：{sorted(dl)}"
     assert h_sched.prios == [4, 0, 0], h_sched.prios
     # 拖动到 80MB：必须立即预约 seek 点起的窗口（旧实现只改锚点、不预约）
     h_sched.deadlines.clear()
     sched.seek_to_byte(80 * pl_s)
     dl = set(h_sched.deadlines)
     assert 80 in dl, "seek 后未立即预约 seek 点"
-    assert dl >= set(range(80, 100)), sorted(dl)[:5]
+    # 头窗 = window_pieces(1MB)=16 块 [80..95]；尾窗收敛为 {98,99}（阶段 2）——
+    # 96/97 落在两者之间本就不在预约面内（由 tick() 随进度滚动补上）。
+    assert dl >= (set(range(80, 96)) | {98, 99}), sorted(dl)
     # 点播区间必须有上限：拖动的 `bytes=X-`（到文件尾）不能把剩余全文件置 ASAP
     h_sched.deadlines.clear()
     sched.request_range(0, 100 * pl_s)
@@ -762,7 +767,7 @@ def main():
     assert not (after & {85, 86, 87}), \
         f"旧跳转窗口残留：{sorted(after & set(range(80, 100)))}"
     assert h_sched.cleared >= 1, "seek 未清理旧 deadline"
-    assert after >= {96, 97, 98, 99}, "清理后未重建尾部 moov 窗口"
+    assert after >= {98, 99}, "清理后未重建尾部 moov 窗口"
     print("[3c3] 调度器预约窗口通过：seek 立即预约 / 点播有上限 / 窗口随播放位置滚动 / 跳转清理残留")
 
     # ---------------- [3c4] 阶段 B：stop(release_only)（迅雷式转正生命周期） ----------------

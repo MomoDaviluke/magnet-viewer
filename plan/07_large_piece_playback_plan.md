@@ -45,10 +45,41 @@
 - 验收：`probe_ab_diag.py A|B` 的 B 组指标（头 1 块 ≤ 10s @1MB/s 慢链路）固化为回归断言（新建 `playback_window_test.py`，真链路 + 假句柄双覆盖）。
 - contract：`scheduler` 新常量与签名指纹。
 
-## 阶段 2 — moov 定位与尾窗收敛
-- 新增 moov 探针（读最末 N KB 解析 atom 头，定位 `moov` 偏移与长度）→ 只预约覆盖块；搜不到则回退现有比例窗口。
-- 尾窗 deadline 排在播放窗口之后；门控改为"moov 块就绪"。
-- 验收：moov 尾部/非尾部两种构造（moov_stream_test 已有 fixture）全绿；4MB 块场景尾窗预约块数 ≤ moov 覆盖块数 + 1。
+## 阶段 2 — 尾窗收敛与门控改判（已落地 2026-09-10）
+> 与初稿的差异：**未**做「读最末 N KB 解析 atom 头」的 moov 探针。普通 MP4 的
+> moov 就在文件最末尾，**最后 `min(2MB, size)` 字节**的启发式已能覆盖，且不引入
+> atom 解析器与失败回退分支；moov 大于 2MB 的少数文件由整尾窗后台补拉 +
+> 播放失败退避重试兜底（真失败模式见 `_on_stream_failed`）。
+
+- [x] `tail_window_bytes(size)` 模块级纯函数：`min(size, max(2MB, 0.25%·size), 16MB)`
+      —— 4.1GB 42MB(11 块) → 10.5MB(3 块)、1GB → 2.56MB、500MB → 2MB 下限、
+      100KB → 不超自身；`TAIL_MAX_PIECES=128` 上限保留。
+- [x] 尾窗 deadline 仍排在播放窗口之后（`_request_tail` 排序未动）。
+- [x] 门控改判「尾部入口」：新增 `tail_entry_pieces(file, pl)` +
+      `PreviewScheduler.tail_entry_ready()`（文件最后 `min(2MB, size)` 覆盖块；
+      4MB 块下仅最末 1 块）；`tail_ready()` 保留不删（`tick()` 继续补拉整尾窗的
+      判据）；`preview.status()` 快照新增 `tail_entry_ready` 字段，
+      `ui/main_window.py` 的开播门控**与重试判据**均改用它。
+- [x] `preview.demand_for_path` 的 deadline 改递增（阶段 1 在 scheduler 修过的
+      同款病根，任务级 demand 是漏网对称路径）。
+- [x] 验收：`moov_stream_test`（真链路 fixture，moov 在尾部）全绿；`preview_test` /
+      `playback_window_test` / `smoke_test` / `cache_mode_e2e_test` 全绿；
+      契约 167/0；全量回归 18 套全绿。
+
+真链路门控实测（本机做种闭环；4.1GB 组用稀疏载荷复现真机几何）：
+
+| 几何 | 旧行为 | 新行为 |
+|---|---|---|
+| 300MB / 4MB 块 / 做种端 1MB/s：头连续≥1块 | 9.0s | 9.0s |
+| 300MB：**门控成立时刻** | 未出现（>17s） | 未出现（>17s）※ 该几何旧/新尾窗都恰 1 块，不敏感 |
+| 4.1GB / 4MB 块 / 2MB/s：尾窗 | 11 块 44MB（**整窗就绪**才开门控） | 3 块 12MB；入口 1 块 |
+| 4.1GB：头连续≥1块 | 8.0s | 8.0s |
+| 4.1GB：**门控成立时刻** | **36.0s** | **19.0s（-47%）** |
+
+> 注：「头块就绪后 2-3s 内开门控」在「尾窗 deadline 排在头窗之后」的约定下
+> 结构上不可达——门控要的入口块就是排到头窗之后的第 1 个尾部块，实测 4.1GB /
+> 2MB/s 下即「头 8.0s + 11s」。若要进一步压到 2-3s，需要把入口块提到与头窗
+> 同级（会与头窗抢带宽，且破坏 `playback_window_test §C` 的排序契约），另议。
 
 ## 阶段 3 — 统计口径与文案
 - 缓存占用显示改用已下载字节；门控文案区分"等数据"/"等索引"。

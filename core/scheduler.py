@@ -18,9 +18,15 @@ from .models import PieceMap, contiguous_bytes, have_from_bitmap
 LOOKAHEAD_PIECES = 60        # 一次向前预约的分块数量**上限**（块数口径，契约冻结）
 LOOKAHEAD_BYTES = 16 * 1024 * 1024  # 播放窗口的**字节**预算（plan/07 阶段 1）
 DEADLINE_STEP_MS = 400       # 窗口内相邻分块的 deadline 步长（递增保序）
-TAIL_BYTES_MIN = 4 * 1024 * 1024   # 尾部窗口下限（覆盖常见 moov 尺寸）
-TAIL_BYTES_MAX = 64 * 1024 * 1024  # 尾部窗口上限（防超大文件过载预约）
-TAIL_RATIO = 0.01            # 大文件按体积 1% 放大窗口
+# 尾部索引窗口按**字节**收敛（plan/07 阶段 2，2026-09-10 真机 4.1GB / 4MB 块 /
+# 2.4MB/s）：旧式 `min(size, max(4MB, 1%·size), 64MB)` 在 4.1GB 上给出 **44MB**
+# （11 块）整窗必须就绪才开门控——2.4MB/s 下光尾窗就 ≈18s，且与头部窗口抢带宽，
+# 用户看到的就是「缓冲恒 0.0%」。新式 `max(2MB, 0.25%·size)` 收敛到 ≈10MB（3 块），
+# 门控又只等「尾部入口」（最末 2MB = 1 块），尾窗规模不再是开播的瓶颈。
+TAIL_BYTES_MIN = 2 * 1024 * 1024   # 尾部窗口下限（plan/07 阶段 2：4MB → 2MB）
+TAIL_BYTES_MAX = 16 * 1024 * 1024  # 尾部窗口上限（plan/07 阶段 2：64MB → 16MB）
+TAIL_RATIO = 0.0025          # 大文件按体积 0.25% 放大窗口（plan/07 阶段 2：1% → 0.25%）
+TAIL_ENTRY_BYTES = 2 * 1024 * 1024  # 开播门控的「尾部入口」= 文件最后 2MB
 TAIL_MAX_PIECES = 128        # 一次预约的尾部块数上限
 
 # moov 索引块在尾部的容器家族（FFmpeg mov 解封装器适用）
@@ -50,15 +56,54 @@ def window_pieces(piece_length: int) -> int:
                       math.ceil(LOOKAHEAD_BYTES / piece_length)))
 
 
+def tail_window_bytes(size: int) -> int:
+    """尾部索引窗口的**字节**预算：``min(size, max(2MB, 0.25%·size), 16MB)``。
+
+    为什么按字节收敛（plan/07 阶段 2，2026-09-10 真机 + 本机实验）：
+    旧式 ``min(size, max(4MB, 1%·size), 64MB)`` 在真机 4.1GB / 4MB 块的
+    mp4 上给出 **44MB**（11 块）——2.4MB/s 慢链路下光尾窗就 ≈18s，且旧门控
+    要求「整尾窗就绪」才开播，尾窗与头部顺序前缀抢带宽 → 用户实测
+    「缓冲恒 0.0%、30s 不出画面」。收敛后 4.1GB → ≈10MB（3 块）、1GB →
+    ≈2.5MB、500MB 及以下 → 2MB 下限；小文件不超自身大小（100KB → 100KB）。
+    纯函数（不碰句柄/文件对象），便于单测与后续调参（contract_check 冻结）。
+
+    ``size <= 0`` 兜底返回 0（调用方 ``tail_piece_window`` 已先行拒绝非法
+    文件；此处防空文件算出负数窗口）。
+    """
+    if size <= 0:
+        return 0
+    return min(size, max(TAIL_BYTES_MIN, int(size * TAIL_RATIO)), TAIL_BYTES_MAX)
+
+
+def tail_entry_pieces(file, piece_length: int) -> list[int]:
+    """「尾部入口」= 文件最后 ``min(2MB, size)`` 字节覆盖的块（闭区间，升序）。
+
+    这是**开播门控**的判据（plan/07 阶段 2）：moov 就在普通 mp4 的最末尾，
+    4MB 块下只需最末 1 块就位即可让 FFmpeg 探测成功，**不必**等整个尾窗
+    （4.1GB 的 10MB 尾窗 = 3 块）。整尾窗仍由 tick() 在后台继续补拉，
+    真失败走既有的退避重试——门控只负责「可以一试了」。
+
+    非法输入（size<=0 / piece_length<=0）返回空列表，调用方据此视作
+    「无尾部入口」恒就绪（非 moov 尾部家族同此）。
+    """
+    if file is None or file.size <= 0 or piece_length <= 0:
+        return []
+    span = min(TAIL_ENTRY_BYTES, file.size)
+    n = max(1, math.ceil(span / piece_length))
+    n = min(n, file.end_piece - file.start_piece + 1)
+    return list(range(file.end_piece - n + 1, file.end_piece + 1))
+
+
 def tail_piece_window(file, piece_length: int) -> list[int]:
     """计算需要优先补拉的尾部窗口（闭区间 piece 列表，升序）。
 
     仅对 moov 在尾部的容器家族生效；返回空列表表示无需补拉。
+    窗口字节量走纯函数 ``tail_window_bytes``（plan/07 阶段 2 收敛，
+    4.1GB 44MB → ≈10MB），再受 ``TAIL_MAX_PIECES`` 与文件实际块数夹取。
     """
     if file.ext not in TAIL_FIRST_EXTS or file.size <= 0 or piece_length <= 0:
         return []
-    tail_bytes = min(file.size, max(TAIL_BYTES_MIN, int(file.size * TAIL_RATIO)),
-                     TAIL_BYTES_MAX)
+    tail_bytes = tail_window_bytes(file.size)
     n = max(1, math.ceil(tail_bytes / piece_length))
     n = min(n, TAIL_MAX_PIECES, file.end_piece - file.start_piece + 1)
     return list(range(file.end_piece - n + 1, file.end_piece + 1))
@@ -69,11 +114,14 @@ class PreviewScheduler:
 
     策略：
     1. prioritize_files 只保留目标文件优先级，其余置 0；
-    2. MP4/MOV 家族先预约尾部索引窗口（moov），再按播放顺序预约分块；
+    2. MP4/MOV 家族先预约尾部索引窗口（moov，按字节收敛，plan/07 阶段 2），
+       再按播放顺序预约分块；
     3. 窗口块数按**字节预算**换算（``window_pieces``），窗口内
        ``set_piece_deadline`` 按序号**递增**（``DEADLINE_STEP_MS``）——
        连续前缀先到齐，尾窗排在头窗之后；
-    4. tick() 周期性根据已完成字节向前滚动预约窗口。
+    4. tick() 周期性根据已完成字节向前滚动预约窗口，并在整尾窗未齐时持续
+       补拉（入口就绪不取消整尾窗）；
+    5. 开播门控看 ``tail_entry_ready``（最末 2MB），不看 ``tail_ready``（整尾窗）。
     """
 
     def __init__(self):
@@ -83,6 +131,7 @@ class PreviewScheduler:
         self._play_from = -1     # 播放起点块（begin=文件头 / seek=目标块）
         self._head_n = 0         # 当前播放窗口块数（window_pieces 换算结果）
         self._tail_pieces: list[int] = []
+        self._entry_pieces: list[int] = []   # 尾部入口块（开播门控判据）
         self.on_file_completed = None  # callback(int file_index)，由会话层注入
 
     @property
@@ -98,6 +147,10 @@ class PreviewScheduler:
         但只占小块、不是播放消费的数据——旧实现把头窗与尾窗同置 ASAP(0)，
         4.1GB 文件 44MB 尾窗要与顺序前缀抢带宽且必须整窗就绪才开门控，
         在 2.4MB/s 下仅尾窗就 ≈18s（plan/07 阶段 1）。
+
+        plan/07 阶段 2 起尾窗已按字节收敛（4.1GB 44MB → ≈10MB）、门控只看
+        「尾部入口」（``tail_entry_ready``，最末 2MB），本方法仍负责把**整尾窗**
+        排在头窗之后持续预约——入口就绪不取消它，moov 大于入口时靠它兜底。
         """
         if not self._tail_pieces or self.handle is None:
             return
@@ -113,7 +166,12 @@ class PreviewScheduler:
         return have_from_bitmap(self.handle.status().pieces)
 
     def tail_ready(self) -> bool:
-        """尾部索引窗口是否已全部落盘（无窗口时恒为 True）。"""
+        """尾部索引窗口是否已全部落盘（无窗口时恒为 True）。
+
+        plan/07 阶段 2 起**不再**是开播门控判据（尾窗收敛后仍有 10MB ≈ 3 块，
+        等整窗对 2.4MB/s 慢链路仍是秒级开销），但保留：契约与方法面冻结、
+        ``tick()`` 靠它决定是否继续补拉尾窗。
+        """
         if not self._tail_pieces or self.file is None or self.handle is None:
             return True
         try:
@@ -121,6 +179,28 @@ class PreviewScheduler:
             return all(have(p) for p in self._tail_pieces)
         except Exception as e:
             log_warning("scheduler.tail_ready", f"{e}")
+            return False
+
+    def tail_entry_ready(self) -> bool:
+        """尾部**入口**是否就绪（开播门控判据，plan/07 阶段 2）。
+
+        只判定文件最后 ``min(2MB, size)`` 字节覆盖的块（``_entry_pieces``，
+        moov 所在处），而不是整个尾窗：4.1GB / 4MB 块真机上旧门控要等
+        「整尾窗 44MB 齐」（2.4MB/s ≈18s，实测缓冲恒 0.0%），新门控只需
+        最末 1 块 —— 头窗之后排到的第 1 个尾部块，秒级即可开播。
+        整尾窗（≈10MB）仍由 ``tick()`` 在后台继续补拉，**不取消**；若播放器
+        真因 mdat/moov 越界打开失败，走既有的退避重试（`_on_stream_failed`）。
+
+        无尾部入口（非 moov 尾部家族 / 非法文件 / 未 begin）恒为 True，
+        与 ``tail_ready`` 的空窗口语义一致（MKV 等不需要尾部即可开播）。
+        """
+        if not self._entry_pieces or self.file is None or self.handle is None:
+            return True
+        try:
+            have = self._have_snapshot()
+            return all(have(p) for p in self._entry_pieces)
+        except Exception as e:
+            log_warning("scheduler.tail_entry_ready", f"{e}")
             return False
 
     def contiguous_progress(self) -> int:
@@ -171,6 +251,9 @@ class PreviewScheduler:
         self._play_from = file.start_piece
         self._head_n = window_pieces(ti.piece_length())
         self._tail_pieces = tail_piece_window(file, ti.piece_length())
+        # 尾部入口 = 开播门控判据（plan/07 阶段 2）；无尾窗（非 moov 家族）时为空
+        self._entry_pieces = (tail_entry_pieces(file, ti.piece_length())
+                              if self._tail_pieces else [])
         # 先预约尾部索引块，再进入顺序窗口
         self._request_tail()
         self.tick()
@@ -335,3 +418,4 @@ class PreviewScheduler:
         self._scheduled_to = -1
         self._head_n = 0
         self._tail_pieces = []
+        self._entry_pieces = []

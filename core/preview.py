@@ -29,7 +29,7 @@ import libtorrent as lt
 from .logutil import log_warning
 from .models import ParseResult, PieceMap, TorrentFile, have_from_bitmap
 from .registry import TaskRecord, TaskRegistry
-from .scheduler import LOOKAHEAD_PIECES
+from .scheduler import DEADLINE_STEP_MS, LOOKAHEAD_PIECES
 
 STATE_NAMES = {
     getattr(lt.torrent_status, k, None): k.replace("_", " ")
@@ -119,6 +119,12 @@ class PreviewCore:
         （X 到文件尾），不截断会把剩余整文件全刷成 ASAP——带宽摊到几百
         MB 上反而拖慢点播目标本身。全量落盘由 file-priority 负责，
         点播只是临时插队，不需要也不应该包揽整文件。
+
+        区间内 deadline **递增**（第 i 块 = ``i * DEADLINE_STEP_MS``，
+        plan/07 阶段 2）：插队语义不变（首块仍 0ms 立即），但把区间内的
+        顺序表达出来——旧实现全 0 让区间内几十块同级紧急，libtorrent 散抓，
+        区间头部反而迟到（阶段 1 在 ``scheduler.request_range`` 已修同款，
+        这条是任务级 demand 的漏网对称路径）。
         """
         hit = self.find_record_for_path(disk_path)
         if hit is None:
@@ -133,8 +139,13 @@ class PreviewCore:
             last = min(f.end_piece,
                        f.start_piece + max(0, end_excl - 1) // pl)
             last = min(last, first + LOOKAHEAD_PIECES - 1)
+            # deadline 改**递增**（第 i 块 = i * DEADLINE_STEP_MS，plan/07
+            # 阶段 2）：与 scheduler.request_range 同源——旧实现全 0 等于
+            # 不带任何排序信息，FFmpeg 拖动发的 `bytes=X-` 会把区间内所有块
+            # 置成同级紧急，libtorrent 在几十个同级块里散抓，区间**头部**反而
+            # 迟到（阶段 1 在 scheduler 侧已修同病根，此处是漏网的同款）。
             for p in range(first, last + 1):
-                rec.handle.set_piece_deadline(p, 0)
+                rec.handle.set_piece_deadline(p, (p - first) * DEADLINE_STEP_MS)
             return True
         except Exception as e:
             log_warning("fetcher.demand_for_path", f"{disk_path}: {e}")
@@ -210,6 +221,10 @@ class PreviewCore:
                         else 0.0)
         st["contiguous"] = contig
         st["tail_ready"] = sched.tail_ready() if sched.active else True
+        # 开播门控判据（plan/07 阶段 2）：只看尾部**入口**（文件最后
+        # min(2MB, size) 覆盖块），不等整尾窗；tail_ready 保留但不再驱动门控。
+        st["tail_entry_ready"] = (sched.tail_entry_ready()
+                                  if sched.active else True)
         st["preview_file"] = pf
         # R-1 家族（D4）：resolving/elapsed 成对读走 registry 一致快照，
         # 不再锁外分两次读别名（撕裂窗口）。

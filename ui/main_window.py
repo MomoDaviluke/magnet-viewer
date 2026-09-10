@@ -797,11 +797,17 @@ class MainWindow(QMainWindow):
             self.downloads.set_tasks(self.session.tasks())
         except Exception as e:
             log_warning("main.refresh_tasks", f"{e}")
-        # 视频开播条件：头部连续数据 + 尾部索引块（moov）都已就绪
+        # 视频开播条件：头部连续数据 + 尾部**入口**就绪（plan/07 阶段 2）。
+        # 入口 = 文件最后 min(2MB, size) 覆盖的块（moov 所在），**不是**整尾窗：
+        # 4.1GB / 4MB 块真机上整尾窗 44MB 在 2.4MB/s 下要 ≈18s 才齐，旧的
+        # 「整尾窗就绪」门控因此永不满足（缓冲恒 0.0%、30s 不见画面）；
+        # 入口只需最末 1 块。整尾窗仍在后台由 scheduler.tick() 继续补拉，
+        # 万一 moov 大于入口，播放器打开失败会走 _on_stream_failed 退避重试。
         if self._pending_video is not None and st is not None:
             f, url = self._pending_video
             contig = st.get("contiguous", 0)
-            if contig >= min(1024 * 1024, f.size) and st.get("tail_ready", True):
+            if (contig >= min(1024 * 1024, f.size)
+                    and st.get("tail_entry_ready", True)):
                 self._pending_video = None
                 self.preview.video.set_stream(url, f.name, f.size)
 
@@ -830,8 +836,10 @@ class MainWindow(QMainWindow):
         if st is None:
             QTimer.singleShot(1500, self._retry_stream)
             return
-        if not st.get("tail_ready", True) or st.get("contiguous", 0) < 1:
-            # 数据仍未就绪：静默等待，不算失败次数，避免反复弹错误
+        if (not st.get("tail_entry_ready", True)) or st.get("contiguous", 0) < 1:
+            # 数据仍未就绪（尾部入口/头部前缀）：静默等待，不算失败次数，
+            # 避免反复弹错误。判据与开播门控同源（入口而非整尾窗）——
+            # 否则门控已放行、这里却继续等整尾窗到位，出现「能开却不重试」。
             QTimer.singleShot(1500, self._retry_stream)
             return
         # 带上出错前的位置续播：setSource 会从头开始，不带位置的话

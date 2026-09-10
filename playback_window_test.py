@@ -15,6 +15,14 @@
    起顺序取块——保证连续前缀先到齐，不再全 0 洪泛；
 3. 尾部 moov 窗口的 deadline 排在头窗之后（``n_head*STEP + 1000 + j*STEP``）。
 
+修复（阶段 2，本次）：
+4. 尾窗按**字节**收敛：``tail_window_bytes(size)`` =
+   ``min(size, max(2MB, 0.25%·size), 16MB)``——4.1GB 从 44MB（11 块）→
+   ≈10MB（3 块）、1GB → ≈2.5MB、500MB 及以下 → 2MB 下限、小文件不超自身；
+5. 开播门控改判「尾部**入口**就绪」= ``tail_entry_ready()``（文件最后
+   ``min(2MB, size)`` 覆盖块，4MB 块下仅最末 1 块），不再等整尾窗；
+   ``tail_ready()``（整尾窗）保留但只用于 tick() 继续补拉的判据。
+
 A/B 实验（300MB / 4MB 块 / 做种端限 1MB/s）：现状头 1 块就绪 14.0s，
 本策略 9.0s（-36%），t=13s 已连续 8MB。
 
@@ -24,6 +32,9 @@ A/B 实验（300MB / 4MB 块 / 做种端限 1MB/s）：现状头 1 块就绪 14.
 - §C 尾窗 deadline 严格大于头窗最大 deadline
 - §D request_range：仍 ≤ LOOKAHEAD_PIECES 上限，但 deadline 递增
 - §E seek_to_byte：从新位置重建窗口且 deadline 递增
+- §F tail_window_bytes：按比例收敛 + 上下限夹取（4.1GB ≈10MB）
+- §G tail_piece_window：4.1GB / 4MB 块尾窗 11 块 → 3 块
+- §H tail_entry_ready：只下最末 min(2MB,size) 覆盖块即就绪，且不取消整尾窗
 
 退出码：0=通过，1=失败，2=SKIP（依赖缺失，绝不假装通过）。
 """
@@ -247,6 +258,121 @@ def section_seek(ck):
              "旧位置（<50）分块不再被预约")
 
 
+def section_tail_bytes(ck):
+    ck.section("§F tail_window_bytes：按比例收敛 + 上下限夹取")
+    tw = sch.tail_window_bytes
+    GiB = 1024 ** 3
+    ck.check(sch.TAIL_BYTES_MIN == 2 * MB and sch.TAIL_BYTES_MAX == 16 * MB
+             and sch.TAIL_RATIO == 0.0025 and sch.TAIL_ENTRY_BYTES == 2 * MB,
+             "阶段 2 常量：下限 2MB / 上限 16MB / 比例 0.25% / 入口 2MB")
+    ck.check(sch.TAIL_MAX_PIECES == 128, "TAIL_MAX_PIECES 上限保留（128）")
+    s41 = int(4.1 * GiB)
+    b41 = tw(s41)
+    ck.check(b41 == int(s41 * sch.TAIL_RATIO),
+             f"4.1GB → 恰为 0.25% 比例项（实际 {b41}）")
+    ck.check(10 * MB < b41 <= 11 * MB,
+             f"4.1GB → ≈10MB（实际 {b41 / MB:.2f}MB，旧式 44MB）")
+    b1 = tw(GiB)
+    ck.check(b1 == int(GiB * sch.TAIL_RATIO) and 2 * MB < b1 < 3 * MB,
+             f"1GB → ≈2.5MB（实际 {b1 / MB:.2f}MB）")
+    ck.check(tw(500 * MB) == 2 * MB,
+             f"500MB → 2MB 下限（实际 {tw(500 * MB) / MB:.2f}MB）")
+    ck.check(tw(100 * 1024) == 100 * 1024,
+             "100KB → 不超文件本身（实际 %d）" % tw(100 * 1024))
+    ck.check(tw(100 * GiB) == 16 * MB,
+             f"超大文件 → 16MB 上限（实际 {tw(100 * GiB) / MB:.0f}MB）")
+    ck.check(tw(0) == 0 and tw(-1) == 0, "size<=0 → 0（不产生负窗口）")
+
+
+def section_tail_conv(ck):
+    ck.section("§G 4.1GB / 4MB 块：尾窗 11 块（44MB）→ 3 块（≈10MB）")
+    GiB = 1024 ** 3
+    size = int(4.1 * GiB)
+    s, h, f = mkf(4 * MB, size)
+    win = sch.tail_piece_window(f, 4 * MB)
+    ck.check(bool(win) and win[-1] == f.end_piece, "尾窗必含末块")
+    ck.check(win == list(range(f.end_piece - 2, f.end_piece + 1)),
+             f"尾窗恰末 3 块（实际 {len(win)} 块：{win}）")
+    # 旧式公式对照：min(size, max(4MB, 1%·size), 64MB) = 44MB = 11 块
+    old_bytes = min(size, max(4 * MB, int(size * 0.01)), 64 * MB)
+    old_n = max(1, -(-old_bytes // (4 * MB)))
+    ck.check(old_n == 11 and len(win) < old_n,
+             f"新尾窗 {len(win)} 块 << 旧尾窗 {old_n} 块（{old_bytes / MB:.0f}MB）")
+    ck.check(len(win) * 4 * MB <= 16 * MB, "尾窗字节 ≤ 16MB 上限")
+    # 小文件：尾窗不超文件本身（300KB / 16KB 块 = 19 块整文件）——与旧行为一致
+    tiny = TorrentFile(2, "root/a.mp4", 300 * 1024, 0, 0, 18)
+    ck.check(sch.tail_piece_window(tiny, 16 * 1024) == list(range(19)),
+             "小文件尾窗 = 整文件（行为与旧式逐字一致）")
+
+
+def mkf(pl: int, size_bytes: int, path: str = "movie/big.mp4", have=()) -> tuple:
+    """按**精确字节**构造 (scheduler, handle, file)（mk 只收整数 MB）。"""
+    n = max(1, -(-size_bytes // pl))
+    f = TorrentFile(0, path, size_bytes, 0, 0, n - 1)
+    h = FakeHandle(pl, n, have=have)
+    s = sch.PreviewScheduler()
+    return s, h, f
+
+
+def section_entry(ck):
+    ck.section("§H tail_entry_ready：只下最末 min(2MB,size) 覆盖块即就绪")
+    # 8GB / 4MB 块：尾窗 16MB（上限）= 4 块，入口 = 2MB = 仅最末 1 块
+    s, h, f = mkf(4 * MB, 8 * 1024 * MB, have={2047})
+    s.begin(h, f)
+    ck.check(s._entry_pieces == [f.end_piece],
+             f"8GB/4MB 入口 = 仅末块（实际 {s._entry_pieces}）")
+    ck.check(len(s._tail_pieces) == 4,
+             f"同文件整尾窗 4 块（实际 {s._tail_pieces}）")
+    ck.check(s.tail_entry_ready() is True,
+             "只末块就绪 → 入口就绪（新门控放行）")
+    ck.check(s.tail_ready() is False,
+             "整尾窗未齐 → 旧门控仍关（证明门控确实提前，非恒真）")
+    # 入口就绪**不取消**整尾窗：tick() 继续预约未就绪的尾部块
+    h.deadlines.clear()
+    s.tick()
+    dl = {p for p, _ in h.deadlines}
+    ck.check({2044, 2045, 2046} <= dl,
+             f"入口就绪后整尾窗仍在补拉（实际 {sorted(dl)}）")
+    # 缺末块 → 入口未就绪
+    h._have = set()
+    ck.check(s.tail_entry_ready() is False, "末块缺失 → 入口未就绪")
+    h._have = {2046}
+    ck.check(s.tail_entry_ready() is False,
+             "非末块（尾窗内其它块）就绪不算入口就绪")
+    h._have = {2047}
+
+    # 4.1GB / 4MB：入口 1 块 vs 整尾窗 3 块——门控只需 1/3
+    s2, h2, f2 = mkf(4 * MB, int(4.1 * 1024 ** 3))
+    h2._have = {f2.end_piece}
+    s2.begin(h2, f2)
+    ck.check(s2._entry_pieces == [f2.end_piece]
+             and len(s2._tail_pieces) == 3,
+             f"4.1GB：入口 {len(s2._entry_pieces)} 块 / 整尾窗 "
+             f"{len(s2._tail_pieces)} 块（旧式 11 块需整窗齐）")
+
+    # 入口 deadline 仍排在头窗之后（§C 同源，入口不是插队块）
+    tail = [(p, m) for p, m in h2.deadlines if p == f2.end_piece]
+    head = _head([(p, m) for p, m in h2.deadlines if p != f2.end_piece], 4)
+    ck.check(bool(tail) and bool(head)
+             and min(m for _, m in tail) > max(m for _, m in head),
+             "尾部入口 deadline 仍晚于头窗（moov 让位于顺序前缀）")
+
+    # 非 moov 尾部家族（.mkv）无入口 → 恒就绪（不需要尾部即可开播）
+    s3, h3, f3 = mkf(4 * MB, 8 * 1024 * MB, path="movie/big.mkv")
+    s3.begin(h3, f3)
+    ck.check(s3._entry_pieces == [] and s3._tail_pieces == [],
+             ".mkv 无尾窗/无入口（tail_piece_window 家族门禁不变）")
+    ck.check(s3.tail_entry_ready() is True, ".mkv 入口恒就绪（不阻塞开播）")
+
+    # 小块场景：16KB 块入口 = 最后 2MB = 128 块（与尾窗判定口径一致）
+    s4, h4, f4 = mkf(16 * 1024, 100 * MB)
+    s4.begin(h4, f4)
+    ck.check(len(s4._entry_pieces) == 128
+             and s4._entry_pieces[-1] == f4.end_piece
+             and s4._entry_pieces[0] == f4.end_piece - 127,
+             f"16KB 块入口 = 最末 128 块（实际 {len(s4._entry_pieces)}）")
+
+
 def main() -> int:
     ck = ts.Checker("playback_window_test（plan/07 阶段 1 播放窗口专项）")
     ck.section("按字节窗口 + deadline 递增保序（假句柄，不启会话）")
@@ -255,6 +381,9 @@ def main() -> int:
     section_tail(ck)
     section_range(ck)
     section_seek(ck)
+    section_tail_bytes(ck)
+    section_tail_conv(ck)
+    section_entry(ck)
     return ck.report()
 
 
