@@ -1,30 +1,35 @@
 """底部状态面板：会话状态 / 做种 / 速度 / 缓冲。"""
 from __future__ import annotations
 
-from ui.theme import TEXT_MUTED
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from core.models import human_size
+from ui.theme import SP_LG, SP_SM, SP_XS
 
 
 class StatusPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("statusBar")
         self.state = QLabel("空闲 —— 粘贴磁力链或打开 .torrent 文件开始解析")
-        self.peers = QLabel("做种 -  连接 -")
+        self.peers = QLabel("做种 - · 连接 -")
         self.speed = QLabel("速度 0 B/s")
         self.total_speed = QLabel("")
         self.buffer = QLabel("")
         self.cache = QLabel("")
 
+        # 次级文字样式统一由 ui/theme.py 的 #metaLabel 给：本文件不写色值、不写
+        # 内联样式（machine gate theme_check R1/R2）
+        self.state.setObjectName("statusState")
         for lbl in (self.peers, self.speed, self.total_speed, self.buffer,
                     self.cache):
-            lbl.setStyleSheet(f"color:{TEXT_MUTED};")
+            lbl.setObjectName("metaLabel")
         self.total_speed.hide()  # 无任务时不占位
         self.cache.hide()        # 无占用信息时不占位
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(8, 4, 8, 4)
+        row.setContentsMargins(SP_SM, SP_XS, SP_SM, SP_XS)
+        row.setSpacing(SP_LG)
         row.addWidget(self.state, 1)
         row.addWidget(self.cache)
         row.addWidget(self.buffer)
@@ -40,7 +45,8 @@ class StatusPanel(QWidget):
         """
         if status is None:
             return
-        self.peers.setText(f"做种 {status['num_seeds']}  连接 {status['num_peers']}")
+        self.peers.setText(
+            f"做种 {status['num_seeds']} · 连接 {status['num_peers']}")
         self.speed.setText(f"速度 {human_size(status['download_rate'])}/s")
         if status.get("preview_file") is not None:
             self.buffer.setText(f"预览缓冲 {status['buffer'] * 100:.1f}%")

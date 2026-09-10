@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QProgressBar, QPushButton,
                                QVBoxLayout, QWidget)
 
 from core.models import human_size
-from ui.theme import (DANGER, SLIDER_SEGMENT, TEXT_MUTED)
+from ui.theme import SLIDER_SEGMENT, SP_MD
 
 
 def fmt_time(ms: int) -> str:
@@ -128,23 +128,34 @@ class VideoPreviewWidget(QWidget):
         self.player.setVideoOutput(self.video)
 
         self.title = QLabel("（未在播放）")
-        self._title_style = f"color:{TEXT_MUTED}; padding:4px 2px;"
-        self.title.setStyleSheet(self._title_style)
+        # 标题样式统一走 QSS：#playerTitle（常态）/ #playerTitle[error="true"]
+        # （错误态）——本文件不写色值、不写内联样式（theme_check R1/R2）
+        self.title.setObjectName("playerTitle")
+        self.title.setProperty("error", False)
+
+        # 空态提示（#emptyHint）：视频页在「从未开播」时居中给一句引导，
+        # 开播/等待即隐藏（hide 后 QVBoxLayout 不再占位，布局与改造前一致）
+        self.empty_hint = QLabel("双击文件树中的视频文件即可边下边播")
+        self.empty_hint.setObjectName("emptyHint")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
 
         self.buffer_bar = QProgressBar(self)
+        self.buffer_bar.setObjectName("bufferBar")
         self.buffer_bar.setRange(0, 1000)
         self.buffer_bar.setFixedHeight(6)
         self.buffer_bar.setTextVisible(False)
         self.buffer_label = QLabel("缓冲 0.0% · 0 B/s")
-        self.buffer_label.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
+        self.buffer_label.setObjectName("metaLabel")
 
         self.btn_play = QPushButton("暂停")
-        self.btn_play.setFixedWidth(64)
+        self.btn_play.setObjectName("playButton")
+        self.btn_play.setFixedSize(36, 36)
         self.btn_play.clicked.connect(self._toggle_play)
         self.slider = BufferedSlider(self)
         self._last_scrub = 0.0
         self.slider.setRange(0, 0)
         self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setObjectName("metaLabel")
         self.volume = QSlider(Qt.Horizontal)
         self.volume.setRange(0, 100)
         self.volume.setValue(80)
@@ -153,6 +164,7 @@ class VideoPreviewWidget(QWidget):
         self.volume.valueChanged.connect(lambda v: self.audio.setVolume(v / 100))
 
         ctrl = QHBoxLayout()
+        ctrl.setSpacing(SP_MD)
         ctrl.addWidget(self.btn_play)
         ctrl.addWidget(self.slider, 1)
         ctrl.addWidget(self.time_label)
@@ -162,6 +174,7 @@ class VideoPreviewWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.title)
+        layout.addWidget(self.empty_hint)
         layout.addWidget(self.video, 1)
         layout.addWidget(self.buffer_bar)
         layout.addWidget(self.buffer_label)
@@ -202,15 +215,26 @@ class VideoPreviewWidget(QWidget):
         else:
             self.btn_play.setText("暂停" if playing else "播放")
 
+    def _set_title_error(self, on: bool) -> None:
+        """切换标题错误态（QSS 属性选择器 #playerTitle[error="true"]）。
+
+        Qt 动态属性变化**不会**自动重算样式，必须 unpolish + polish 才会
+        命中属性选择器（plan B2 明确要求）。
+        """
+        self.title.setProperty("error", bool(on))
+        style = self.title.style()
+        style.unpolish(self.title)
+        style.polish(self.title)
+        self.title.update()
+
     def show_error(self, message: str):
         """把错误显示到醒目的标题区（避免只写底部小字被用户忽略）。"""
-        self.title.setStyleSheet(
-            f"color:{DANGER}; padding:4px 2px; font-weight:600;")
+        self._set_title_error(True)
         self.title.setText(f"⚠ {message}")
         self.buffer_label.setText(f"播放器错误：{message}")
 
     def _restore_title(self, text: str):
-        self.title.setStyleSheet(self._title_style)
+        self._set_title_error(False)
         self.title.setText(text)
 
     def set_waiting(self, name: str, size: int):
@@ -224,6 +248,7 @@ class VideoPreviewWidget(QWidget):
         self.slider.clear_segments()
         self._resume_ms = None
         self._wait_stage = WAIT_BOTH          # 阶段未知：合并文案（旧行为）
+        self.empty_hint.setVisible(False)      # 有文件了：收起空态引导
         self._restore_title(waiting_text(name, size, WAIT_BOTH))
         self.buffer_label.setText("准备中…")
         self._set_play_btn(False)   # 等待期不可播放，避免点击无效却改文案
@@ -250,6 +275,7 @@ class VideoPreviewWidget(QWidget):
         self.file_name = name
         self._size = size
         self._wait_stage = None                # 开播：清等待阶段（文案不残留）
+        self.empty_hint.setVisible(False)      # 开播：收起空态引导
         self.title.setText(f"正在流式播放：{name}（{human_size(size)}）")
         self.slider.setRange(0, 0)
         self._reset_seek_state()
@@ -299,6 +325,7 @@ class VideoPreviewWidget(QWidget):
         self._errored = False
         self._wait_stage = None         # 清等待阶段（与标题一并复位）
         self.slider.setEnabled(True)
+        self.empty_hint.setVisible(True)   # 回到「未选文件」：重新显示空态引导
         self._restore_title("（未在播放）")
         self.buffer_bar.setValue(0)
         self.buffer_label.setText("缓冲 0.0%")

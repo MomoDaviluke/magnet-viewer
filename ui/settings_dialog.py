@@ -1,7 +1,7 @@
 """设置对话框：代理 / 元数据超时 / 缓存目录 / 退出清理。"""
 from __future__ import annotations
 
-from ui.theme import TEXT_MUTED
+from ui.theme import SP_LG, SP_MD, SP_XL
 import os
 
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -43,6 +43,8 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(460)
 
         form = QFormLayout()
+        form.setSpacing(SP_MD)
+        form.setContentsMargins(SP_XL, SP_LG, SP_XL, SP_LG)
 
         self.proxy_type = QComboBox()
         for value, label in PROXY_LABELS:
@@ -161,7 +163,7 @@ class SettingsDialog(QDialog):
                       "预览缓存上限在下次切换预览文件时生效；"
                       "预览缓存模式在下次关闭预览时生效。设置持久化于本机"
                       "（Windows 注册表 Bitseed\\MagnetViewer）。")
-        note.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
+        note.setObjectName("fieldNote")   # 样式：ui/theme.py #fieldNote
         note.setWordWrap(True)
 
         self.btn_clear = QPushButton("立即清理缓存")
@@ -170,6 +172,9 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
+        btn_save = buttons.button(QDialogButtonBox.Save)
+        if btn_save is not None:
+            btn_save.setObjectName("primary")   # 主按钮样式：ui/theme.py #primary
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)

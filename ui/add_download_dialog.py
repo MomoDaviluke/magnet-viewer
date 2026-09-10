@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from ui.theme import TEXT_MUTED
+from ui.theme import SP_LG, SP_MD, SP_XL
 import os
 
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox,
@@ -34,6 +34,8 @@ class AddDownloadDialog(QDialog):
         self.setMinimumWidth(480)
 
         form = QFormLayout()
+        form.setSpacing(SP_MD)
+        form.setContentsMargins(SP_XL, SP_LG, SP_XL, SP_LG)
 
         self.name_label = QLabel(str(name) or "（未命名）")
         self.name_label.setWordWrap(True)
@@ -68,13 +70,16 @@ class AddDownloadDialog(QDialog):
         note = QLabel("提示：保存子目录是下载根目录下的单层目录名"
                       "（可留空自动使用 info_hash）；优先级 0 = 不下载、"
                       "3 = 最高；预览始终为最高优先级。")
-        note.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
+        note.setObjectName("fieldNote")   # 样式：ui/theme.py #fieldNote
         note.setWordWrap(True)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save
                                    | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._try_accept)
         buttons.rejected.connect(self.reject)
+        btn_save = buttons.button(QDialogButtonBox.Save)
+        if btn_save is not None:
+            btn_save.setObjectName("primary")   # 主按钮样式：ui/theme.py #primary
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)

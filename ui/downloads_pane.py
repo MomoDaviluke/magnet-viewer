@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QLabel, QMenu, QMessageBox,
                                QStyledItemDelegate, QStyleOptionProgressBar,
                                QTreeView, QVBoxLayout, QWidget)
 
-from ui.theme import (ACCENT, BG_PANEL, DANGER, OK, TEXT_DIM, TEXT_MUTED)
+from ui.theme import ACCENT, DANGER, OK, TEXT_DIM, TEXT_MUTED
 from core.models import human_size
 
 COL_NAME, COL_SIZE, COL_PROGRESS, COL_SPEED = 0, 1, 2, 3
@@ -132,6 +132,7 @@ class DownloadsPane(QWidget):
         self._tasks: list[dict] = []
 
         self.tree = QTreeView(self)
+        self.tree.setObjectName("taskList")   # 样式：ui/theme.py QTreeView#taskList
         self._model = QStandardItemModel(0, len(COLUMNS), self)
         self._model.setHorizontalHeaderLabels(COLUMNS)
         self.tree.setModel(self._model)
@@ -148,11 +149,10 @@ class DownloadsPane(QWidget):
         header.setStretchLastSection(True)
 
         self.details = QLabel("（选择任务查看详情）")
+        self.details.setObjectName("metaLabel")   # 样式：ui/theme.py #metaLabel
         self.details.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.details.setWordWrap(True)
         self.details.setMinimumHeight(90)
-        self.details.setStyleSheet(
-            f"color:{TEXT_MUTED}; font-size:12px; background:{BG_PANEL}; padding:6px;")
 
         split = QSplitter(Qt.Vertical, self)
         split.addWidget(self.tree)
@@ -161,12 +161,9 @@ class DownloadsPane(QWidget):
         split.setStretchFactor(1, 1)
         split.setSizes([360, 120])
 
-        self._placeholder = QLabel(
-            "暂无下载任务\n\n点击顶栏「添加下载」、拖入磁力链 / .torrent，\n"
-            "或在文件树右键「添加下载」开始管理下载任务")
+        self._placeholder = QLabel("暂无下载任务 —— 解析后右键文件可「添加下载」")
+        self._placeholder.setObjectName("emptyHint")   # 样式：#emptyHint
         self._placeholder.setAlignment(Qt.AlignCenter)
-        self._placeholder.setStyleSheet(
-            f"color:{TEXT_MUTED}; font-size:12px; line-height:1.6;")
 
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self._placeholder)   # 0：空态引导

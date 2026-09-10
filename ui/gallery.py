@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QPushButton, QSplitter,
                                QVBoxLayout, QWidget)
 
-from ui.theme import BG_PANEL, TEXT_MUTED
 from core.models import (ParseResult, TorrentFile, disk_root,
                          file_disk_path, human_size)
+from ui.theme import SP_SM
 
 
 class GalleryWidget(QWidget):
@@ -27,16 +27,19 @@ class GalleryWidget(QWidget):
         self._status: dict | None = None
 
         self.thumb_list = QListWidget(self)
+        self.thumb_list.setObjectName("thumbList")   # 样式：ui/theme.py #thumbList
         self.thumb_list.setViewMode(QListWidget.IconMode)
-        self.thumb_list.setIconSize(self.thumb_list.iconSize())
-        self.thumb_list.setFixedWidth(190)
+        self.thumb_list.setIconSize(QSize(120, 120))
+        self.thumb_list.setGridSize(QSize(140, 160))
+        self.thumb_list.setSpacing(SP_SM)
+        self.thumb_list.setFixedWidth(200)
         self.thumb_list.setWordWrap(True)
         self.thumb_list.currentRowChanged.connect(self._show_index)
 
-        self.viewer = QLabel("（选择左侧图片）")
+        self.viewer = QLabel("（选择左侧图片预览）")
+        self.viewer.setObjectName("imageViewer")     # 样式：虚线占位框 + 深底
         self.viewer.setAlignment(Qt.AlignCenter)
         self.viewer.setMinimumSize(300, 300)
-        self.viewer.setStyleSheet(f"background:{BG_PANEL}; color:{TEXT_MUTED};")
 
         self.btn_prev = QPushButton("← 上一张")
         self.btn_next = QPushButton("下一张 →")
@@ -131,7 +134,7 @@ class GalleryWidget(QWidget):
         f = self._files[row]
         item = self.thumb_list.item(row)
         item.setIcon(QIcon(pm.scaled(
-            160, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
         item.setText(f"{f.name}\n{human_size(f.size)}")
         if row == self.thumb_list.currentRow():
             # 当前正在浏览的图片刚下载完成 → 大图区立即刷新（此前显示"下载中…"）

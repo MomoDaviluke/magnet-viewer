@@ -31,7 +31,7 @@ from ui.preview_pane import PreviewPane
 from ui.preview_player import WAIT_DATA, WAIT_INDEX
 from ui.settings_dialog import SettingsDialog
 from ui.status_panel import StatusPanel
-from ui.theme import TEXT_MUTED
+from ui.theme import SP_LG, SP_MD, SP_SM
 
 TAB_FILES, TAB_PREVIEW, TAB_DOWNLOADS = 0, 1, 2
 
@@ -335,10 +335,19 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget(self)
         root = QVBoxLayout(central)
+        # 顶栏 / 状态栏做成通栏色带（圆角卡片由 QSS #topBar 负责），
+        # 内容区靠控件自身内边距留白 → 根布局不加外边距
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # 顶栏
-        bar = QHBoxLayout()
+        # 顶栏（#topBar：面板底色 + 下边框）
+        bar_wrap = QWidget()
+        bar_wrap.setObjectName("topBar")
+        bar = QHBoxLayout(bar_wrap)
+        bar.setContentsMargins(SP_LG, SP_MD, SP_LG, SP_MD)
+        bar.setSpacing(SP_SM)
         self.input = QLineEdit()
+        self.input.setObjectName("urlInput")
         self.input.setPlaceholderText("粘贴 magnet:?xt=urn:btih:... 磁力链接，或点击右侧按钮选择 .torrent 文件")
         self.btn_open = QPushButton("打开种子文件…")
         self.btn_resolve = QPushButton("解析")
@@ -355,23 +364,14 @@ class MainWindow(QMainWindow):
         self.btn_add_download.clicked.connect(self._add_download_flow)
         bar.addWidget(self.btn_add_download)
         self.btn_settings = QPushButton("设置")
-        self.btn_settings.setFixedWidth(56)
+        self.btn_settings.setObjectName("ghost")
         self.btn_settings.clicked.connect(self._open_settings)
         bar.addWidget(self.btn_settings)
-        root.addLayout(bar)
-
-        self.hint = QLabel()
-        # 模板保存原始指引文案：保存设置时只替换超时数字，不截断其他部分
-        self._hint_template = ("解析只获取文件清单（不下载资源本体）；"
-                               "双击视频/图片文件即可在「预览」页边下边播或浏览。"
-                               "磁力链元数据获取超时 {} 秒。")
-        self.hint.setText(
-            self._hint_template.format(int(self.session.metadata_timeout)))
-        self.hint.setStyleSheet(f"color:{TEXT_MUTED}; font-size:12px;")
-        root.addWidget(self.hint)
+        root.addWidget(bar_wrap)
 
         # 页签
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("mainTabs")
         self.tree = FileTreeWidget()
         self.preview = PreviewPane()
         self.downloads = DownloadsPane()
@@ -381,7 +381,19 @@ class MainWindow(QMainWindow):
         self.tabs.setTabEnabled(TAB_PREVIEW, False)
         root.addWidget(self.tabs, 1)
 
-        # 状态栏
+        # hint：移到页签下方、状态栏上方（与输入框同行会挤顶栏）
+        self.hint = QLabel()
+        # 模板保存原始指引文案：保存设置时只替换超时数字，不截断其他部分
+        self._hint_template = ("解析只获取文件清单（不下载资源本体）；"
+                               "双击视频/图片文件即可在「预览」页边下边播或浏览。"
+                               "磁力链元数据获取超时 {} 秒。")
+        self.hint.setText(
+            self._hint_template.format(int(self.session.metadata_timeout)))
+        self.hint.setObjectName("hint")
+        self.hint.setContentsMargins(SP_LG, SP_SM, SP_LG, SP_SM)
+        root.addWidget(self.hint)
+
+        # 状态栏（#statusBar：面板底色 + 上边框）
         self.status_panel = StatusPanel()
         root.addWidget(self.status_panel)
         self.setCentralWidget(central)

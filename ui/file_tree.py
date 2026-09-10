@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
-from PySide6.QtWidgets import QMenu, QTreeView
+from PySide6.QtWidgets import QLabel, QMenu, QTreeView
 
 from core.models import ParseResult, TorrentFile, human_size
 
@@ -16,18 +16,25 @@ class FileTreeWidget(QTreeView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("fileTree")     # 样式：ui/theme.py QTreeView#fileTree
         self._model = QStandardItemModel(0, 3, self)
         self._model.setHorizontalHeaderLabels(["名称", "大小", "占比"])
         self.setModel(self._model)
         self.setUniformRowHeights(True)
         self.setExpandsOnDoubleClick(False)
+        # 空态覆盖层（QSS #emptyHint）：树内没有行时居中提示如何开始
+        self._empty_hint = QLabel("粘贴磁力链后点「解析」", self.viewport())
+        self._empty_hint.setObjectName("emptyHint")
+        self._empty_hint.setAlignment(Qt.AlignCenter)
         self.doubleClicked.connect(self._on_double_clicked)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        self.setIndentation(16)
         header = self.header()
-        header.resizeSection(0, 460)
+        header.resizeSection(0, 480)
         header.resizeSection(1, 110)
         header.setStretchLastSection(True)
+        self._sync_empty_hint()
 
     @staticmethod
     def _make_row(text: str, size_text: str, ratio_text: str) -> list:
@@ -76,6 +83,25 @@ class FileTreeWidget(QTreeView):
             self.expandAll()
         else:  # 超大种子避免一次性展开卡顿
             self.expandToDepth(2)
+        self._sync_empty_hint()
+
+    # ---------- 空态 ----------
+
+    def _sync_empty_hint(self):
+        """文件树无行时显示居中提示（QSS #emptyHint）。
+
+        覆盖层挂在 viewport 上并铺满视口；解析结果填入后随行存在自动隐藏。
+        """
+        if self._model.rowCount() == 0:
+            self._empty_hint.setGeometry(self.viewport().rect())
+            self._empty_hint.show()
+            self._empty_hint.raise_()
+        else:
+            self._empty_hint.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_empty_hint()
 
     def _on_double_clicked(self, index):
         item = self._model.itemFromIndex(index.siblingAtColumn(0))

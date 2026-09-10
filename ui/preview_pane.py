@@ -25,7 +25,8 @@ class PreviewPane(QWidget):
         self.stack.addWidget(self.gallery)    # PAGE_GALLERY
 
         self.title = QLabel("（未选择文件）")
-        self.title.setStyleSheet("padding:4px 2px; font-weight:500;")
+        # 样式统一由 ui/theme.py 的 #playerTitle 给（本文件不写内联样式）
+        self.title.setObjectName("playerTitle")
         self.btn_to_download = QPushButton("转为下载")
         self.btn_to_download.setFixedWidth(88)
         self.btn_to_download.setToolTip(
