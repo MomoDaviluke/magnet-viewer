@@ -105,6 +105,11 @@ def clear_cache_contents(cache_dir: str,
     （_clear_preview_cache_now 等）统一 try→-1 兜底并提示清理失败，
     绝不静默返回 0 冒充「清理成功、删了 0 项」（D4c，基线语义）；
     **嵌套**失败条目与嵌套目录扫描失败静默跳过（部分清理尽力而为）。
+
+    已知风险：删除**活任务**目录会导致引擎假完成（libtorrent 继续报进度
+    直至 state=finished、磁盘为空、零错误日志、不重下）。当前所有 UI 清理
+    入口均以 ``keep_dirs`` 传活任务目录快照规避，故不可达——本函数不做
+    额外行为拦截，仅在此留档。
     """
     keep = CLEANUP_KEEP if keep is None else frozenset(keep)
     keep_paths = {os.path.normcase(os.path.abspath(d))

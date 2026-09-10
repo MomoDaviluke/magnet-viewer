@@ -33,8 +33,10 @@ import libtorrent as lt
 from .logutil import log_warning
 from .models import ParseResult
 from .parser import is_torrent_path, parse_torrent_file
-from .persist import TaskPersistence, is_within, save_subdir_of, task_dir
+from .persist import (TaskPersistence, is_resume_key, is_within,
+                      save_subdir_of, task_dir)
 from .registry import (TaskRecord, TaskRegistry, hash_key, ih_from_params)
+from .resume import resume_path
 from .states import (BOOTSTRAP_TRACKERS, STATE_COMPLETED, STATE_DOWNLOADING,
                      STATE_META_FETCH, STATE_PAUSED, STATE_QUEUED,
                      STATE_STOPPED, STATE_VALIDATE)
@@ -395,6 +397,8 @@ class TaskOps:
         唯一允许真正移除句柄的入口；``delete_files=True`` 时删除任务落盘
         目录——只允许删除受管范围（cache_dir 或本会话下载根内）且目录名
         与任务键一致的目录（D9：删文件经守卫，防误删用户数据）。
+        成功注销后一并回收该任务的孤儿 fastresume（F2，见
+        ``_delete_orphan_resume``）。
         """
         key = (task_id or "").strip().lower()
         save_path = None
@@ -434,7 +438,32 @@ class TaskOps:
         self.persist.persist_tasks()
         if delete_files and save_path:
             self.delete_task_files(key, save_path)
+        # F2：孤儿 fastresume 回收（成功注销/清清单后，注册表再无同 key 记录）
+        self._delete_orphan_resume(key)
         return True
+
+    def _delete_orphan_resume(self, key: str) -> None:
+        """删任务后回收孤儿 fastresume：``<cache_dir>/.resume/<key>.fastresume``。
+
+        fastresume 与注册表记录同生命周期，而任务删除后残留的文件没有别的
+        清理入口（``clear_cache_contents`` 的 CLEANUP_KEEP 含 ``.resume``，
+        永不参与清理）——不清就是纯泄漏。仅在**注册表已无同 key 记录**时删
+        （读现有锁内查询手法，一次锁段）：同 key 任务若仍在（并发 add 抢回）
+        绝不误删其续传数据。非法键（临时键 ``tmp-<id>``）直接跳过（拼路径会
+        ValueError），失败仅告警。
+        """
+        if not is_resume_key(key):
+            return
+        reg = self.reg
+        with reg.lock:
+            if key in reg.torrents or key in reg.tasks:
+                return   # 同 key 任务仍在：保留其续传数据
+        try:
+            os.remove(resume_path(reg.cache_dir, key))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log_warning("fetcher.remove_task.resume", f"{e}")
 
     def delete_task_files(self, key: str, path: str) -> None:
         """删除任务落盘目录（受管范围守卫，详见 remove_task docstring）。"""
@@ -452,6 +481,15 @@ class TaskOps:
         else:
             log_warning("fetcher.remove_task.delete",
                         f"拒绝删除非受管任务目录：{ap}")
+            # F3：守卫拒绝后若目录已被 libtorrent（delete_files=True 的
+            # remove_torrent 选项 1）清空，留一个空目录纯属残留——确为空
+            # （os.listdir 为空）才 rmdir 收尾；非空则原样保留（守卫保护
+            # 共享目录里的非种子用户文件，绝不放宽守卫本身）。
+            try:
+                if not os.listdir(ap):
+                    os.rmdir(ap)
+            except OSError as e:
+                log_warning("fetcher.remove_task.delete", f"{e}")
 
     def focus_task(self, task_id: str) -> bool:
         """把某下载任务设为「当前」（状态/预览别名指向它）。

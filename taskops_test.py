@@ -19,6 +19,8 @@ CRUD 的每条分支压一遍，秒级、不联网。
      selected_files/seed/error 覆盖）、R-3 结构证据（status() 在锁外——
      用「status() 里回头抢锁」探针钉死）、completed 强制 progress=1
 - §H Facade 接线：SessionManager 公开面真的打到 TaskOps（防假搬迁）
+- §K 删任务回绕（F2/F3）：孤儿 fastresume 回收（仅注册表再无同 key 记录时）、
+     D9 守卫拒删后空目录 rmdir 收尾（非空目录原样保留）
 
 退出码：0=通过，1=失败，2=SKIP（依赖缺失，绝不假装通过）。
 """
@@ -413,14 +415,18 @@ def section_remove(ck):
         ck.check(ses.removed[-1][1] == 1, "选项 1：libtorrent 删文件")
         ck.check(not os.path.isdir(managed), "受管目录名==任务键 → 删除")
 
-        # 守卫：目录名不符 → 拒绝
+        # 守卫：目录名不符 → 拒绝（F3 后：非空目录原样保留；空目录收尾见 §K）
         outside = os.path.join(dl, "user-data")
         os.makedirs(outside, exist_ok=True)
+        with open(os.path.join(outside, "user.bin"), "wb") as f:
+            f.write(b"u")           # 共享目录里的用户文件 → 守卫必须保留
         k2 = "8" * 40
         add_rec(reg, k2, download=True, save_path=outside)
         reg.tasks[k2] = {"info_hash": k2}
         ops.remove_task(k2, delete_files=True)
-        ck.check(os.path.isdir(outside), "目录名 != 任务键 → 拒绝删除（D9）")
+        ck.check(os.path.isdir(outside)
+                 and os.path.isfile(os.path.join(outside, "user.bin")),
+                 "目录名 != 任务键 → 拒绝删除（D9）")
         shutil.rmtree(outside)
 
         # 无 rec 有 task（重启后句柄失效残留）：也删清单
@@ -797,6 +803,70 @@ def section_promote_cross_restart(ck):
         shutil.rmtree(ws, ignore_errors=True)
 
 
+def section_remove_wrapup(ck):
+    ck.section("§K 删任务回绕：孤儿 fastresume + 拒删空目录收尾（F2/F3）")
+    ws, cache, dl, reg, ses, sched, ops, persist = mk_env()
+    try:
+        from core.resume import resume_dir, resume_path
+        os.makedirs(resume_dir(cache), exist_ok=True)
+
+        # ---- F2：真 fastresume 文件 → remove_task(delete_files=False) → 回收
+        rp = os.path.join(resume_dir(cache), f"{IH}.fastresume")
+        with open(rp, "wb") as f:
+            f.write(b"d4:infod4:name4:demoee")
+        add_rec(reg, IH, download=True, save_path=os.path.join(dl, IH),
+                result="R")
+        reg.tasks[IH] = {"info_hash": IH, "save_path": os.path.join(dl, IH)}
+        ck.check(os.path.isfile(rp), "前置：fastresume 已落盘（真 tempfile 目录）")
+        ck.check(ops.remove_task(IH, delete_files=False) is True,
+                 "remove_task(delete_files=False) 成功")
+        ck.check(not os.path.exists(rp),
+                 "F2：删任务后孤儿 fastresume 被回收（不再泄漏）")
+
+        # ---- F2 负例：注册表仍有同 key 记录 → 绝不误删其续传数据
+        rp2 = os.path.join(resume_dir(cache), f"{IH2}.fastresume")
+        with open(rp2, "wb") as f:
+            f.write(b"d4:infod4:name4:liveee")
+        add_rec(reg, IH2, download=True, save_path=os.path.join(dl, IH2))
+        ops._delete_orphan_resume(IH2)
+        ck.check(os.path.isfile(rp2),
+                 "F2：同 key 记录仍在 → 保留 fastresume（不误删活任务续传）")
+        # 非法键（临时键 tmp-<id>）：不拼 resume 路径（ValueError 防线）
+        ops._delete_orphan_resume("tmp-123456")
+        ck.check(True, "F2：临时键安全跳过（resume_path 不因非法 ih 掀翻）")
+
+        # ---- F3：D9 守卫拒删（目录名 != 任务键）后空目录被 rmdir 收尾
+        k = "5" * 40
+        d = os.path.join(dl, "MyDir")      # save_subdir 语义：目录名 != 任务键
+        os.makedirs(d, exist_ok=True)
+        add_rec(reg, k, download=True, save_path=d)
+        reg.tasks[k] = {"info_hash": k, "save_path": d}
+        ck.check(ops.remove_task(k, delete_files=True) is True,
+                 "remove_task(delete_files=True) 成功")
+        ck.check(not os.path.isdir(d),
+                 "F3：拒删分支里空目录被 rmdir 收尾（不留残留空目录）")
+
+        # ---- F3：拒删分支 + 非空目录（含用户文件）→ 原样保留（守卫不放宽）
+        k2 = "6" * 40
+        d2 = os.path.join(dl, "MyDirShared")
+        os.makedirs(d2, exist_ok=True)
+        with open(os.path.join(d2, "user.bin"), "wb") as f:
+            f.write(b"keep-me")            # 共享目录里的非种子用户文件
+        add_rec(reg, k2, download=True, save_path=d2)
+        reg.tasks[k2] = {"info_hash": k2, "save_path": d2}
+        ops.remove_task(k2, delete_files=True)
+        ck.check(os.path.isdir(d2)
+                 and os.path.isfile(os.path.join(d2, "user.bin")),
+                 "F3：非空目录原样保留（守卫保护共享目录用户文件）")
+        shutil.rmtree(d2, ignore_errors=True)
+
+        # ---- F2+F3 复合：键名合法 → fastresume 回收与目录收尾互不影响
+        ck.check(resume_path(cache, IH).endswith(f"{IH}.fastresume"),
+                 "resume_path 复用 core.resume 既有函数（未拼字符串）")
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
 def main() -> int:
     ck = ts.Checker("taskops_test（阶段 4 任务 CRUD 专项）")
     ck.section("core/taskops.py 专项验收（假句柄 + 真注册表，不联网）")
@@ -808,6 +878,7 @@ def main() -> int:
     section_focus(ck)
     section_tasks(ck)
     section_facade(ck)
+    section_remove_wrapup(ck)
     section_lifecycle(ck)
     section_promote_cross_restart(ck)
     return ck.report()
