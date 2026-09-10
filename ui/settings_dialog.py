@@ -92,11 +92,15 @@ class SettingsDialog(QDialog):
         self.clear_on_exit.setChecked(bool(cfg.get("clear_cache_on_exit")))
         form.addRow("", self.clear_on_exit)
 
-        # 阶段 A A4：退出清理可能要数秒（GB 级 .preview 的 rmtree），关窗后
-        # 已异步化——给用户一句预期说明。样式由阶段 B 的 #fieldNote QSS 统一
-        # 给（此处不写内联样式，保持「色值只在 ui/theme.py」的约定）。
+        # 阶段 A A4 + 审查 Minor 10（文案诚实化）：关窗收尾已异步化——给用户
+        # 一句预期说明即可，**不要**把「清理缓存要数秒」写成已证事实：实测
+        # 200MB 缓存 rmtree 仅约 15ms；退出时的几秒来自 session.shutdown
+        # （2s join + 最多 3s fastresume drain）+ 会话析构 + server.shutdown
+        # ≈0.5s，与缓存大小基本无关。只承诺「有进度显示」，不承诺耗时时长。
+        # 样式由阶段 B 的 #fieldNote QSS 统一给（此处不写内联样式，保持
+        # 「色值只在 ui/theme.py」的约定）。
         exit_note = QLabel("勾选后退出时会清理预览缓存"
-                           "（大文件可能需要几秒，退出界面会显示进度）")
+                           "（退出界面会显示进度）")
         exit_note.setObjectName("fieldNote")
         exit_note.setWordWrap(True)
         form.addRow("", exit_note)

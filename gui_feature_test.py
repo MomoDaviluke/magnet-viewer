@@ -903,6 +903,12 @@ def main() -> int:
     # 不得触发配额（也不得重复 begin 预览）。
     print("\n[4f] 画廊切换未下载文件触发缓存配额（A2）")
     from core.models import TorrentFile as _TF  # noqa: E402
+    # I2 整改（阶段 A 审查）：主窗口在 [4b-3] 已被**真正关窗**（_shutdown_started
+    # 置真），而 _on_gallery_file 现带「停机窗口守卫」会首行早退。本段把「已关
+    # 窗口」当**游离载体**复用来测画廊逻辑（不另起真会话/真流服务），故临时复位
+    # 守卫标志——纯测试装置，不改产品语义（用例结束原样恢复）。
+    _saved_started = w._shutdown_started
+    w._shutdown_started = False
     _orig_start = w.session.start_preview
     _orig_preview_file = w._preview_file
     quota_calls, started = [], []
@@ -924,6 +930,7 @@ def main() -> int:
     finally:
         w.session.start_preview = _orig_start
         w._preview_file = _orig_preview_file
+        w._shutdown_started = _saved_started   # 还原守卫标志（见本段开头注释）
 
     # ---------------------------------------------------------------- [5] 清理
     print("\n[5] 收尾")

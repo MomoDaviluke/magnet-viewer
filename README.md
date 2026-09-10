@@ -187,6 +187,7 @@ magnet-viewer/
 |--------|------|
 | `contract_check.py`：对外契约自检（23 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist·session·registry·taskops·resolver·preview 签名 / states·registry 常量取值 / TaskRecord 字段集 / fetcher 别名全 property 结构 / R-4 UI 无私有直写 / CACHE_MARKER 常量）—— **169 项通过** | 通过（秒级，不启会话） |
 | `theme_check.py`：**主题门禁**（R1 `ui/*.py`（除 theme.py）零 hex 色值 / R2 零 `setStyleSheet` 调用 / R3 theme.py 导出约定 token 与非空 QSS） | 通过（5 项，秒级；故意破坏时退出码 1） |
+| `close_lag_test.py`：**关窗异步化与硬超时**（实测 51 项 0 FAIL）——首次 `close()` <200ms 且窗口仍可见 / 遮罩可见 / 后台收尾各一次且 **C1 快照确取自 shutdown 之前**（关前登记活任务目录 + 替身 shutdown 复刻「清空注册表」，事后取必空）/ **硬超时自动触发**（`SHUTDOWN_HARD_TIMEOUT_MS` 实例覆盖 300ms，仅驱动事件循环即关窗）/ 停机窗口内 **22 个入口与桥回调全部守卫早退**（含源码 AST 清点表）/ **遮罩像素级绘制断言**（采样点 RGB 20,22,26→12,14,18）+ 随 resize 跟动 / `closeEvent` 逆常回退（遮罩/线程抛异常仍能关窗）/ 窗口期内重复关闭幂等 | 通过（约 6s，offscreen；7 项关键实现各做过「先红」反向验证） |
 | `ui_shot.py`：UI 截图工具（offscreen，四张 PNG 供改造前后人工对照） | 通过（01-empty / 02-files / 03-preview / 04-downloads） |
 | `persist_test.py`：**第一阶段持久化专项**（假依赖，不启会话/不联网）——纯函数路径卫生、任务清单原子写与失败不扩散、fastresume 请求/归属、退出清理（有界等待·幂等重发·临时键 tmp-<id> 不再掀翻 drain）、启动恢复九组（无 resume / resume 有效 / resume 损坏 / .torrent / 来源失效 / add 失败 / 暂停·停止·完成 / 元数据就绪 / 目录冲突）、Facade 委托接线 —— **91 项通过** | 通过（1.6s） |
 | `session_test.py`：第二阶段会话核心专项（假依赖）——会话配置纯函数 / start 端口冲突回退与恢复异常不阻断 / 代理限速热更新 / shutdown 四步（remove_torrent(handle,0) 绝不删用户数据·有界 join·drain 恰一次）/ 五类告警分发 / per-task 看门狗（记录级超时·四态过滤·文案取数 D5）/ sweep 节流 / alert 循环整批韧性 / Facade 真接线 —— **78 项通过** | 通过（0.7s） |
@@ -265,6 +266,13 @@ libtorrent 限速器与本地大块通道的交互问题、不在应用层可控
 
 ## 已知限制（如实说明）
 
+- **关窗收尾与硬超时**：关闭窗口后收尾跑在后台线程（会话停机 2s join + 最多 3s
+  fastresume drain + 会话析构 + 停流服务 ≈0.5s，实测合计约 3.8s），界面显示
+  「正在保存并退出」遮罩、不会假死；但 **10 秒硬超时**到点会强制关窗并结束进程
+  ——此时后台收尾线程（daemon）可能被**中途结束**，最新一次续传状态
+  （fastresume）可能来不及落盘，下次启动会按更早的 `.resume` 续传或对未确认分块
+  重新校验。退出时清理预览缓存本身很快（实测 200MB 的 rmtree 约 15ms），**不是**
+  收尾耗时的主因。
 - **冷门资源**：磁力链必须存在在线 Peer 才能拿到元数据；0 做种资源会超时（默认 90 秒）。这是协议本质限制。
 - **种子版本**：支持 v1 与 v1+v2 混合种子（BEP-52），info_hash 分别按 SHA-1 / SHA-256 计算。**纯 v2 种子**（仅含 `file tree`）暂不支持，解析时会给出明确提示。
 - **纯函数单元测试**：六个重构专项（persist/session/registry/taskops/resolver/preview，共 367 项）以假依赖覆盖纯函数与分支路径，不启会话、秒级完成；混合 v2 × 两条入口的端到端矩阵仍待补（见 REVIEW.md §四）。
