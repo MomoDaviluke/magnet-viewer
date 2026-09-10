@@ -118,7 +118,8 @@ class PreviewScheduler:
        再按播放顺序预约分块；
     3. 窗口块数按**字节预算**换算（``window_pieces``），窗口内
        ``set_piece_deadline`` 按序号**递增**（``DEADLINE_STEP_MS``）——
-       连续前缀先到齐，尾窗排在头窗之后；
+       连续前缀先到齐；**尾部入口块提前**到头窗头几块并行（阶段 2.5），
+       其余尾块仍排在头窗之后；
     4. tick() 周期性根据已完成字节向前滚动预约窗口，并在整尾窗未齐时持续
        补拉（入口就绪不取消整尾窗）；
     5. 开播门控看 ``tail_entry_ready``（最末 2MB），不看 ``tail_ready``（整尾窗）。
@@ -141,23 +142,33 @@ class PreviewScheduler:
     # ---------- 尾部索引窗口（moov） ----------
 
     def _request_tail(self) -> None:
-        """预约尾部索引窗口，deadline **排在头窗之后**（幂等）。
+        """预约尾部索引窗口（幂等）：**入口块提前**，其余尾块排在头窗之后。
 
-        deadline = ``n_head*STEP + 1000 + j*STEP``：尾部 moov 是开播前提，
-        但只占小块、不是播放消费的数据——旧实现把头窗与尾窗同置 ASAP(0)，
-        4.1GB 文件 44MB 尾窗要与顺序前缀抢带宽且必须整窗就绪才开门控，
-        在 2.4MB/s 下仅尾窗就 ≈18s（plan/07 阶段 1）。
+        阶段 2.5 起「入口块」（``_entry_pieces`` = 文件最后 ``min(2MB, size)``
+        覆盖的块，moov 所在的最末块）的 deadline 提到 ``DEADLINE_STEP_MS``
+        ——与头窗第 2 块同级：**开播门控必需的两块是「头第 1 块 + 尾入口」**，
+        它们应当并行尽早到齐。阶段 2 实测 4.1GB / 4MB 块 / 2MB/s 下门控
+        19.0s = 「头 8.0s + 入口 11.0s」——入口被排在**整个头窗**（4 块 =
+        16MB ≈ 8s）之后白白多等一个头窗；提前后门控 ≈「头块就绪 + 3s 内」。
 
-        plan/07 阶段 2 起尾窗已按字节收敛（4.1GB 44MB → ≈10MB）、门控只看
-        「尾部入口」（``tail_entry_ready``，最末 2MB），本方法仍负责把**整尾窗**
-        排在头窗之后持续预约——入口就绪不取消它，moov 大于入口时靠它兜底。
+        权衡：**只提前入口、不提前整尾窗**。入口只需 ``min(2MB, size)``
+        （4MB 块下 1 块），抢占代价可忽略；**整尾窗**（4.1GB ≈10MB = 3 块）
+        仍排在头窗之后（``n_head*STEP + 1000 + j*STEP``），由 ``tick()``
+        持续补拉——它是 moov 大于入口时的兜底，若一并提前会与顺序前缀抢
+        带宽、破坏「头窗保序」（``playback_window_test §B``）。
+
+        注：``_entry_pieces`` 是 ``_tail_pieces`` 的后缀（正常几何），循环仍只
+        遍历 ``_tail_pieces``，故单批预约块数不受入口数量影响。
         """
         if not self._tail_pieces or self.handle is None:
             return
         base = self._head_n * DEADLINE_STEP_MS + 1000
+        entry = set(self._entry_pieces)
         for j, p in enumerate(self._tail_pieces):
+            ms = (DEADLINE_STEP_MS if p in entry
+                  else base + j * DEADLINE_STEP_MS)
             try:
-                self.handle.set_piece_deadline(p, base + j * DEADLINE_STEP_MS)
+                self.handle.set_piece_deadline(p, ms)
             except Exception as e:
                 log_warning("scheduler.request_tail", f"piece={p}: {e}")
 

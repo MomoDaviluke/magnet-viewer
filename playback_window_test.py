@@ -15,7 +15,7 @@
    起顺序取块——保证连续前缀先到齐，不再全 0 洪泛；
 3. 尾部 moov 窗口的 deadline 排在头窗之后（``n_head*STEP + 1000 + j*STEP``）。
 
-修复（阶段 2，本次）：
+修复（阶段 2）：
 4. 尾窗按**字节**收敛：``tail_window_bytes(size)`` =
    ``min(size, max(2MB, 0.25%·size), 16MB)``——4.1GB 从 44MB（11 块）→
    ≈10MB（3 块）、1GB → ≈2.5MB、500MB 及以下 → 2MB 下限、小文件不超自身；
@@ -23,18 +23,28 @@
    ``min(2MB, size)`` 覆盖块，4MB 块下仅最末 1 块），不再等整尾窗；
    ``tail_ready()``（整尾窗）保留但只用于 tick() 继续补拉的判据。
 
+修复（阶段 2.5，本次）：**入口块的 deadline 提前**到头窗头几块并行的位置。
+阶段 2 实测 4.1GB / 4MB 块 / 2MB/s 下门控 36.0s→19.0s，但 19.0s = 「头 8.0s
++ 入口 11.0s」——入口块被排在**整个头窗（4 块 = 16MB ≈8s）之后**，而门控
+其实只需要「头第 1 块 + 尾入口」两块。把入口块（``_entry_pieces``）的
+deadline 提到 ``DEADLINE_STEP_MS``（与头窗第 2 块同级），其余尾块仍排在头窗
+之后——只提前入口、不提前整尾窗（入口仅 min(2MB,size)，抢占代价可忽略；
+整尾窗提前会与顺序前缀抢带宽、破坏 §B 的头窗保序）。目标：门控 ≈「头块
+就绪 + 3s 内」。
+
 A/B 实验（300MB / 4MB 块 / 做种端限 1MB/s）：现状头 1 块就绪 14.0s，
 本策略 9.0s（-36%），t=13s 已连续 8MB。
 
 段：
 - §A window_pieces：按字节换算 + 上下限夹取 + 非法块长兜底
 - §B begin：4MB 块头窗恰 4 块、deadline 严格递增（不再全 0）
-- §C 尾窗 deadline 严格大于头窗最大 deadline
+- §C 入口块提前到头窗并行、其余尾块仍严格大于头窗最大 deadline（阶段 2.5）
 - §D request_range：仍 ≤ LOOKAHEAD_PIECES 上限，但 deadline 递增
 - §E seek_to_byte：从新位置重建窗口且 deadline 递增
 - §F tail_window_bytes：按比例收敛 + 上下限夹取（4.1GB ≈10MB）
 - §G tail_piece_window：4.1GB / 4MB 块尾窗 11 块 → 3 块
-- §H tail_entry_ready：只下最末 min(2MB,size) 覆盖块即就绪，且不取消整尾窗
+- §H tail_entry_ready：只下最末 min(2MB,size) 覆盖块即就绪，且不取消整尾窗，
+     入口 deadline 提前到头窗并行（阶段 2.5）
 
 退出码：0=通过，1=失败，2=SKIP（依赖缺失，绝不假装通过）。
 """
@@ -151,6 +161,14 @@ def _head(dl: list[tuple[int, int]], n: int) -> list[tuple[int, int]]:
     return out
 
 
+def _eff(dl: list[tuple[int, int]]) -> dict[int, int]:
+    """同一块可能被 ``begin``/``tick`` 重复预约：取**最后一次**（生效值）。"""
+    out: dict[int, int] = {}
+    for p, m in dl:
+        out[p] = m
+    return out
+
+
 # --------------------------------------------------------------------------
 
 def section_window_pieces(ck):
@@ -201,18 +219,32 @@ def section_begin(ck):
 
 
 def section_tail(ck):
-    ck.section("§C 尾窗 deadline 严格大于头窗最大 deadline")
-    s, h, f = mk(4 * MB, 64)          # 尾窗 [15] 未就绪 → 持续补拉
+    ck.section("§C 入口块提前到头窗并行；其余尾块仍排在头窗之后（阶段 2.5）")
+    # 8GB / 4MB：尾窗 4 块 [2044..2047]，入口 = 仅末块 2047——同时存在
+    # 「入口」与「其余尾块」，才能既验证提前、又验证整尾窗不提前。
+    s, h, f = mkf(4 * MB, 8 * 1024 * MB)
     s.begin(h, f)
-    tail = [(p, m) for p, m in h.deadlines if p == f.end_piece]
-    head = _head([(p, m) for p, m in h.deadlines if p != f.end_piece], 4)
-    ck.check(bool(tail), "尾窗已预约（.mp4 家族先拉 moov）")
+    eff = _eff(h.deadlines)
+    head = _head(h.deadlines, 4)
+    head_max = max(m for _, m in head)
+    entry_m = eff.get(f.end_piece)
+    rest = [(p, m) for p, m in eff.items()
+            if p in s._tail_pieces and p != f.end_piece]
     ck.check(bool(head), "头窗已预约")
-    ck.check(min(m for _, m in tail) > max(m for _, m in head),
-             f"尾窗 deadline {[m for _, m in tail]} > 头窗最大 "
-             f"{max(m for _, m in head)}（探测 moov 让位于顺序前缀）")
-    ck.check(min(m for _, m in tail) >= 4 * sch.DEADLINE_STEP_MS + 1000,
-             f"尾窗基值 ≥ n_head*STEP + 1000（实际 {min(m for _, m in tail)}）")
+    ck.check(entry_m is not None, "尾部入口已预约（.mp4 家族先拉 moov）")
+    ck.check(entry_m == sch.DEADLINE_STEP_MS,
+             f"入口块 deadline == DEADLINE_STEP_MS（{sch.DEADLINE_STEP_MS}，"
+             f"与头窗第 2 块并行；实际 {entry_m}）")
+    ck.check(bool(rest) and min(m for _, m in rest) > head_max,
+             f"其余尾块 deadline {sorted(m for _, m in rest)} 仍 > 头窗最大 "
+             f"{head_max}（整尾窗不提前，不与顺序前缀抢带宽）")
+    ck.check(bool(rest) and min(m for _, m in rest)
+             >= s._head_n * sch.DEADLINE_STEP_MS + 1000,
+             f"其余尾块基值 ≥ n_head*STEP + 1000（实际 "
+             f"{min((m for _, m in rest), default=None)}）")
+    ck.check(entry_m is not None and bool(rest)
+             and entry_m < min(m for _, m in rest),
+             "入口块早于其余尾块（入口=门控必需，整尾窗只是兜底）")
 
 
 def section_range(ck):
@@ -350,12 +382,16 @@ def section_entry(ck):
              f"4.1GB：入口 {len(s2._entry_pieces)} 块 / 整尾窗 "
              f"{len(s2._tail_pieces)} 块（旧式 11 块需整窗齐）")
 
-    # 入口 deadline 仍排在头窗之后（§C 同源，入口不是插队块）
-    tail = [(p, m) for p, m in h2.deadlines if p == f2.end_piece]
-    head = _head([(p, m) for p, m in h2.deadlines if p != f2.end_piece], 4)
-    ck.check(bool(tail) and bool(head)
-             and min(m for _, m in tail) > max(m for _, m in head),
-             "尾部入口 deadline 仍晚于头窗（moov 让位于顺序前缀）")
+    # 入口 deadline 提前到头窗头几块并行（阶段 2.5）：门控必需的「头第 1 块 +
+    # 尾入口」两块应当尽早到齐；入口只占 min(2MB, size)，抢占代价可忽略。
+    eff2 = _eff(h2.deadlines)
+    head2 = _head([(p, m) for p, m in h2.deadlines if p != f2.end_piece], 4)
+    ck.check(eff2.get(f2.end_piece) == sch.DEADLINE_STEP_MS,
+             f"尾部入口 deadline == DEADLINE_STEP_MS 与头窗并行（实际 "
+             f"{eff2.get(f2.end_piece)}）")
+    ck.check(bool(head2)
+             and eff2.get(f2.end_piece) <= max(m for _, m in head2),
+             "入口不再排在头窗之后（阶段 2.5 提前，旧「尾窗排后」契约更新）")
 
     # 非 moov 尾部家族（.mkv）无入口 → 恒就绪（不需要尾部即可开播）
     s3, h3, f3 = mkf(4 * MB, 8 * 1024 * MB, path="movie/big.mkv")
