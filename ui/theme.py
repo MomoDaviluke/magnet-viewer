@@ -13,8 +13,17 @@
 - 自绘控件（BufferedSlider / 下载进度委托等）必须**在绘制时**读模块属性
   （``import ui.theme as theme`` 后 ``theme.SLIDER_SEGMENT``），不得
   `from ui.theme import X` 固化导入期快照，否则切主题后颜色不跟随。
+- 下拉框/微调框右侧「分区 + 箭头」**全部交给 QSS 子控件**（``::drop-down`` /
+  ``::up-button`` / ``::down-button`` + ``image: url(<SVG>)``）：几何由样式引擎
+  计算，不会像自绘那样算错位。箭头资源在 ``ui/assets/``，路径由
+  :func:`asset_path` 解析（兼容 PyInstaller 的 ``sys._MEIPASS``）。
 """
 from __future__ import annotations
+
+import os
+import sys
+
+from core.logutil import log_warning
 
 # ---- 调色板（键固定：两套键集完全一致）----
 # 固定 17 键：bg / bg_panel / bg_input / bg_hover / bg_selected / border /
@@ -23,7 +32,8 @@ from __future__ import annotations
 # 渲染扩展 4 键：alt_row（交替行底色）/ image_bg（图片位图占位底色）/
 #            bg_pressed（按钮按下底：比 hover 深一档，做出"按下去"的层次）/
 #            bg_compartment（下拉框·微调框**右侧分区**底：浅色 = hover 档、
-#            深色 = 比面板亮一档；由 ui/style.py 在绘制层现读，见 ui/style.py）
+#            深色 = 比面板亮一档；由 ui/theme.py 的 QSS 子控件规则直接引用，
+#            见 `QComboBox::drop-down` / `QSpinBox::up-button`）
 LIGHT: dict = {
     "bg": "#f4f5f7",            # 窗口底
     "bg_panel": "#ffffff",      # 面板 / 卡片
@@ -103,9 +113,76 @@ FS_CAPTION, FS_BODY, FS_TITLE, FS_DISPLAY = 13, 14, 16, 20
 FONT_NUMERIC = '"Consolas", "Microsoft YaHei UI"'
 
 
+# ---- 输入类控件的**总高**：下拉分区的显式高度必须等于它 ----
+# Qt 样式表**不支持百分比长度**（实测 `height: 100%` 被解析成 **100px**、
+# `height: 50%` → 50px —— `%` 被当 px 吃掉），所以分区高度只能写绝对像素，
+# 而绝对像素必须等于「控件总高」才铺得满。为让这个常量恒成立，把控件的
+# **内容高**用 min/max-height 钉死，总高随即确定（= 内容高 + 上下 padding +
+# 上下 border）。实测（离屏 Fusion / windows11 / windowsvista 三套样式同值，
+# 见 gui_feature_test 的「声明高度 == 实测高度」断言）：
+#     独立控件（padding 7、border 1）：内容 30 → 总高 46
+#     分组框内（padding 5、border 1）：内容 26 → 总高 38
+# 微调框与下拉框用**同一组内容高**（min == max 钉死）：总高因此完全相同
+# （独立 46 / 分组框 38），且都是**偶数** —— 基样式把微调的 up/down 按控件高
+# 对半分，总高为奇数时中间会空出 1px（露出输入底色）→ 分隔线下方多一条浅线。
+# 实测（min == max 时总高 = 内容高 + 上下 padding + 上下 border，算术精确）：
+#     独立微调：内容 30 → 总高 46（偶，无缝）；29 → 45（奇，缝在 y=22）
+#     分组框微调：内容 26 → 总高 38（偶，无缝）；25 → 37（奇，缝在 y=18）
+# ⇒ 内容高必须取**偶数**。
+FIELD_CONTENT_H = 30        # 独立输入类内容高（min == max，微调/下拉同高 46）
+FIELD_PAD_V = 7             # 独立输入类上下 padding
+FIELD_H = FIELD_CONTENT_H + 2 * FIELD_PAD_V + 2           # 46（控件总高 = 分区高）
+FIELD_CONTENT_H_GB = 26     # QGroupBox 内内容高（更紧凑，总高 38）
+FIELD_PAD_V_GB = 5
+FIELD_H_GB = FIELD_CONTENT_H_GB + 2 * FIELD_PAD_V_GB + 2  # 38（控件总高 = 分区高）
+
+# ---- 箭头资源（ui/assets/*.svg；12×12 视窗雪佛龙，描边色 = 对应主题 text_muted）----
+# 浅色描边 #5b6472 = LIGHT["text_muted"]，深色 #99a1ae = DARK["text_muted"]。
+ASSET_CHEVRON_DOWN = "chevron-down-{tag}.svg"
+ASSET_CHEVRON_UP = "chevron-up-{tag}.svg"
+# 打包自检用：spec 的 datas 必须包含这 4 个（两份 spec 同步）
+ASSET_FILES: tuple = ("chevron-down-light.svg", "chevron-up-light.svg",
+                      "chevron-down-dark.svg", "chevron-up-dark.svg")
+
+
+def asset_path(name: str) -> str:
+    """解析 ``ui/assets/<name>`` 的绝对路径（兼容 PyInstaller 冻结包）。
+
+    - 冻结（``sys._MEIPASS`` 存在）：``<_MEIPASS>/ui/assets/<name>``
+      （onefile 解包目录 / onedir 的 ``_internal``）；
+    - 源码运行：本文件同级的 ``assets/<name>``。
+
+    文件不存在时 ``log_warning``——**打包后自检靠它**：资源漏进 datas 会
+    在这里留下 WARNING，而不是静默画不出箭头（静默失败是历史教训，
+    见 core/logutil.py 的模块说明）。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        path = os.path.join(meipass, "ui", "assets", name)
+    else:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets", name)
+    if not os.path.isfile(path):
+        log_warning("ui.theme.asset_path", f"箭头资源缺失：{name} -> {path}")
+    return path
+
+
+def asset_url(name: str) -> str:
+    """``image: url()`` 用的路径串：正斜杠 + 双引号包裹（QSS 不接受反斜杠）。"""
+    return 'url("%s")' % asset_path(name).replace("\\", "/")
+
+
+def _asset_tag(palette: dict) -> str:
+    """色板 → 资源后缀（light / dark）。qss() 只会拿到 LIGHT/DARK 本体。"""
+    return "dark" if palette is DARK else "light"
+
+
 def qss(palette: dict) -> str:
     """按传入色板生成全局 QSS（纯函数；``QSS`` = qss(当前激活色板)）。"""
     p = palette
+    tag = _asset_tag(palette)
+    chev_down = asset_url(ASSET_CHEVRON_DOWN.format(tag=tag))
+    chev_up = asset_url(ASSET_CHEVRON_UP.format(tag=tag))
     return f"""
 * {{ outline: none; }}
 QWidget {{ background: {p['bg']}; color: {p['text']}; font-size: {FS_BODY}px; }}
@@ -167,24 +244,64 @@ QTabBar::tab:hover:!selected {{ color: {p['text']}; background: {p['bg_hover']};
 /* ---------- 输入类 ---------- */
 QLineEdit, QPlainTextEdit, QSpinBox, QComboBox {{
     background: {p['bg_input']}; color: {p['text']}; border: 1px solid {p['border']};
-    border-radius: {R_MD}px; padding: 7px 10px; min-height: 30px;
+    border-radius: {R_MD}px; padding: {FIELD_PAD_V}px 10px; min-height: {FIELD_CONTENT_H}px;
     selection-background-color: {p['accent']}; }}
+/* 把输入类**总高钉死**（min == max）：下拉分区的显式高度是绝对像素
+   （= 控件总高，见文件上方 FIELD_* 常量），控件高度必须可预测；内容高取
+   **偶数**，总高才是偶数 —— 微调的 up/down 由基样式按控件高对半分，奇数
+   总高会在中间留 1px 接缝。微调与下拉同高（46），观感统一。 */
+QComboBox {{ max-height: {FIELD_CONTENT_H}px; }}
+QSpinBox {{ min-height: {FIELD_CONTENT_H}px; max-height: {FIELD_CONTENT_H}px; }}
 QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QComboBox:focus {{
     border: 1px solid {p['accent']}; }}
-/* 下拉/微调箭头：**这里故意不写任何 ::drop-down / ::down-arrow / up-button 规则**。
-   实测（见 .workbuddy/2026-09-10 打磨记录）：Qt 样式表引擎里只要存在这些子控件规则，
-   QStyleSheetStyle 就不再转发 PE_IndicatorArrowDown / PE_IndicatorSpinUp/Down 给基样式，
-   箭头要么被画成方块（旧 CSS 三角 hack：width:0;height:0;border-* transparent），
-   要么整根消失。保持静默 → 交给 ui/style.py 的 ChevronStyle 在绘制层画细雪佛龙
-   （颜色绘制时现读 ui.theme，热切换跟随；离屏 fusion 与真机 windows11 双平台实测被调用）。 */
 QComboBox QAbstractItemView {{ background: {p['bg_panel']};
     border: 1px solid {p['border_strong']}; padding: {SP_XS}px;
     selection-background-color: {p['bg_selected']}; color: {p['text']}; }}
 QComboBox QAbstractItemView::item {{ min-height: 28px; }}
-/* 下拉/微调右侧分区（"下拉分区"）由 ui/style.py 的 ChevronStyle 在绘制层画：
-   分区底 = bg_compartment，分隔线 = border，箭头内缩到分区中心。
-   QSS 里 **不能**有 ::drop-down / ::down-arrow / ::up-button 规则（会让
-   QStyleSheetStyle 停止转发箭头 primitive，见上方说明）。 */
+
+/* ---------- 下拉 / 微调右侧「按钮」区：QSS 子控件 + SVG 箭头 ----------
+   上一轮用 QProxyStyle 自算几何画分区/箭头，实测算错位（分区只盖住右上角一角、
+   箭头不垂直居中、微调上下半之间的分隔线跑到框外）。本轮**废弃自绘几何**，
+   改回 Qt 标准做法：分区（`::drop-down` / `::up-button` / `::down-button`）
+   与箭头（`::down-arrow` / `::up-arrow`）全部由 QSS 声明，几何由样式引擎按
+   控件矩形计算 → 不会错位；箭头用 `image:` 指向 ui/assets 的 SVG 雪佛龙
+   （Qt 支持 image，不支持 CSS 三角 border hack——那才是更早那版变灰方块的根因）。
+
+   规格统一（下拉与微调**同宽 / 同底 / 同圆角 / 同箭头**）：
+     · 分区宽 26px、subcontrol-origin: border、贴右上（微调下半贴右下）
+     · **下拉分区的 height 必须显式写死 = 控件总高**（46 / 分组框内 38）：
+       上一版只写 width 不写 height，把分区高度交给 QStyleSheetStyle 的默认
+       子控件矩形——那是「锚在右上角的小块」观感的来源（高度没铺满、箭头随之
+       偏上）。Qt 不认百分比，所以高度写成绝对像素，并用 min == max 把控件
+       总高钉死（见文件上方 FIELD_* 常量），杜绝漂移。
+     · 底色 bg_compartment；hover 转 bg_hover
+     · 分隔线（微调的 up 底边 / 下拉的左边）1px 实色 border
+     · 圆角与输入框同档（R_MD=8）：下拉右侧两角、微调上半右上角/下半右下角
+     · 箭头**两处同为 12×12**（一致性：两张 PNG 截图里下拉与微调的箭头包围盒
+       必须逐像素等大；上一轮 12/10 混用本身就"两套样子不一致"）
+   **微调上下按钮不写百分比高度**：Qt 样式表不认百分比长度（实测「百分比 50%」
+   被当成 50px → up 高 51px、down 从 y=-1 起，分隔线被推出控件外——正是要
+   消灭的那类错位）。省掉高度交给基样式按控件矩形对半分，上下严丝合缝。 */
+QComboBox::drop-down {{ subcontrol-origin: border; subcontrol-position: top right;
+    width: 26px; height: {FIELD_H}px; background: {p['bg_compartment']};
+    border-left: 1px solid {p['border']};
+    border-top-right-radius: {R_MD}px; border-bottom-right-radius: {R_MD}px; }}
+/* 分组框内输入类更矮（总高 38）：分区高度同步，否则分区会比控件矮 */
+QGroupBox QComboBox::drop-down {{ height: {FIELD_H_GB}px; }}
+QComboBox::drop-down:hover {{ background: {p['bg_hover']}; }}
+QComboBox::down-arrow {{ image: {chev_down}; width: 12px; height: 12px; }}
+QSpinBox::up-button {{ subcontrol-origin: border; subcontrol-position: top right;
+    width: 26px; background: {p['bg_compartment']};
+    border-left: 1px solid {p['border']}; border-bottom: 1px solid {p['border']};
+    border-top-right-radius: {R_MD}px; }}
+QSpinBox::up-button:hover {{ background: {p['bg_hover']}; }}
+QSpinBox::down-button {{ subcontrol-origin: border; subcontrol-position: bottom right;
+    width: 26px; background: {p['bg_compartment']};
+    border-left: 1px solid {p['border']};
+    border-bottom-right-radius: {R_MD}px; }}
+QSpinBox::down-button:hover {{ background: {p['bg_hover']}; }}
+QSpinBox::up-arrow {{ image: {chev_up}; width: 12px; height: 12px; }}
+QSpinBox::down-arrow {{ image: {chev_down}; width: 12px; height: 12px; }}
 
 /* ---------- 滑块 / 进度 ---------- */
 QSlider {{ background: transparent; min-height: 22px; }}
@@ -247,17 +364,24 @@ QGroupBox::title {{ subcontrol-origin: margin; left: {SP_MD}px;
 /* 分组框内的表单行更紧凑（设置面板 19 行，每行省 8px ≈ 省下 150px 总高；
    仅 QGroupBox 后代命中，主窗口控件不受影响） */
 QGroupBox QLineEdit, QGroupBox QSpinBox, QGroupBox QComboBox {{
-    padding: 5px 9px; min-height: 26px; }}
+    padding: {FIELD_PAD_V_GB}px 9px; min-height: {FIELD_CONTENT_H_GB}px; }}
+/* 分组框内同样把总高**钉死**：下拉与微调都是 38（= 分区高度常量 FIELD_H_GB）；
+   内容高取**偶数**（26）→ 总高偶数 → 基样式对半分不留 1px 接缝。
+   实测：内容 26 → 总高 38（偶，无缝）/ 25 → 37（奇，缝在 y=18）。 */
+QGroupBox QComboBox {{ max-height: {FIELD_CONTENT_H_GB}px; }}
+QGroupBox QSpinBox {{ min-height: {FIELD_CONTENT_H_GB}px;
+    max-height: {FIELD_CONTENT_H_GB}px; }}
 QGroupBox QPushButton {{ padding: 5px 12px; min-height: 26px; }}
 /* 复选框/单选：**必须显式 background: transparent**。全局 `QWidget {{ background:
    BG }}` 会把复选框整行涂成窗口灰底（浅色 {p['bg']}）贴在白卡片上 → 一条灰带
    （用户反馈"设置面板复选框行灰带"的根因：QLabel 早就单独声明了 transparent，
     QCheckBox/QRadioButton 漏了）。
-   注意：**不写 ::indicator 子控件规则**——与箭头同理，只要出现该规则，
+   注意：**不为复选框/单选写 ::indicator 子控件规则**——一旦出现该规则，
    QStyleSheetStyle 就不再转发 PE_IndicatorCheckBox/RadioButton 给基样式
    （实测：加了 width/height 甚至 background:transparent 都会让勾选框整块消失），
-   指示器改由 ui/style.py 的 ChevronStyle 在绘制层自绘（16×16 圆角方框 +
-   accent 实底 + 白对勾，颜色绘制时现读色板 → 热切主题跟随）。 */
+   指示器改由 ui/style.py 自绘（16×16 圆角方框 + accent 实底 + 白对勾，
+   颜色绘制时现读色板 → 热切主题跟随）。箭头**不**走这条路：箭头用
+   `image:` 是 QSS 原生支持的能力（上面 ::drop-down 一组规则），无需自绘。 */
 QCheckBox, QRadioButton {{ background: transparent; border: none;
     spacing: {SP_SM}px; min-height: 26px; }}
 /* 禁用态文案转三级灰：复选框的**指示器**由 ui/style.py 自绘为灰底灰勾，

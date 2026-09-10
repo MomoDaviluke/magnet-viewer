@@ -39,6 +39,21 @@ datas = collect_data_files("PySide6", includes=[
     "plugins/imageformats/*",
 ])
 
+# UI 箭头资源（ui/assets/*.svg）：下拉/微调右侧「按钮」区的箭头由 QSS
+# `image: url(<绝对路径>)` 读取（ui.theme.asset_path），**不打包就画不出箭头**
+# （asset_path 会写 WARNING 日志，界面静默缺图）。目标路径必须与源码布局一致
+# ——bundle 内 `ui/assets/<name>`，asset_path 按 `sys._MEIPASS/ui/assets` 找。
+# 两份 spec（onedir + onefile）必须同步；缺文件在构建期直接失败。
+import os as _os
+
+UI_ASSETS = ("chevron-down-light.svg", "chevron-up-light.svg",
+             "chevron-down-dark.svg", "chevron-up-dark.svg")
+for _name in UI_ASSETS:
+    _src = _os.path.join("ui", "assets", _name)
+    if not _os.path.isfile(_src):
+        raise SystemExit(f"[spec] 缺少 UI 箭头资源：{_src}")
+    datas.append((_src, _os.path.join("ui", "assets")))
+
 a = Analysis(
     ["main.py"],
     pathex=["."],
