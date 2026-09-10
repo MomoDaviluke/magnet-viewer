@@ -372,6 +372,13 @@ def main() -> int:
         w.cache_dir = cache_c
         try:
             w.close()
+            # 阶段 A（plan A2）：close 已异步化——顺序断言必须等后台收尾跑完，
+            # 否则读数随线程调度抖动（旧实现同步阻塞，close() 返回即已排序）。
+            _t0 = time.time()
+            while (not getattr(w, "_shutdown_done", False)
+                   and time.time() - _t0 < 6):
+                app.processEvents()
+                time.sleep(0.02)
             app.processEvents()
         finally:
             w.session._sess.shutdown = orig_sd
@@ -650,29 +657,40 @@ def main() -> int:
 
     # (b) closeEvent 的 clear_cache_on_exit 只读一次配置（双读合并；False 时
     # 也不再白算名单）。计数探针包住 cfg.get。
+    # 阶段 A（plan A2）：close 已异步化**且幂等**——上面那次 close 已把 `w`
+    # 真正关掉（_shutting_down 置真），对它的第二次 close 走幂等早退、根本
+    # 不读配置。故本段另起一个窗口，测「真实首次关窗恰好读一次」。
+    # 等待 _shutdown_done 的语义同旧实现：close() 返回前读完 → 现在读在
+    # 后台 worker 里，必须等它跑完再收网（断言本意不变：**恰好一次**）。
+    w_b = MainWindow()
     reads: list[str] = []
-    _orig_get = w.cfg.get
+    _orig_get = w_b.cfg.get
     def _spy_get(key):
         if key == "clear_cache_on_exit":
             reads.append(key)
         return _orig_get(key)
-    w.cfg.get = _spy_get
-    _orig_sd = w.session._sess.shutdown
-    _orig_srv = w.server.shutdown
-    _orig_clear2 = w._clear_preview_cache_now
-    w.session._sess.shutdown = lambda: None
-    w.server.shutdown = lambda: None
-    w._clear_preview_cache_now = lambda keep_dirs=(), log_key="": None
+    w_b.cfg.get = _spy_get
+    _orig_sd = w_b.session._sess.shutdown
+    _orig_srv = w_b.server.shutdown
+    _orig_clear2 = w_b._clear_preview_cache_now
+    w_b.session._sess.shutdown = lambda: None
+    w_b.server.shutdown = lambda: None
+    w_b._clear_preview_cache_now = lambda keep_dirs=(), log_key="": None
     try:
-        w.show()                        # closeEvent 只在可见窗口上派发
+        w_b.show()                      # closeEvent 只在可见窗口上派发
         app.processEvents()
-        w.close()
+        w_b.close()
+        _t0 = time.time()
+        while (not getattr(w_b, "_shutdown_done", False)
+               and time.time() - _t0 < 6):
+            app.processEvents()
+            time.sleep(0.02)
         app.processEvents()
     finally:
-        w.cfg.get = _orig_get
-        w.session._sess.shutdown = _orig_sd
-        w.server.shutdown = _orig_srv
-        w._clear_preview_cache_now = _orig_clear2
+        w_b.cfg.get = _orig_get
+        w_b.session._sess.shutdown = _orig_sd
+        w_b.server.shutdown = _orig_srv
+        w_b._clear_preview_cache_now = _orig_clear2
     check(len(reads) == 1,
           f"closeEvent 单次读 clear_cache_on_exit（实读 {len(reads)} 次）")
 

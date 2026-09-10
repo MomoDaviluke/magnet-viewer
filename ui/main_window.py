@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 
 from PySide6.QtCore import (QObject, QTimer, QStringListModel, Qt, QUrl,
                             Signal)
 from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (QCompleter, QFileDialog, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QMainWindow,
-                               QMessageBox, QPushButton, QTabWidget,
-                               QVBoxLayout, QWidget)
+                               QMessageBox, QProgressBar, QPushButton,
+                               QTabWidget, QVBoxLayout, QWidget)
 
 from core.cache_guard import (clear_cache_contents, ensure_cache_dir,
                               guard_ok_for_cleanup)
@@ -189,6 +190,13 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)  # 拖拽 .torrent 文件 / magnet 文本进窗口直接解析
         self._wire_signals()
         self._setup_timers()
+        # ---- 关窗异步化（plan 阶段 A A2）：阻塞收尾移入后台线程 ----
+        self._shutting_down = False       # 已真正关窗（避免重复进入）
+        self._shutdown_stage = ""         # 后台线程写的进度文案（GUI 轮询读取）
+        self._shutdown_done = False       # 后台线程完成标志
+        self._shutdown_overlay = None
+        self._shutdown_label = None
+        self._shutdown_timer = None
 
     def _setup_core(self):
         """core 侧装配：缓存目录 → 会话 → 日志 → 流服务回调（P2-3 分段）。"""
@@ -888,8 +896,23 @@ class MainWindow(QMainWindow):
 
     # ---------- 关闭 ----------
 
-    def closeEvent(self, event):
+    # 硬超时：后台收尾卡死时也必须能真正关掉（plan A2）
+    SHUTDOWN_HARD_TIMEOUT_MS = 10000
+
+    def _shutdown_worker(self) -> None:
+        """关闭收尾（**后台线程**执行）：快照 → 停会话 → 停流服务 → 可选清缓存。
+
+        为什么要异步：session.shutdown() 内有 2s join + 最多 3s fastresume
+        drain，还有 remove_torrent/session 析构的磁盘 flush，加上清理 GB
+        级 .preview 的 rmtree——全部在 GUI 线程做就是「关闭卡死」。
+        C1 铁律不变：保护名单快照必须在 shutdown 之前取。
+
+        本方法运行在后台线程：**绝不碰任何 QWidget**，只写
+        ``self._shutdown_stage`` 字符串（进度文案由 GUI 线程的
+        ``_poll_shutdown`` 更新）；完成标志 ``self._shutdown_done`` 同理。
+        """
         try:
+            self._shutdown_stage = "正在保存任务状态…"
             # D4b：clear_cache_on_exit 单读（旧实现在名单快照与清理分支
             # 各读一次——双读之间设置被改会「快照了却不清理/清理了没快照」
             # 的错拍，且 False 时白算一遍 protected_dirs()）。
@@ -899,6 +922,7 @@ class MainWindow(QMainWindow):
             exit_clear = bool(self.cfg.get("clear_cache_on_exit"))
             exit_keep = self._live_cache_dirs() if exit_clear else set()
             self.session.shutdown()
+            self._shutdown_stage = "正在停止流服务…"
             self.server.shutdown()
             if exit_clear:
                 # 决策 D8：退出清理只清预览缓存，downloads/（用户下载数据）
@@ -908,7 +932,79 @@ class MainWindow(QMainWindow):
                 # **之后**执行，但保护名单用 shutdown **之前**的快照——
                 # convert 转正任务目录（.preview/<ih>）连同内容跳过：清单与
                 # .resume 保留、重启 restore 续传，文件不被删光（防互噬）。
+                self._shutdown_stage = "正在清理预览缓存…"
                 self._clear_preview_cache_now(
                     keep_dirs=exit_keep, log_key="main.close.clear_cache")
+        except Exception as e:
+            log_warning("main.shutdown_worker", f"{e}")
         finally:
+            self._shutdown_done = True
+
+    def closeEvent(self, event):
+        """关闭：阻塞工作交给后台线程，GUI 只显示遮罩并轮询（plan A2）。
+
+        第一次 ``close()``：忽略事件 → 停周期轮询 → 起遮罩 + 后台线程 +
+        100ms 轮询 + 10s 硬超时；后台完成或硬超时后置 ``_shutting_down``
+        再 ``close()`` 一次，此时直接放行。窗口在遮罩期间始终可响应，
+        不会出现 Windows 的「未响应」白屏。
+        """
+        if self._shutting_down:
             super().closeEvent(event)
+            return
+        event.ignore()
+        if self._shutdown_overlay is None:
+            # 停掉周期轮询：会话正在后台停机，700ms 状态刷新会打到半死的
+            # 会话/字符串判据上；旧实现阻塞在 GUI 线程，天然不存在这段
+            # 窗口期，异步化后必须显式停（关窗后也不再需要状态显示）。
+            for t in (getattr(self, "_status_timer", None),
+                      getattr(self, "_cache_timer", None)):
+                if t is not None:
+                    t.stop()
+            self._show_shutdown_overlay()
+            threading.Thread(target=self._shutdown_worker,
+                             daemon=True).start()
+            self._shutdown_timer = QTimer(self)
+            self._shutdown_timer.setInterval(100)
+            self._shutdown_timer.timeout.connect(self._poll_shutdown)
+            self._shutdown_timer.start()
+            QTimer.singleShot(self.SHUTDOWN_HARD_TIMEOUT_MS, self._force_close)
+
+    def _show_shutdown_overlay(self):
+        """半透明遮罩 + 一行进度文案（居中），盖住 centralWidget。"""
+        ov = QWidget(self)
+        ov.setObjectName("shutdownOverlay")
+        lay = QVBoxLayout(ov)
+        lay.setAlignment(Qt.AlignCenter)
+        self._shutdown_label = QLabel("正在保存并退出…")
+        self._shutdown_label.setObjectName("shutdownLabel")
+        self._shutdown_label.setAlignment(Qt.AlignCenter)
+        bar = QProgressBar()
+        bar.setObjectName("shutdownBar")
+        bar.setRange(0, 0)          # 不确定进度
+        bar.setFixedWidth(260)
+        bar.setFixedHeight(6)
+        lay.addWidget(self._shutdown_label, 0, Qt.AlignHCenter)
+        lay.addWidget(bar, 0, Qt.AlignHCenter)
+        ov.setGeometry(self.centralWidget().geometry())
+        ov.raise_()
+        ov.show()
+        self._shutdown_overlay = ov
+
+    def _poll_shutdown(self):
+        """GUI 线程轮询（100ms）：刷新进度文案；后台完成则真正关窗。"""
+        if self._shutdown_label is not None and self._shutdown_stage:
+            self._shutdown_label.setText(self._shutdown_stage)
+        if self._shutdown_done:
+            self._force_close()
+
+    def _force_close(self):
+        """真正关窗（后台完成 / 硬超时共用）。"""
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        try:
+            if self._shutdown_timer is not None:
+                self._shutdown_timer.stop()
+        except Exception:
+            pass
+        self.close()

@@ -90,6 +90,15 @@ class SettingsDialog(QDialog):
         self.clear_on_exit.setChecked(bool(cfg.get("clear_cache_on_exit")))
         form.addRow("", self.clear_on_exit)
 
+        # 阶段 A A4：退出清理可能要数秒（GB 级 .preview 的 rmtree），关窗后
+        # 已异步化——给用户一句预期说明。样式由阶段 B 的 #fieldNote QSS 统一
+        # 给（此处不写内联样式，保持「色值只在 ui/theme.py」的约定）。
+        exit_note = QLabel("勾选后退出时会清理预览缓存"
+                           "（大文件可能需要几秒，退出界面会显示进度）")
+        exit_note.setObjectName("fieldNote")
+        exit_note.setWordWrap(True)
+        form.addRow("", exit_note)
+
         self.cache_limit = QSpinBox()
         self.cache_limit.setRange(0, 1048576)
         self.cache_limit.setSuffix(" MB")

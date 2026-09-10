@@ -1,7 +1,10 @@
-"""18 套测试回归运行器：一键全量回归，汇总退出码。
+"""19 套测试回归运行器：一键全量回归，汇总退出码。
 
 依据 README.md 退出码约定与 t4_acceptance_plan.md 回归契约（D4）：
-下载管理模块改造后必须保证 8 套旧测试全绿（0=通过 / 1=失败 / 2=SKIP）。
+- 下载管理模块改造后必须保证 8 套旧测试全绿（0=通过 / 1=失败 / 2=SKIP）。
+
+末位 `close_lag_test`（plan 阶段 A）守关闭路径：首次 close() 必须 <200ms
+返回、遮罩可见、后台收尾各动作恰好一次、硬超时兜底可达、重复关闭幂等。
 
 套件构成：第 1 套 `contract_check` 为对外契约自检（秒级，不启会话；
 拆分 `core/fetcher.py` 期间用它守住 23 个公开接口与协作模块签名）；
@@ -13,7 +16,7 @@ SKIP 判定（REVIEW-2026-09 P0-3）：部分套件因依赖缺失显式跳过�
 绝不能打印「回归全绿」。
 
 用法：
-    python regression_run.py            # 全量 18 套
+    python regression_run.py            # 全量 19 套
     python regression_run.py smoke      # 单套（按名字前缀匹配）
 
 退出码：任一测试 FAIL(1) → 本脚本退出 1；全部通过(0) → 0；
@@ -49,6 +52,7 @@ SUITES = [
     "qt_stream_open_test",
     "download_mgr_test",
     "cache_mode_e2e_test",  # plan/06 缓存模式真链路：转正/续传/清理保护（真 libtorrent）
+    "close_lag_test",       # plan 阶段 A：关窗异步化（遮罩/后台收尾/硬超时兜底）
 ]
 
 NAME = {
