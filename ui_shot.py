@@ -12,6 +12,8 @@
     04-downloads 下载页：任务列表 + 详情（演示数据，不连网、不起真实下载）
     05-settings  设置对话框：四个分组（界面/网络与代理/缓存与预览/下载）+ 中文按钮
                  （真构造 SettingsDialog，不 exec 模态；高度 = 内容自然高度）
+    05b-settings-zoom  05 的 3× 放大裁剪（只裁微调框右侧分区 + 复选框行）：
+                 像素级核对分区底/分隔线/雪佛龙内缩、复选框行无灰带、指示器配色
 
 为什么不是空壳截图：改造前版本只截了空窗口，看不出配色/控件/字号改动。本工具
 用 ``test_support.build_payload`` 造离线载荷（1 大视频 + 2 图 + 1 文本），
@@ -33,7 +35,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import libtorrent as lt                                # noqa: E402
-from PySide6.QtCore import QItemSelectionModel, QPointF, QRectF, Qt  # noqa: E402
+from PySide6.QtCore import (QItemSelectionModel, QPoint, QPointF, QRect,  # noqa: E402
+                            QRectF, Qt)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QImage,  # noqa: E402
                            QLinearGradient, QPainter)
 from PySide6.QtWidgets import QApplication             # noqa: E402
@@ -270,6 +273,25 @@ def main() -> int:
         app.processEvents()
         paths.append(_shot(app, dlg, out, SHOTS[4]))  # 05 设置面板
         settings_h = dlg.height()
+
+        # 05b 放大裁剪（3×）：只裁「微调框 / 下拉右侧分区」与「复选框行」两处，
+        # 便于控制方按像素核对本轮改动（分区底/分隔线/雪佛龙内缩、复选框行
+        # 不再有灰带、指示器 accent 实底 + 白对勾）。用 QWidget.grab(QRect)。
+        _spin = dlg.proxy_port
+        _cb = dlg.proxy_peer
+        _so = _spin.mapTo(dlg, QPoint(0, 0))
+        _co = _cb.mapTo(dlg, QPoint(0, 0))
+        _top = max(0, min(_so.y(), _co.y()) - 6)
+        _bot = min(dlg.height(), max(_so.y() + _spin.height(),
+                                     _co.y() + _cb.height()) + 6)
+        _crop = dlg.grab(QRect(16, _top, dlg.width() - 32, _bot - _top)).toImage()
+        _zoom = _crop.scaled(_crop.width() * 3, _crop.height() * 3,
+                             Qt.IgnoreAspectRatio, Qt.FastTransformation)
+        _zp = os.path.join(out, "05b-settings-zoom.png")
+        _zoom.save(_zp)
+        paths.append(_zp)
+        print("saved", _zp, _crop.width(), "x", _crop.height(), "-> 3x")
+
         dlg.close()
         dlg.deleteLater()
 

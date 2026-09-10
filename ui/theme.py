@@ -20,8 +20,10 @@ from __future__ import annotations
 # 固定 17 键：bg / bg_panel / bg_input / bg_hover / bg_selected / border /
 #            border_strong / text / text_muted / text_dim / accent /
 #            accent_hover / accent_pressed / ok / warn / danger / segment
-# 渲染扩展 3 键：alt_row（交替行底色）/ image_bg（图片位图占位底色）/
-#            bg_pressed（按钮按下底：比 hover 深一档，做出"按下去"的层次）
+# 渲染扩展 4 键：alt_row（交替行底色）/ image_bg（图片位图占位底色）/
+#            bg_pressed（按钮按下底：比 hover 深一档，做出"按下去"的层次）/
+#            bg_compartment（下拉框·微调框**右侧分区**底：浅色 = hover 档、
+#            深色 = 比面板亮一档；由 ui/style.py 在绘制层现读，见 ui/style.py）
 LIGHT: dict = {
     "bg": "#f4f5f7",            # 窗口底
     "bg_panel": "#ffffff",      # 面板 / 卡片
@@ -43,6 +45,7 @@ LIGHT: dict = {
     "segment": (0, 0, 0, 40),   # 缓冲分段（半透明黑）
     "alt_row": "#f3f5f8",       # 交替行（须与面板底可辨；旧 #fafbfc 对比过弱）
     "image_bg": "#eceef1",      # 图片查看器占位底（浅版）
+    "bg_compartment": "#eef0f3",   # 下拉/微调右侧分区底（浅：与 hover 同档）
 }
 DARK: dict = {
     "bg": "#14161a",
@@ -65,6 +68,7 @@ DARK: dict = {
     "segment": (255, 255, 255, 46),  # 缓冲分段（半透明白）
     "alt_row": "#232833",            # 交替行（旧 #1f232a 与面板底几乎同色）
     "image_bg": "#101216",           # 图片查看器占位底（深版，保持原值）
+    "bg_compartment": "#2b313b",     # 右侧分区底（深：比面板 #1b1e24 亮一档）
 }
 
 PALETTES: dict = {"light": LIGHT, "dark": DARK}
@@ -81,6 +85,7 @@ _CONST_NAMES: dict = {
     "accent": "ACCENT", "accent_hover": "ACCENT_HOVER",
     "accent_pressed": "ACCENT_PRESSED", "ok": "OK", "warn": "WARN",
     "danger": "DANGER", "segment": "SLIDER_SEGMENT",
+    "bg_compartment": "BG_COMPARTMENT",
 }
 
 # ---- 与主题无关的固定值 ----
@@ -176,6 +181,10 @@ QComboBox QAbstractItemView {{ background: {p['bg_panel']};
     border: 1px solid {p['border_strong']}; padding: {SP_XS}px;
     selection-background-color: {p['bg_selected']}; color: {p['text']}; }}
 QComboBox QAbstractItemView::item {{ min-height: 28px; }}
+/* 下拉/微调右侧分区（"下拉分区"）由 ui/style.py 的 ChevronStyle 在绘制层画：
+   分区底 = bg_compartment，分隔线 = border，箭头内缩到分区中心。
+   QSS 里 **不能**有 ::drop-down / ::down-arrow / ::up-button 规则（会让
+   QStyleSheetStyle 停止转发箭头 primitive，见上方说明）。 */
 
 /* ---------- 滑块 / 进度 ---------- */
 QSlider {{ background: transparent; min-height: 22px; }}
@@ -234,14 +243,32 @@ QLabel#statusState {{ color: {p['text']}; font-size: {FS_CAPTION}px; }}
 QGroupBox {{ border: 1px solid {p['border']}; border-radius: {R_LG}px;
     margin-top: 10px; padding-top: 8px; background: {p['bg_panel']}; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: {SP_MD}px;
-    padding: 0 {SP_XS}px; color: {p['text_muted']}; }}
+    padding: 0 {SP_XS}px; color: {p['text_muted']}; font-weight: 600; }}
 /* 分组框内的表单行更紧凑（设置面板 19 行，每行省 8px ≈ 省下 150px 总高；
    仅 QGroupBox 后代命中，主窗口控件不受影响） */
 QGroupBox QLineEdit, QGroupBox QSpinBox, QGroupBox QComboBox {{
     padding: 5px 9px; min-height: 26px; }}
 QGroupBox QPushButton {{ padding: 5px 12px; min-height: 26px; }}
-QCheckBox, QRadioButton {{ spacing: {SP_SM}px; min-height: 26px; }}
-QCheckBox::indicator, QRadioButton::indicator {{ width: 16px; height: 16px; }}
+/* 复选框/单选：**必须显式 background: transparent**。全局 `QWidget {{ background:
+   BG }}` 会把复选框整行涂成窗口灰底（浅色 {p['bg']}）贴在白卡片上 → 一条灰带
+   （用户反馈"设置面板复选框行灰带"的根因：QLabel 早就单独声明了 transparent，
+    QCheckBox/QRadioButton 漏了）。
+   注意：**不写 ::indicator 子控件规则**——与箭头同理，只要出现该规则，
+   QStyleSheetStyle 就不再转发 PE_IndicatorCheckBox/RadioButton 给基样式
+   （实测：加了 width/height 甚至 background:transparent 都会让勾选框整块消失），
+   指示器改由 ui/style.py 的 ChevronStyle 在绘制层自绘（16×16 圆角方框 +
+   accent 实底 + 白对勾，颜色绘制时现读色板 → 热切主题跟随）。 */
+QCheckBox, QRadioButton {{ background: transparent; border: none;
+    spacing: {SP_SM}px; min-height: 26px; }}
+/* 禁用态文案转三级灰：复选框的**指示器**由 ui/style.py 自绘为灰底灰勾，
+   但文字颜色 QSS 不管的话仍是正文色 → 看起来像还能点（设置面板"直连"档
+   会一次禁用 5 个控件）。 */
+QCheckBox:disabled, QRadioButton:disabled {{ color: {p['text_dim']}; }}
+/* 表单里的"行容器"（路径输入框 + 浏览… 按钮）：同样是普通 QWidget，会被全局
+   QWidget 规则涂成窗口灰底 → 统一命名 #formRow 后显式透明。
+   不用 `QGroupBox QWidget` 兜底：后代选择器在 Qt QSS 里特异性高于 `QLineEdit`
+   /`QComboBox`，会把输入控件自己的底也刷成透明（误伤）。 */
+QWidget#formRow {{ background: transparent; }}
 QVideoWidget {{ background: {VIDEO_BG}; }}
 QMessageBox {{ background: {p['bg_panel']}; }}
 QMessageBox QLabel {{ background: transparent; }}
@@ -272,6 +299,7 @@ OK = LIGHT["ok"]
 WARN = LIGHT["warn"]
 DANGER = LIGHT["danger"]
 SLIDER_SEGMENT = LIGHT["segment"]
+BG_COMPARTMENT = LIGHT["bg_compartment"]
 
 _ACTIVE_MODE = DEFAULT_MODE
 QSS = qss(LIGHT)

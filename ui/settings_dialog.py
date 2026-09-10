@@ -1,14 +1,20 @@
 """设置对话框：界面 / 网络与代理 / 缓存与预览 / 下载（四个分组）。
 
-布局约定（打磨轮，用户反馈「太高、字散、按钮突兀」）：
-- 四个 ``QGroupBox`` 区块，每块一个 ``QFormLayout``：``setSpacing(10)``、
-  ``setContentsMargins(12, 12, 12, 12)``、``AllNonFixedFieldsGrow``（输入控件
-  拉满宽度）、标签右对齐垂直居中；
-- 内容整体放进 ``QScrollArea``：内容自然高度超过屏幕时自动出滚动条，
-  小屏幕上不再出现「按钮被挤出屏幕」的尴尬；
+布局约定（v3 打磨轮，用户反馈「还是没改好」后按控制方定位的三条根因修）：
+- 四个 ``QGroupBox`` 区块，每块一个 ``QGridLayout``：两列 —— 标签列
+  （``setColumnMinimumWidth(0, LABEL_COL_MIN)`` + 右对齐）与控件列
+  （``setColumnStretch(1, 1)``）。**四组用同一套列宽**，标签列天然对齐
+  （v2 每组独立 ``QFormLayout``，列宽各算各的，四组标签参差不齐）；
+  复选框 / 说明行跨两列（``columnSpan=2``），不再留空标签列。
+- 组内间距 / 内边距 / 卡片间距全部走 ``ui.theme`` 的间距 token（SP_*），无魔法数：
+  卡片间距 12、组内行列间距 8、组内上下内边距 12。
+- 内容整体放进 ``QScrollArea``：内容自然高度超过屏幕时自动出滚动条；
 - 底部按钮行右下角对齐、间距 12；按钮文案中文（保存 / 取消）；
-- 路径类输入框设完文本后 ``setCursorPosition(0)``——用户看到的是路径**开头**
-  （改造前光标停在末尾，只看得见最后一段目录名）。
+- 路径类输入框设完文本后 ``setCursorPosition(0)``（看得到路径起点）并挂
+  ``setToolTip(完整路径)``（随内容更新，长路径被截断时可悬停看全）；
+- 「代理类型 = 不使用代理（直连）」时，主机 / 端口 / 账号 / 密码 / Peer 五个
+  控件联动禁用（灰显），切回 SOCKS5/HTTP 自动恢复可用 —— 直连下这些字段
+  本来就无意义，可编辑只会误导。
 """
 from __future__ import annotations
 
@@ -16,7 +22,7 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
-                               QDialogButtonBox, QFileDialog, QFormLayout,
+                               QDialogButtonBox, QFileDialog, QGridLayout,
                                QFrame, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPushButton,
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
@@ -25,11 +31,15 @@ from core.cache_guard import (CACHE_MARKER, clear_cache_contents,
                               ensure_cache_dir, guard_ok_for_cleanup)
 from core.cache_mode import PREVIEW_CACHE_MODES
 from core.config import AppConfig
-from ui.theme import SP_LG, SP_MD, SP_XL, THEME_MODES, apply_theme
+from ui.theme import (SP_LG, SP_MD, SP_SM, THEME_MODES, apply_theme)
 
 PROXY_LABELS = [("none", "不使用代理（直连）"),
                 ("socks5", "SOCKS5"),
                 ("http", "HTTP")]
+
+# 需要代理才可编辑的控件（直连时五个一起禁用）
+PROXY_FIELDS = ("proxy_host", "proxy_port", "proxy_user", "proxy_pass",
+                "proxy_peer")
 
 # 阶段 D D2（plan/06 阶段 B 裁掉的 UI）：预览缓存模式下拉的显示文案。
 # 值域逐字取 core.cache_mode.PREVIEW_CACHE_MODES——顺序即下拉顺序，
@@ -48,19 +58,41 @@ THEME_LABELS = {
     "system": "跟随系统 System（随 Windows 深浅色自动切换）",
 }
 
-FORM_SPACING = 10           # 表单行距（打磨轮统一收紧）
-FORM_MARGINS = (12, 12, 12, 12)   # 分组内边距
-BUTTON_SPACING = 12         # 右下角保存/取消间距
+# ---- 布局 token（全部取自 ui.theme 的 8px 网格，禁止魔法数）----
+GRID_SPACING = SP_SM                    # 组内行 / 列间距 = 8
+GRID_MARGINS = (SP_MD, SP_MD, SP_MD, SP_MD)   # 组内上下左右内边距 = 12
+LABEL_COL_MIN = 112                     # 标签列最小宽（四组一致 → 列宽对齐）
+CARD_SPACING = SP_MD                    # 四张分组卡片之间的间距 = 12
+BUTTON_SPACING = SP_MD                  # 右下角保存 / 取消间距 = 12
 
 
-def _form() -> QFormLayout:
-    """四个分组共用的表单规格（间距/边距/增长策略/标签对齐一次定义）。"""
-    f = QFormLayout()
-    f.setSpacing(FORM_SPACING)
-    f.setContentsMargins(*FORM_MARGINS)
-    f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-    f.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-    return f
+def _grid() -> QGridLayout:
+    """四个分组共用的网格规格（列宽 / 间距 / 边距 / 拉伸一次定义）。
+
+    ``setColumnMinimumWidth(0, LABEL_COL_MIN)`` 让**四组标签列等宽**
+    （v2 每组各算各的 QFormLayout，标签列参差不齐）；``setColumnStretch(1, 1)``
+    让控件列吃掉剩余宽度；复选框/说明行用 ``columnSpan=2`` 跨两列。
+    """
+    g = QGridLayout()
+    g.setSpacing(GRID_SPACING)
+    g.setContentsMargins(*GRID_MARGINS)
+    g.setColumnMinimumWidth(0, LABEL_COL_MIN)
+    g.setColumnStretch(1, 1)
+    return g
+
+
+def _add_row(grid: QGridLayout, row: int, label: str, field) -> QLabel:
+    """一条「标签 + 控件」行：标签右对齐落在标签列，控件落在控件列。"""
+    lab = QLabel(label)
+    lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    grid.addWidget(lab, row, 0)
+    grid.addWidget(field, row, 1)
+    return lab
+
+
+def _add_span(grid: QGridLayout, row: int, widget) -> None:
+    """复选框 / 说明行：跨两列（不留空标签列，也就不会有灰带残留）。"""
+    grid.addWidget(widget, row, 0, 1, 2)
 
 
 def _note(text: str) -> QLabel:
@@ -72,11 +104,34 @@ def _note(text: str) -> QLabel:
 
 
 def _path_edit(text: str, placeholder: str) -> QLineEdit:
-    """路径类输入框：初始光标停在**开头**（用户要看得到路径起点）。"""
+    """路径类输入框：初始光标停在**开头** + 悬停显示完整路径。
+
+    长路径在输入框里会被截断（光标停在开头只能看到前半段），
+    tooltip 随 ``textChanged`` 实时更新成完整值，悬停即可看全。
+    """
     edit = QLineEdit(text)
     edit.setPlaceholderText(placeholder)
     edit.setCursorPosition(0)
+    edit.setToolTip(text)
+    edit.textChanged.connect(edit.setToolTip)
     return edit
+
+
+def _path_row(edit: QLineEdit, button: QPushButton) -> QWidget:
+    """路径行容器：输入框 + 浏览… 按钮。
+
+    容器是普通 ``QWidget``——全局 ``QWidget {{ background: BG }}`` 会把它涂成
+    窗口灰底（贴在白卡片上就是一条灰带），故命名 ``#formRow`` 由 QSS 声明透明
+    （见 ui/theme.py）。
+    """
+    holder = QWidget()
+    holder.setObjectName("formRow")
+    lay = QHBoxLayout(holder)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(SP_SM)
+    lay.addWidget(edit, 1)
+    lay.addWidget(button)
+    return holder
 
 
 class SettingsDialog(QDialog):
@@ -110,7 +165,7 @@ class SettingsDialog(QDialog):
         self._content = QWidget()
         cl = QVBoxLayout(self._content)
         cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(SP_MD)
+        cl.setSpacing(CARD_SPACING)
         for group in (g_ui, g_net, g_cache, g_dl):
             cl.addWidget(group)
         cl.addWidget(note)
@@ -144,10 +199,12 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SP_LG, SP_LG, SP_LG, SP_LG)
-        layout.setSpacing(SP_MD)
+        layout.setSpacing(CARD_SPACING)
         layout.addWidget(scroll, 1)
         # 右下角：保存 / 取消（间距 12，右对齐）
         layout.addWidget(buttons, 0, Qt.AlignRight)
+        # 代理字段启用态联动（初值即按当前代理类型算好）
+        self._sync_proxy_state()
         self.resize(max(600, self.sizeHint().width()), self._fit_height())
 
     # ---------- 分组构造 ----------
@@ -159,7 +216,7 @@ class SettingsDialog(QDialog):
 
     def _group_ui(self) -> QGroupBox:
         box = QGroupBox("界面")
-        form = _form()
+        grid = _grid()
 
         # 双主题：界面主题下拉（值域 = ui.theme.THEME_MODES；保存即热切换）
         self.theme = QComboBox()
@@ -173,15 +230,15 @@ class SettingsDialog(QDialog):
             "深色 Dark：暗色界面（视频场景观感）；\n"
             "跟随系统 System：随 Windows 应用深浅色自动切换。\n"
             "**选择后点保存立即生效**，无需重启。")
-        form.addRow("界面主题", self.theme)
-        form.addRow("", _note("界面主题保存后立即生效（无需重启）："
-                              "「跟随系统」按 Windows 浅色/深色设置自动选择。"))
-        box.setLayout(form)
+        _add_row(grid, 0, "界面主题", self.theme)
+        _add_span(grid, 1, _note("界面主题保存后立即生效（无需重启）："
+                                 "「跟随系统」按 Windows 浅色/深色设置自动选择。"))
+        box.setLayout(grid)
         return box
 
     def _group_network(self) -> QGroupBox:
         box = QGroupBox("网络与代理")
-        form = _form()
+        grid = _grid()
 
         self.proxy_type = QComboBox()
         for value, label in PROXY_LABELS:
@@ -190,69 +247,72 @@ class SettingsDialog(QDialog):
         _cur = self.cfg.get("proxy_type")
         self.proxy_type.setCurrentIndex(
             max(0, _values.index(_cur) if _cur in _values else 0))
-        form.addRow("代理类型", self.proxy_type)
+        _add_row(grid, 0, "代理类型", self.proxy_type)
 
         self.proxy_host = QLineEdit(str(self.cfg.get("proxy_host")))
         self.proxy_host.setPlaceholderText("例如 127.0.0.1")
-        form.addRow("代理主机", self.proxy_host)
+        _add_row(grid, 1, "代理主机", self.proxy_host)
 
         self.proxy_port = QSpinBox()
         self.proxy_port.setRange(1, 65535)
         self.proxy_port.setValue(int(self.cfg.get("proxy_port")))
-        form.addRow("代理端口", self.proxy_port)
+        _add_row(grid, 2, "代理端口", self.proxy_port)
 
         self.proxy_user = QLineEdit(str(self.cfg.get("proxy_user")))
-        form.addRow("账号（可空）", self.proxy_user)
+        self.proxy_user.setPlaceholderText("可留空")
+        _add_row(grid, 3, "账号（可空）", self.proxy_user)
         self.proxy_pass = QLineEdit(str(self.cfg.get("proxy_pass")))
-        self.proxy_pass.setEchoMode(QLineEdit.Password)
-        form.addRow("密码（可空）", self.proxy_pass)
+        self.proxy_pass.setPlaceholderText("可留空")
+        self.proxy_pass.setEchoMode(QLineEdit.Password)   # 密码掩码（不回显明文）
+        _add_row(grid, 4, "密码（可空）", self.proxy_pass)
 
         self.proxy_peer = QCheckBox("Peer 连接也走代理（保护 IP 隐私，推荐勾选）")
         self.proxy_peer.setChecked(bool(self.cfg.get("proxy_peer")))
-        form.addRow("", self.proxy_peer)
+        _add_span(grid, 5, self.proxy_peer)
+
+        # 代理类型联动：直连时上面五个字段无意义 → 联动禁用（见 _sync_proxy_state）
+        self.proxy_type.currentIndexChanged.connect(self._sync_proxy_state)
 
         self.timeout = QSpinBox()
         self.timeout.setRange(30, 600)
         self.timeout.setValue(int(self.cfg.get("metadata_timeout")))
         self.timeout.setSuffix(" 秒")
-        form.addRow("磁力链元数据超时", self.timeout)
-        box.setLayout(form)
+        _add_row(grid, 6, "磁力链元数据超时", self.timeout)
+        box.setLayout(grid)
         return box
 
     def _group_cache(self) -> QGroupBox:
         box = QGroupBox("缓存与预览")
-        form = _form()
+        grid = _grid()
 
-        row = QHBoxLayout()
         self.cache_edit = _path_edit(
             str(self.cfg.get("cache_dir") or self.cache_dir),
             "留空 = 系统临时目录/magnet_viewer_cache（重启生效）")
         btn = QPushButton("浏览…")
         btn.clicked.connect(self._pick_dir)
-        row.addWidget(self.cache_edit, 1)
-        row.addWidget(btn)
-        form.addRow("缓存目录", row)
+        _add_row(grid, 0, "缓存目录", _path_row(self.cache_edit, btn))
 
         self.clear_on_exit = QCheckBox("退出时清理预览缓存")
         self.clear_on_exit.setChecked(bool(self.cfg.get("clear_cache_on_exit")))
-        form.addRow("", self.clear_on_exit)
+        _add_span(grid, 1, self.clear_on_exit)
 
         # 阶段 A A4 + 审查 Minor 10（文案诚实化）：关窗收尾已异步化——给用户
         # 一句预期说明即可，**不要**把「清理缓存要数秒」写成已证事实：实测
         # 200MB 缓存 rmtree 仅约 15ms；退出时的几秒来自 session.shutdown
         # （2s join + 最多 3s fastresume drain）+ 会话析构 + server.shutdown
         # ≈0.5s，与缓存大小基本无关。只承诺「有进度显示」，不承诺耗时时长。
-        form.addRow("", _note("勾选后退出时会清理预览缓存（退出界面会显示进度）"))
+        _add_span(grid, 2, _note("勾选后退出时会清理预览缓存"
+                                 "（退出界面会显示进度）"))
 
         self.cache_limit = QSpinBox()
         self.cache_limit.setRange(0, 1048576)
         self.cache_limit.setSuffix(" MB")
-        self.cache_limit.setSpecialValueText("不限制")
+        self.cache_limit.setSpecialValueText("不限制")   # 0 值显示"不限制"
         self.cache_limit.setValue(int(self.cfg.get("cache_limit_mb") or 0))
         self.cache_limit.setToolTip(
             "预览缓存超过此值时，自动按最久未活跃顺序清理旧预览数据；\n"
             "已下载文件（downloads/）不受影响。切换预览文件时生效。")
-        form.addRow("预览缓存上限", self.cache_limit)
+        _add_row(grid, 3, "预览缓存上限", self.cache_limit)
 
         # 阶段 D D2：预览缓存模式（convert=关预览自动转正继续缓存 / hold=冻结）
         self.cache_mode = QComboBox()
@@ -266,38 +326,36 @@ class SettingsDialog(QDialog):
             "继续缓存 = 自动转为持久下载任务，全量缓存到预览目录（推荐）；\n"
             "即暂停 = 冻结现有进度，恢复下载需手动添加任务。\n"
             "下次关闭预览时生效。")
-        form.addRow("预览缓存模式", self.cache_mode)
-        box.setLayout(form)
+        _add_row(grid, 4, "预览缓存模式", self.cache_mode)
+        box.setLayout(grid)
         return box
 
     def _group_download(self) -> QGroupBox:
         box = QGroupBox("下载")
-        form = _form()
+        grid = _grid()
 
         self.concurrency = QSpinBox()
         self.concurrency.setRange(1, 16)
         self.concurrency.setValue(int(self.cfg.get("default_concurrency")))
-        form.addRow("默认并发下载数", self.concurrency)
+        _add_row(grid, 0, "默认并发下载数", self.concurrency)
 
         self.rate_limit = QSpinBox()
         self.rate_limit.setRange(0, 1048576)
         self.rate_limit.setSuffix(" KB/s")
-        self.rate_limit.setSpecialValueText("不限")
+        self.rate_limit.setSpecialValueText("不限")       # 0 值显示"不限"
         self.rate_limit.setValue(int(self.cfg.get("download_rate_limit") or 0))
-        form.addRow("下载限速", self.rate_limit)
+        _add_row(grid, 1, "下载限速", self.rate_limit)
 
-        row_dl = QHBoxLayout()
         self.download_edit = _path_edit(str(self.cfg.get("download_dir")),
                                         "留空 = 缓存目录/downloads")
         btn_dl = QPushButton("浏览…")
         btn_dl.clicked.connect(self._pick_download_dir)
-        row_dl.addWidget(self.download_edit, 1)
-        row_dl.addWidget(btn_dl)
-        form.addRow("默认下载目录", row_dl)
+        _add_row(grid, 2, "默认下载目录",
+                 _path_row(self.download_edit, btn_dl))
 
         self.seed_after = QCheckBox("任务完成后继续做种")
         self.seed_after.setChecked(bool(self.cfg.get("seed_after_complete")))
-        form.addRow("", self.seed_after)
+        _add_span(grid, 3, self.seed_after)
 
         self.logging_enabled = QCheckBox(
             "启用运行日志（写入系统临时目录，用于排查问题）")
@@ -305,9 +363,27 @@ class SettingsDialog(QDialog):
         self.logging_enabled.setToolTip(
             "日志文件：%TEMP%\\magnet_viewer_logs\\magnet-viewer.log\n"
             "（单文件 1 MB，保留 3 份）。开关保存后立即生效。")
-        form.addRow("", self.logging_enabled)
-        box.setLayout(form)
+        _add_span(grid, 4, self.logging_enabled)
+        box.setLayout(grid)
         return box
+
+    # ---------- 联动 ----------
+
+    def proxy_fields(self) -> tuple:
+        """需要代理才可编辑的五个控件（直连时统一禁用；测试/门禁直接读它）。"""
+        return (self.proxy_host, self.proxy_port, self.proxy_user,
+                self.proxy_pass, self.proxy_peer)
+
+    def _sync_proxy_state(self, *_args) -> None:
+        """代理类型联动：非直连才允许编辑主机 / 端口 / 账号 / 密码 / Peer。
+
+        ``"none"``（不使用代理）时五个控件一起置灰——直连下这些字段本就
+        无意义，可编辑只会让人以为设置生效了。取值只认 ``currentData()``
+        （= PROXY_LABELS 的 value，与 core.config 存的值域逐字一致）。
+        """
+        enabled = self.proxy_type.currentData() != "none"
+        for widget in self.proxy_fields():
+            widget.setEnabled(enabled)
 
     # ---------- 尺寸 ----------
 

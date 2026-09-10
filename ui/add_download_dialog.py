@@ -2,7 +2,9 @@
 
 纯控件层：不触 SessionManager。调用方在 ``exec() == Accepted`` 后读取
 ``save_path() / priority() / seed_after_complete()`` 创建任务。
-样式仿 settings_dialog（QFormLayout + Save/Cancel + 浏览… 选择目录行）。
+样式与 settings_dialog 同一套设计系统（中文 保存/取消 + 浏览… 选择目录行 +
+SP_* 间距 token）；本对话框行数少，仍用 QFormLayout（设置面板四组因需要
+「四组标签列等宽」才改 QGridLayout）。
 """
 from __future__ import annotations
 
