@@ -523,6 +523,99 @@ def main() -> int:
           "不传注记：缓冲栏与基线文案一致")
     vp8.deleteLater()
 
+    # ---- [4b-6c] 缓存占用口径 + 开播门控文案（plan/07 阶段 3）----
+    # 真机用户看到「缓存 4.1 GB / 2.0 GB」——按**预分配尺寸**算，稀疏文件恒
+    # 等于文件大小（实际才下 59MB），既误导又像爆缓存。口径改用**已下载
+    # 字节**（file_progress 汇总）；预览缓存上限判定仍按目录占用（保守）。
+    # 开播门控文案区分「等数据」与「等索引块」（此前只有一句合并文案）。
+    print("\n[4b-6c] 缓存占用口径改已下载字节 + 门控文案区分（阶段 3）")
+    from core.cache_quota import downloaded_bytes  # noqa: E402
+    from ui.main_window import cache_usage_text  # noqa: E402
+    from ui.preview_player import (WAIT_BOTH, WAIT_DATA, WAIT_INDEX,  # noqa: E402
+                                   waiting_text)
+    _gi = 1024 ** 3
+    # 口径：file_progress 汇总（真机 59MB 场景不再显示预分配 4.1GB）
+    check(downloaded_bytes([59 * 1024 * 1024]) == 59 * 1024 * 1024,
+          "downloaded_bytes 汇总 = 已下载字节（59MB ≠ 预分配 4.1GB）")
+    check(downloaded_bytes([10, 20, 30]) == 60, "downloaded_bytes 多文件求和")
+    check(downloaded_bytes([]) == 0 and downloaded_bytes(None) == 0,
+          "downloaded_bytes 空/None → 0（无预览时口径安全）")
+    check(downloaded_bytes([-5, 7, None, "x"]) == 7,
+          "downloaded_bytes 非法项/负值容错（不产生负数占用）")
+    txt = cache_usage_text(59 * 1024 * 1024, 2 * _gi)
+    check("59.0 MB" in txt and "2.0 GB" in txt and "4.1 GB" not in txt,
+          f"有配额文案 = 已下载 / 上限（实得 {txt!r}）")
+    check(cache_usage_text(0, 0) == "",
+          "无配额且零下载 → 空串（调用方隐藏标签，避免常驻噪音）")
+    check("59.0 MB" in cache_usage_text(59 * 1024 * 1024, 0),
+          "无配额但确有下载 → 显示已下载量")
+    check(cache_usage_text(0, 2 * _gi).endswith("2.0 GB"),
+          "有配额时 0 字节也显示上限（用户可见配额生效）")
+    # 门控文案：等数据 / 等索引块 / 缺省（缺省与旧文案逐字一致）
+    check(waiting_text("a.mp4", 1000, WAIT_DATA)
+          == "缓冲中，等待数据就绪：a.mp4（1000 B）",
+          f"等数据文案（实得 {waiting_text('a.mp4', 1000, WAIT_DATA)!r}）")
+    check(waiting_text("a.mp4", 1000, WAIT_INDEX)
+          == "缓冲中，等待索引块就绪：a.mp4（1000 B）",
+          "等索引块文案")
+    check(waiting_text("a.mp4", 1000)
+          == "缓冲中，等待数据与索引块就绪：a.mp4（1000 B）",
+          "缺省（WAIT_BOTH）文案与旧行为逐字一致")
+    check(WAIT_BOTH not in (WAIT_DATA, WAIT_INDEX),
+          "阶段常量互不相等（downstream 判据不歧义）")
+    # 组件接线：set_waiting → 合并文案；set_waiting_stage 切单句
+    vp9 = VideoPreviewWidget()
+    vp9.set_waiting("a.mp4", 1000)
+    check("等待数据与索引块就绪" in vp9.title.text(), "set_waiting 默认合并文案")
+    vp9.set_waiting_stage(WAIT_DATA)
+    check("等待数据就绪" in vp9.title.text()
+          and "索引块" not in vp9.title.text(), "等待期切「等数据」文案")
+    vp9.set_waiting_stage(WAIT_INDEX)
+    check("等待索引块就绪" in vp9.title.text() and "数据" not in vp9.title.text(),
+          "等待期切「等索引块」文案")
+    vp9.set_stream("", "a.mp4", 1000)
+    check("正在流式播放" in vp9.title.text(), "开播后正常标题（阶段文案不残留）")
+    vp9.deleteLater()
+
+    # 受控单测：主窗口开播门控按「缺数据 / 缺索引」分别下发阶段文案，
+    # 且门控放行判据与文案彼此独立（文案不得反过来驱动门控）。
+    _orig_pending = w._pending_video
+    _orig_status = w.session.status
+    try:
+        _gp = _TF(0, "root/big.mp4", 8 * 1024 * 1024, 0, 0, 0)
+        _stages = []
+        _orig_stage = w.preview.video.set_waiting_stage
+        _orig_setstream = w.preview.video.set_stream
+        _streamed = []
+        w.preview.video.set_waiting_stage = lambda s: _stages.append(s)
+        w.preview.video.set_stream = lambda *a, **k: _streamed.append(a)
+        w._pending_video = (_gp, "http://x/big")
+        _base = {"num_seeds": 0, "num_peers": 0, "preview_file": None}
+        w.session.status = lambda: dict(
+            _base, contiguous=0, tail_entry_ready=False,
+            buffer=0.0, download_rate=0, file_progress=[])
+        w._refresh_status()
+        check(_stages[-1:] == [WAIT_DATA] and not _streamed,
+              f"缺头数据 → 文案「等数据」且不放行（stages={_stages}）")
+        w.session.status = lambda: dict(
+            _base, contiguous=8 * 1024 * 1024, tail_entry_ready=False,
+            buffer=1.0, download_rate=0, file_progress=[])
+        w._refresh_status()
+        check(_stages[-1:] == [WAIT_INDEX] and not _streamed,
+              "头数据就绪、缺索引 → 文案「等索引块」且不放行")
+        w.session.status = lambda: dict(
+            _base, contiguous=8 * 1024 * 1024, tail_entry_ready=True,
+            buffer=1.0, download_rate=0, file_progress=[])
+        w._refresh_status()
+        check(bool(_streamed) and w._pending_video is None,
+              "数据+索引齐 → 放行开播（门控与文案解耦）")
+    finally:
+        w.preview.video.set_waiting_stage = _orig_stage
+        w.preview.video.set_stream = _orig_setstream
+        w.session.status = _orig_status
+        w._pending_video = _orig_pending
+        w.preview.reset()
+
     # ---- [4b-7] D4 Minor：顶层 listdir 失败语义 + closeEvent 单次读配置 ----
     print("\n[4b-7] D4 收尾：listdir 失败上抛→-1 / closeEvent 配置单读")
     # (a) cache_guard.clear_cache_contents 顶层 listdir 失败必须**上抛**

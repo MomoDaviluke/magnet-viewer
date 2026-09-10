@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QCompleter, QFileDialog, QHBoxLayout,
 from core.cache_guard import (clear_cache_contents, ensure_cache_dir,
                               guard_ok_for_cleanup)
 from core.cache_mode import PREVIEW_CACHE_CONVERT
-from core.cache_quota import dir_size_bytes, enforce_preview_limit
+from core.cache_quota import downloaded_bytes, enforce_preview_limit
 from core.config import AppConfig
 from core.fetcher import SessionManager
 from core import logutil
@@ -27,6 +27,7 @@ from ui.add_download_dialog import AddDownloadDialog
 from ui.downloads_pane import DownloadsPane
 from ui.file_tree import FileTreeWidget
 from ui.preview_pane import PreviewPane
+from ui.preview_player import WAIT_DATA, WAIT_INDEX
 from ui.settings_dialog import SettingsDialog
 from ui.status_panel import StatusPanel
 from ui.theme import TEXT_MUTED
@@ -96,6 +97,24 @@ def background_cache_text(mode: str, preview_file,
         return None
     pct = max(0, min(100.0, done * 100.0 / preview_file.size))
     return f"后台缓存完整文件：{pct:.1f}%（播放位置优先）"
+
+
+def cache_usage_text(downloaded: int, limit_bytes: int) -> str:
+    """状态栏「缓存占用」文案（纯函数，plan/07 阶段 3）。
+
+    口径 = **已下载字节**（``downloaded_bytes(file_progress)``），不再是目录
+    预分配尺寸：真机 4.1GB 稀疏文件才下 59MB 却显示「缓存 4.1 GB / 2.0 GB」，
+    既误导又像爆缓存。``limit_bytes`` 为预览缓存上限（0/负 = 不限制）：
+    不限制时仅在确有下载量时返回文案（避免常驻噪音），否则返回空串
+    （调用方隐藏标签）；有上限时恒显示「已下载 / 上限」，0 字节也显示——
+    让用户看到配额在生效。
+
+    注意：**仅用于显示**——配额判定仍按目录占用（``dir_size_bytes``，
+    管磁盘占用、需保守），两者口径不同。
+    """
+    if limit_bytes <= 0:
+        return f"缓存 {human_size(downloaded)}" if downloaded > 0 else ""
+    return f"缓存 {human_size(downloaded)} / {human_size(limit_bytes)}"
 
 
 class StreamCallbacks:
@@ -731,29 +750,39 @@ class MainWindow(QMainWindow):
             return {os.path.normcase(p)
                     for p in self.session.protected_dirs()} | {cache_root}
         try:
-            total, _freed = enforce_preview_limit(
+            _total, _freed = enforce_preview_limit(
                 preview_root, limit, _keep,
                 warn=lambda m: log_warning("main.cache_quota", m))
         except Exception as e:
             log_warning("main.cache_quota", f"配额清理异常（已忽略）：{e}")
             return
-        self._update_cache_usage(total)
+        # 清理后刷新显示：口径 = 已下载字节（阶段 3），不再用返回的目录占用
+        self._refresh_cache_usage()
 
     def _refresh_cache_usage(self):
-        """刷新状态栏缓存占用显示（低频：30 秒定时器 + 打开设置后）。"""
-        preview_root = os.path.join(self.cache_dir, ".preview")
-        total = dir_size_bytes(preview_root) if os.path.isdir(preview_root) else 0
-        self._update_cache_usage(total)
+        """刷新状态栏缓存占用显示（低频：30s 定时器 + 配额清理后）。
 
-    def _update_cache_usage(self, total_bytes: int):
+        口径 = **已下载字节**（``status().file_progress`` 汇总，plan/07
+        阶段 3）——显示「真实下了多少」而非稀疏预分配尺寸。配额**判定**仍
+        走目录占用（``_enforce_cache_quota`` → ``enforce_preview_limit``），
+        两者解耦：显示跟着进度走，上限管磁盘占用（保守）。
+        """
+        self._update_cache_usage(self._downloaded_bytes())
+
+    def _downloaded_bytes(self) -> int:
+        """当前任务已下载字节（file_progress 汇总；无会话/异常 → 0）。"""
+        try:
+            st = self.session.status()
+        except Exception as e:
+            log_warning("main.cache_usage", f"{e}")
+            return 0
+        return downloaded_bytes((st or {}).get("file_progress") or [])
+
+    def _update_cache_usage(self, downloaded: int):
+        """渲染缓存占用文案（纯函数 ``cache_usage_text``：已下载 / 上限）。"""
         limit = int(self.cfg.get("cache_limit_mb") or 0)
-        if limit > 0:
-            self.status_panel.set_cache_usage(
-                f"缓存 {human_size(total_bytes)} / {human_size(limit * 1024 * 1024)}")
-        else:
-            # 不限制时仅在确有占用时提示，避免常驻噪音
-            self.status_panel.set_cache_usage(
-                f"缓存 {human_size(total_bytes)}" if total_bytes > 0 else "")
+        self.status_panel.set_cache_usage(
+            cache_usage_text(downloaded, limit * 1024 * 1024))
 
     def _pieces_map(self, disk_path: str):
         """流服务回调（薄委托，逻辑在 StreamCallbacks.pieces_map）。"""
@@ -806,10 +835,17 @@ class MainWindow(QMainWindow):
         if self._pending_video is not None and st is not None:
             f, url = self._pending_video
             contig = st.get("contiguous", 0)
-            if (contig >= min(1024 * 1024, f.size)
-                    and st.get("tail_entry_ready", True)):
+            data_ok = contig >= min(1024 * 1024, f.size)
+            index_ok = bool(st.get("tail_entry_ready", True))
+            if data_ok and index_ok:
                 self._pending_video = None
                 self.preview.video.set_stream(url, f.name, f.size)
+            else:
+                # 阶段 3：等数据 / 等索引块分句提示。**仅文案分支**——放行
+                # 判据是上面的布尔量，文案不反过来驱动门控（本轮询方法也
+                # 不读文案）。
+                self.preview.video.set_waiting_stage(
+                    WAIT_DATA if not data_ok else WAIT_INDEX)
 
     # ---------- 播放失败重试 ----------
 

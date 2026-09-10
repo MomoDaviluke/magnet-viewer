@@ -46,6 +46,32 @@ def dir_size_bytes(path: str) -> int:
     return total
 
 
+def downloaded_bytes(file_progress) -> int:
+    """已下载字节汇总（plan/07 阶段 3 的**显示**口径）。
+
+    ``handle.file_progress()`` 是每文件的已下载字节数组（核心指标，已在
+    ``background_cache_text`` / 状态快照多处使用）。此前状态栏「缓存占用」
+    走 ``dir_size_bytes(.preview)``——统计的是**预分配尺寸**：稀疏文件预分配
+    后目录逻辑大小恒等于文件大小，4.1GB 的种子才下 59MB 就显示「缓存
+    4.1 GB / 2.0 GB」，既误导又像爆缓存。改用已下载字节后显示真实进度。
+
+    **只服务显示**：预览缓存上限判定仍走 ``dir_size_bytes``（它管磁盘占用，
+    需保守），二者口径不同、不可互换。
+
+    容错：``None`` / 非法项按 0 计、负值截 0（不产生负数占用）；纯函数，
+    不碰文件系统，便于单测（contract_check 冻结）。
+    """
+    total = 0
+    for v in (file_progress or ()):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            total += n
+    return total
+
+
 def _last_active(path: str) -> float:
     """目录最近活跃时间：全部文件的最大 mtime，空目录用目录 mtime。"""
     newest = 0.0

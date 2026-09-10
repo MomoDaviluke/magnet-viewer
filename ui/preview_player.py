@@ -20,6 +20,28 @@ def fmt_time(ms: int) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
+# 开播等待阶段（plan/07 阶段 3）：门控需要「头部连续数据」+「尾部索引块
+# （moov）」两者，分开提示让用户知道卡在哪一步；WAIT_BOTH 保留旧文案。
+WAIT_BOTH = "both"
+WAIT_DATA = "data"
+WAIT_INDEX = "index"
+
+
+def waiting_text(name: str, size: int, stage: str = WAIT_BOTH) -> str:
+    """开播等待文案（纯函数，plan/07 阶段 3）。
+
+    此前只有一句「等待数据与索引块就绪」，慢链路下用户无法分辨是缺头数据
+    还是缺索引块。``stage``：``WAIT_DATA`` → 「等待数据就绪」；
+    ``WAIT_INDEX`` → 「等待索引块就绪」；其余（含缺省 ``WAIT_BOTH``）→
+    「等待数据与索引块就绪」（与旧文案逐字一致）。
+
+    文案只做展示——开播门控判据（``ui/main_window._refresh_status``）与
+    本函数彼此独立，绝不由文案反推门控。
+    """
+    what = {WAIT_DATA: "数据", WAIT_INDEX: "索引块"}.get(stage, "数据与索引块")
+    return f"缓冲中，等待{what}就绪：{name}（{human_size(size)}）"
+
+
 class BufferedSlider(QSlider):
     """带「已缓存分段」着色的进度条（半透明灰段 = 落盘可读区间）。
 
@@ -97,6 +119,7 @@ class VideoPreviewWidget(QWidget):
         self._seek_at = 0.0
         self._resume_ms: int | None = None   # 待恢复位置（自动重试 / 重新开播）
         self._errored = False                # 播放处于错误态：禁止拖动（拖了也没反应）
+        self._wait_stage: str | None = None  # 开播等待阶段（阶段 3 文案去重）
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -200,10 +223,22 @@ class VideoPreviewWidget(QWidget):
         self._reset_seek_state()
         self.slider.clear_segments()
         self._resume_ms = None
-        self._restore_title(
-            f"缓冲中，等待数据与索引块就绪：{name}（{human_size(size)}）")
+        self._wait_stage = WAIT_BOTH          # 阶段未知：合并文案（旧行为）
+        self._restore_title(waiting_text(name, size, WAIT_BOTH))
         self.buffer_label.setText("准备中…")
         self._set_play_btn(False)   # 等待期不可播放，避免点击无效却改文案
+
+    def set_waiting_stage(self, stage: str):
+        """开播等待期细化文案（plan/07 阶段 3）：等数据 / 等索引块。
+
+        由主窗口门控轮询在缺料时下发（``_refresh_status``）；同一阶段重复
+        调用**幂等**（不重复 setText，避免 700ms 轮询刷屏重绘）。仅在
+        ``set_waiting`` 之后、``set_stream`` 之前的等待期有意义。
+        """
+        if self._wait_stage == stage:
+            return
+        self._wait_stage = stage
+        self._restore_title(waiting_text(self.file_name, self._size, stage))
 
     def set_stream(self, url: str, name: str, size: int,
                    resume_ms: int | None = None):
@@ -214,6 +249,7 @@ class VideoPreviewWidget(QWidget):
         """
         self.file_name = name
         self._size = size
+        self._wait_stage = None                # 开播：清等待阶段（文案不残留）
         self.title.setText(f"正在流式播放：{name}（{human_size(size)}）")
         self.slider.setRange(0, 0)
         self._reset_seek_state()
@@ -261,6 +297,7 @@ class VideoPreviewWidget(QWidget):
         self.slider.clear_segments()
         self._resume_ms = None
         self._errored = False
+        self._wait_stage = None         # 清等待阶段（与标题一并复位）
         self.slider.setEnabled(True)
         self._restore_title("（未在播放）")
         self.buffer_bar.setValue(0)

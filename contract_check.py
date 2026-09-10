@@ -416,7 +416,16 @@ def main() -> int:
         "scan_preview_dirs": [("preview_root", False)],
         "enforce_preview_limit": [("preview_root", False), ("limit_mb", False),
                                   ("keep_dirs", True), ("warn", True)],
+        # plan/07 阶段 3：缓存**显示**口径改已下载字节（file_progress 汇总），
+        # 纯函数冻结；配额判定仍走 dir_size_bytes（管磁盘占用，二者不互换）。
+        "downloaded_bytes": [("file_progress", False)],
     })
+    check(cache_quota.downloaded_bytes([59 * 1024 * 1024]) == 59 * 1024 * 1024
+          and cache_quota.downloaded_bytes([1, 2, 3]) == 6
+          and cache_quota.downloaded_bytes([]) == 0
+          and cache_quota.downloaded_bytes(None) == 0
+          and cache_quota.downloaded_bytes([-1, 5, None, "x"]) == 5,
+          "downloaded_bytes 口径冻结（汇总/空/None→0、非法与负值容错）")
     check(cache_guard.CACHE_MARKER == ".magnet_viewer_cache",
           "CACHE_MARKER 常量值不变")
 

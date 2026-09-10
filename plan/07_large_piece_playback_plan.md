@@ -78,12 +78,38 @@
 
 > 注：「头块就绪后 2-3s 内开门控」在「尾窗 deadline 排在头窗之后」的约定下
 > 结构上不可达——门控要的入口块就是排到头窗之后的第 1 个尾部块，实测 4.1GB /
-> 2MB/s 下即「头 8.0s + 11s」。若要进一步压到 2-3s，需要把入口块提到与头窗
-> 同级（会与头窗抢带宽，且破坏 `playback_window_test §C` 的排序契约），另议。
+> 2MB/s 下即「头 8.0s + 11s」。阶段 2.5 已把入口块 deadline 提前到头窗头几块
+> 并行（见下），达成「头块就绪 + 3s 内」。
 
-## 阶段 3 — 统计口径与文案
-- 缓存占用显示改用已下载字节；门控文案区分"等数据"/"等索引"。
-- 验收：gui_feature_test 断言口径函数；真机观感由用户确认。
+## 阶段 2.5 — 尾部入口块 deadline 提前（已落地 2026-09-10）
+- [x] `core/scheduler.PreviewScheduler._request_tail`：**入口块**（`_entry_pieces`
+      = 文件最后 `min(2MB, size)` 覆盖块）deadline 提到 `DEADLINE_STEP_MS`
+      （与头窗第 2 块同级）；**其余尾块**仍 `n_head*STEP + 1000 + j*STEP`
+      （排在头窗之后）。理由：门控必需的两块是「头第 1 块 + 尾入口」，应并行
+      尽早到齐；入口仅 `min(2MB, size)`，抢占代价可忽略；整尾窗提前会与顺序
+      前缀抢带宽、破坏头窗保序（`playback_window_test §B`），故不提前。
+- [x] docstring 写清权衡（为何只提前入口、不提前整尾窗）。
+- [x] 验收（真链路 `%LOCALAPPDATA%\Temp\mv_probe41.py`，4.1GB / 4MB 块 /
+      2MB/s，稀疏载荷，改前/改后各跑一次）：
+      **门控 19.0s → 10.0s**（头连续≥1块 8.0s，即「头块 + 2.0s」），
+      命中「头块就绪 + 3s 内」目标；头部行为不变。无「反而更慢」现象，不回退。
+- [x] `playback_window_test §C`（排序契约更新为「入口提前、其余尾块仍排后」）
+      与 §H 入口 deadline 断言（57/0）；契约 169/0。
+
+## 阶段 3 — 统计口径与文案（已落地 2026-09-10）
+- [x] 缓存占用显示改用**已下载字节**：`core/cache_quota.downloaded_bytes(file_progress)`
+      纯函数汇总（容错：None/非法项→0、负值截 0）；`ui/main_window.cache_usage_text`
+      产出「缓存 已下载 / 上限」文案；`_refresh_cache_usage` 走 `status().file_progress`
+      （零新增查询路径），不再扫 `.preview` 目录的**预分配尺寸**。
+      **配额判定仍按目录占用**（`enforce_preview_limit` / `dir_size_bytes`，管磁盘
+      占用、需保守）——口径不同、不互换。
+- [x] 开播门控文案区分「等数据」/「等索引块」：`ui/preview_player.waiting_text`
+      纯函数 + `WAIT_DATA/WAIT_INDEX/WAIT_BOTH` 常量 + `VideoPreviewWidget.set_waiting_stage`
+      （幂等去重）；`_refresh_status` 在未放行时按缺料下发阶段。缺省 `WAIT_BOTH`
+      与旧文案逐字一致。门控放行判据与文案**解耦**（文案不反向驱动门控）。
+- [x] 验收：`gui_feature_test` 新增 [4b-6c] 段 19 项断言（口径函数/文案函数纯函数
+      + 组件接线 + 主窗口门控阶段下发/放行）；107 → 126 项全绿。契约冻结
+      `cache_quota.downloaded_bytes` 签名与换算表（167 → 169/0）。
 
 ## 阶段 4 — 收口
 - README（大块种子行为说明）、`contract_check`、全量回归、`.workbuddy/memory` 收口日志、本地 commit（不推送，等用户真机确认后统一推）。
