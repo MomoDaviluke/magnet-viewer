@@ -35,6 +35,10 @@ def check(cond, msg):
 def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     tmp = tempfile.mkdtemp(prefix="mv_gui_")
+    # 箭头绘制样式：必须在任何 apply_theme（挂 QSS）**之前**装（与 main.py 同序；
+    # QSS 会包成 QStyleSheetStyle 代理，本样式才是它转发箭头绘制时的基样式）。
+    from ui.style import install as _install_chevron  # noqa: E402
+    _install_chevron(app)
 
     # ---------------------------------------------------------------- [0] 设置接线
     # 回归 P0-3：设置面板的「默认下载目录」「默认并发下载数」必须真正生效。
@@ -1052,6 +1056,283 @@ def main() -> int:
         for k, v in _orig_theme_all.items():
             cfg_t.set(k, v)
         apply_theme(app, "light")     # 收尾恢复默认浅色（后续用例不受影响）
+
+    # ---------------------------------------------------------------- [4h] 打磨
+    # 用户反馈（附截图）：①下拉/微调箭头渲染成灰方块（QSS 三角 hack Qt 不支持）
+    # ②按钮硬、无层次 ③Save/Cancel 英文 ④设置面板过高/无分组/路径只看到末尾。
+    # 断言面：ChevronStyle 真被调用 + 箭头**形状与配色**像素证据（浅深双主题，
+    # 证明颜色是绘制时现读色板，热切换跟随）→ 方案 A 成立；按钮 hover/pressed
+    # 色阶像素；中文按钮；设置面板四分组 + 表单规格 + 路径光标在开头。
+    print("\n[4h] 打磨：箭头雪佛龙 / 按钮层次 / 中文按钮 / 设置面板四分组")
+    import ui.style as _style  # noqa: E402
+    import ui.theme as theme  # noqa: E402
+    from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
+    from PySide6.QtGui import QColor, QMouseEvent  # noqa: E402
+    from PySide6.QtTest import QTest  # noqa: E402
+    from PySide6.QtWidgets import (QComboBox, QDialogButtonBox,  # noqa: E402
+                                   QFormLayout, QGroupBox, QProxyStyle,
+                                   QPushButton, QScrollArea, QSpinBox,
+                                   QVBoxLayout, QWidget)
+
+    def _dist(c, hexs) -> int:
+        """QColor 与目标色值的 |ΔR|+|ΔG|+|ΔB|（0 = 完全一致）。"""
+        w_ = QColor(hexs)
+        return (abs(c.red() - w_.red()) + abs(c.green() - w_.green())
+                + abs(c.blue() - w_.blue()))
+
+    def _nonbg(sub, bg, x0, x1, y0, y1):
+        out = []
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                c = sub.pixelColor(x, y)
+                if _dist(c, bg.name()) > 45:
+                    out.append((x, y, c))
+        return out
+
+    # ---- ① 色板/按钮 QSS 条款（不写渐变/阴影：Qt QSS 不支持 box-shadow）----
+    _q_light = qss(LIGHT)
+    _q_dark = qss(DARK)
+    check("bg_pressed" in LIGHT and "bg_pressed" in DARK
+          and LIGHT["bg_pressed"] != LIGHT["bg_hover"]
+          and DARK["bg_pressed"] != DARK["bg_hover"],
+          f"新增色板键 bg_pressed（按下比 hover 深一档：浅 "
+          f"{LIGHT['bg_pressed']} / 深 {DARK['bg_pressed']}）")
+    for _tag, _pal in (("浅", LIGHT), ("深", DARK)):
+        _contrast = (_dist(QColor(_pal["alt_row"]), _pal["bg_panel"]))
+        check(_contrast >= 25,
+              f"{_tag}色 alt_row 与面板底可辨（位差 {_contrast} ≥ 25，旧值仅 12/15）")
+    check(f"QPushButton:pressed {{ background: {LIGHT['bg_pressed']};" in _q_light
+          and f"QPushButton:hover {{ background: {LIGHT['bg_hover']}; "
+              f"border-color: {LIGHT['border_strong']};" in _q_light,
+          "次级按钮 hover=bg_hover+border_strong / pressed=bg_pressed（色阶层次）")
+    check(f"QPushButton:focus {{ border: 1px solid {LIGHT['accent']};" in _q_light,
+          "次级按钮 :focus 边框转 accent（键盘可见性）")
+    check(f"QPushButton#primary {{ background: {LIGHT['accent']}; border: none;"
+          in _q_light
+          and f"QPushButton#primary:pressed {{ background: "
+              f"{LIGHT['accent_pressed']};" in _q_light
+          and f"QPushButton#primary:disabled {{ background: "
+              f"{LIGHT['bg_hover']}; color: {LIGHT['text_dim']};" in _q_light,
+          "主按钮 accent 实底无边框 + hover/pressed/disabled 三档")
+    check(f"QPushButton#ghost {{ background: transparent; border: none;" in _q_light
+          and f"QPushButton#ghost:hover {{ background: {LIGHT['bg_hover']}; "
+              f"color: {LIGHT['text']};" in _q_light,
+          "幽灵按钮：透明底无边框，hover 才有底")
+    check("qlineargradient" not in _q_light and "box-shadow" not in _q_light,
+          "不用渐变/阴影（靠圆角 + 柔和边框 + hover/pressed 色阶做平滑感）")
+
+    # ---- ② 箭头 QSS 必须**静默**（有任何 ::down-arrow/drop-down/up-button 规则
+    #         都会让 QStyleSheetStyle 不再转发箭头 primitive → 方块或消失）----
+    _arrow_rules = [ln.strip() for ln in (_q_light + _q_dark).splitlines()
+                    if ln.strip().startswith(("QComboBox::", "QSpinBox::"))]
+    check("border-left: 5px solid transparent" not in _q_light
+          and "border-top: 6px solid" not in _q_light
+          and not _arrow_rules,
+          f"已清掉 CSS 三角 hack 且不再声明箭头子控件规则"
+          f"（实得 {_arrow_rules or '无'}）")
+    check(issubclass(_style.ChevronStyle, QProxyStyle)
+          and callable(getattr(_style, "install", None)),
+          "ui/style.py 导出 ChevronStyle(QProxyStyle) + install(app)")
+    check(_style.CHEVRON_W <= 6 and _style.CHEVRON_H <= 4
+          and 1.0 <= _style.CHEVRON_STROKE <= 2.0,
+          f"雪佛龙规格=细（宽 {_style.CHEVRON_W} 高 {_style.CHEVRON_H} "
+          f"描边 {_style.CHEVRON_STROKE}）")
+
+    # ---- ③ 箭头像素证据：形状（空心折线）+ 颜色（现读色板，浅深各一）----
+    def _arrow_probe(mode_name):
+        theme.apply_theme(app, mode_name)
+        pal = theme.current_palette()
+        holder = QWidget()
+        holder.setFixedSize(320, 240)
+        lay = QVBoxLayout(holder)
+        combo = QComboBox()
+        combo.addItems(["浅色 Light（默认）", "深色 Dark"])
+        lay.addWidget(combo)
+        spin = QSpinBox()
+        spin.setRange(0, 600)
+        spin.setValue(600)
+        lay.addWidget(spin)
+        holder.show()
+        app.processEvents()
+        _style.ChevronStyle.draw_calls = 0
+        img = holder.grab().toImage()
+        calls = _style.ChevronStyle.draw_calls
+        origin = combo.mapTo(holder, QPoint(0, 0))
+        sub = img.copy(origin.x(), origin.y(), combo.width(), combo.height())
+        bg = sub.pixelColor(6, combo.height() // 2)
+        mid = combo.height() // 2
+        pts = _nonbg(sub, bg, combo.width() - 26, combo.width() - 4,
+                     mid - 10, mid + 11)
+        s_origin = spin.mapTo(holder, QPoint(0, 0))
+        s_sub = img.copy(s_origin.x(), s_origin.y(), spin.width(), spin.height())
+        s_pts = _nonbg(s_sub, s_sub.pixelColor(6, spin.height() // 2),
+                       spin.width() - 26, spin.width() - 4,
+                       3, spin.height() - 3)
+        holder.close()
+        holder.deleteLater()
+        app.processEvents()
+        return calls, pts, s_pts, bg, pal
+
+    _arrow_color = {}
+    for _mode in ("light", "dark"):
+        _calls, _pts, _s_pts, _bg, _pal = _arrow_probe(_mode)
+        check(_calls >= 3,
+              f"[{_mode}] ChevronStyle 被调用 {_calls} 次（下拉 1 + 微调上下 2）")
+        check(len(_pts) > 0 and len(_s_pts) > 0,
+              f"[{_mode}] 下拉与微调箭头区都有绘制像素"
+              f"（{len(_pts)} / {len(_s_pts)} 个）")
+        if _pts:
+            _rows = {}
+            for _x, _y, _c in _pts:
+                _rows.setdefault(_y, []).append((_x, _c))
+            _order = sorted(_rows)
+            _span = {y: max(p[0] for p in _rows[y]) - min(p[0] for p in _rows[y]) + 1
+                     for y in _order}
+            _best = min(_pts, key=lambda p: _dist(p[2], _pal["text_muted"]))
+            _arrow_color[_mode] = _best[2].name()
+            check(_dist(_best[2], _pal["text_muted"]) == 0,
+                  f"[{_mode}] 箭头色 == 色板 TEXT_MUTED（{_best[2].name()}）"
+                  f"——绘制时现读，热切换跟随")
+            check(all(len(_rows[y]) < _span[y] for y in _order[:2]),
+                  f"[{_mode}] 雪佛龙是**空心折线**（顶部两行有中缝："
+                  f"{[ (len(_rows[y]), _span[y]) for y in _order[:2] ]}）"
+                  f"——实心三角/方块不会有缝")
+            check(_span[_order[-1]] <= 3 and _span[_order[0]] >= 4,
+                  f"[{_mode}] 收成顶点（顶行跨度 {_span[_order[0]]} → "
+                  f"末行 {_span[_order[-1]]}）")
+            check(len(_pts) <= 40,
+                  f"[{_mode}] 细线（非背景像素仅 {len(_pts)} 个，方块会成片）")
+    check(len(_arrow_color) == 2
+          and _arrow_color.get("light") != _arrow_color.get("dark"),
+          f"箭头色随主题：浅 {_arrow_color.get('light')} / "
+          f"深 {_arrow_color.get('dark')}")
+
+    # ---- ④ 按钮 hover/pressed 真上色（QTest 真鼠标移动 + QMouseEvent 按下）----
+    def _btn_probe(mode_name, object_name=None):
+        theme.apply_theme(app, mode_name)
+        pal = theme.current_palette()
+        holder = QWidget()
+        holder.setFixedSize(300, 120)
+        lay = QVBoxLayout(holder)
+        btn = QPushButton("测试按钮")
+        if object_name:
+            btn.setObjectName(object_name)
+        lay.addWidget(btn)
+        holder.show()
+        app.processEvents()
+        # 先把指针挪开按钮：连续多个持有点位相同时 Qt 不再重发移动事件 →
+        # hover 不生效（实测：第二个起就丢），必须先离开再进入。
+        QTest.mouseMove(holder, QPoint(2, 2))
+        app.processEvents()
+        normal = btn.grab().toImage().pixelColor(8, 4)
+        QTest.mouseMove(btn, QPoint(btn.width() // 2, btn.height() // 2))
+        app.processEvents()
+        hover = btn.grab().toImage().pixelColor(8, 4)
+        _mk = lambda t, btns: QMouseEvent(  # noqa: E731
+            t, QPointF(10, 10), QPointF(10, 10), QPointF(10, 10),
+            Qt.LeftButton, btns, Qt.NoModifier)
+        QApplication.sendEvent(btn, _mk(QEvent.Type.MouseButtonPress,
+                                        Qt.LeftButton))
+        app.processEvents()
+        pressed = btn.grab().toImage().pixelColor(8, 4)
+        QApplication.sendEvent(btn, _mk(QEvent.Type.MouseButtonRelease,
+                                        Qt.NoButton))
+        holder.close()
+        holder.deleteLater()
+        app.processEvents()
+        return normal, hover, pressed, pal
+
+    for _mode in ("light", "dark"):
+        _n, _h, _p, _pal = _btn_probe(_mode)
+        check(_dist(_h, _pal["bg_hover"]) == 0,
+              f"[{_mode}] hover 底色 = bg_hover（{_h.name()}）")
+        check(_dist(_p, _pal["bg_pressed"]) == 0,
+              f"[{_mode}] pressed 底色 = bg_pressed（{_p.name()}）")
+        check(_dist(_n, _pal["bg_input"]) == 0,
+              f"[{_mode}] 常态底色 = bg_input（{_n.name()}）")
+    theme.apply_theme(app, "light")
+    _n, _h, _p, _pal = _btn_probe("light", object_name="primary")
+    check(_dist(_p, _pal["accent_pressed"]) == 0
+          and _dist(_h, _pal["accent_hover"]) == 0,
+          f"主按钮 hover/pressed = accent_hover/accent_pressed"
+          f"（{_h.name()} / {_p.name()}），实底无边框")
+
+    # ---- ⑤ 中文按钮 + 设置面板四分组 + 表单规格 + 路径光标在开头 ----
+    cfg_p = AppConfig()
+    _orig_p = {k: cfg_p.get(k) for k in DEFAULTS}
+    cfg_p.set("proxy_type", "none")     # 避免代理校验弹模态
+    try:
+        dlg = _sd.SettingsDialog(cfg_p, w.cache_dir, on_clear_cache=None,
+                                 parent=w)
+        dlg.show()
+        app.processEvents()
+        check(dlg.windowTitle() == "设置" and dlg.minimumWidth() == 600,
+              f"设置对话框：标题「设置」+ 最小宽 600（实得 {dlg.minimumWidth()}）")
+        check(dlg.btn_save is not None and dlg.btn_cancel is not None
+              and dlg.btn_save.text() == "保存" and dlg.btn_cancel.text() == "取消",
+              "保存/取消按钮中文（改造前 Save/Cancel）")
+        check(dlg.btn_save.objectName() == "primary",
+              "「保存」是主按钮（#primary 样式）")
+        _add = AddDownloadDialog(AppConfig(), "演示", 1024, default_save_dir=tmp)
+        _abb = _add.findChild(QDialogButtonBox)
+        check(_abb.button(QDialogButtonBox.Save).text() == "保存"
+              and _abb.button(QDialogButtonBox.Cancel).text() == "取消",
+              "「添加下载任务」对话框按钮同步中文（全界面文案统一）")
+        _add.deleteLater()
+
+        _groups = dlg.findChildren(QGroupBox)
+        check([g.title() for g in _groups] == ["界面", "网络与代理", "缓存与预览", "下载"],
+              f"设置面板分四组（实得 {[g.title() for g in _groups]}）")
+        _forms = [g.layout() for g in _groups]
+        check(all(isinstance(f, QFormLayout) for f in _forms),
+              "每组一个 QFormLayout")
+        check(all(f.spacing() == 10 and f.contentsMargins().left() == 12
+                  and f.contentsMargins().top() == 12
+                  and f.contentsMargins().right() == 12
+                  and f.contentsMargins().bottom() == 12 for f in _forms),
+              "表单规格：spacing=10 / contentsMargins=(12,12,12,12)")
+        check(all(f.fieldGrowthPolicy()
+                  == QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+                  for f in _forms),
+              "表单规格：AllNonFixedFieldsGrow（输入控件拉满宽度）")
+        check(all(f.labelAlignment() == (Qt.AlignRight | Qt.AlignVCenter)
+                  for f in _forms),
+              "表单规格：标签右对齐垂直居中")
+
+        check(isinstance(dlg._scroll, QScrollArea)
+              and dlg.height() <= max(360, int(
+                  QApplication.primaryScreen().availableGeometry().height() * 0.92)) + 1,
+              f"内容超出屏幕时由 QScrollArea 承载（窗口高 {dlg.height()}，"
+              f"内容自然高 {dlg.content_height()}）")
+        dlg.resize(660, 420)
+        app.processEvents()
+        check(dlg._scroll.verticalScrollBar().maximum() > 0,
+              "窗口被压小 → 出现垂直滚动条（内容不被截断）")
+        dlg.resize(660, dlg.full_height())
+        app.processEvents()
+        check(dlg._scroll.verticalScrollBar().maximum() <= 8,
+              f"全展开（{dlg.height()}px）→ 无需滚动"
+              f"（滚动条上限 {dlg._scroll.verticalScrollBar().maximum()}）")
+        check(dlg.full_height() < 1400,
+              f"设置面板总高 {dlg.full_height()}px < 旧版 ~1440px（用户截图）"
+              f"：分组 + 行距 12→10 + 行高 46→38")
+        _bb = dlg.findChild(QDialogButtonBox)
+        _tl = _bb.mapTo(dlg, QPoint(0, 0))
+        check(dlg.width() - (_tl.x() + _bb.width()) <= 24
+              and _tl.y() > dlg.height() * 0.7,
+              f"保存/取消在右下角（右边距 {dlg.width() - (_tl.x() + _bb.width())}px，"
+              f"y={_tl.y()}/{dlg.height()}）")
+
+        check(dlg.cache_edit.cursorPosition() == 0
+              and dlg.download_edit.cursorPosition() == 0
+              and dlg.cache_edit.text() != "",
+              f"路径类输入框光标停在开头（光标 {dlg.cache_edit.cursorPosition()}，"
+              f"文本 {dlg.cache_edit.text()!r}）")
+        dlg.deleteLater()
+    finally:
+        for k, v in _orig_p.items():
+            cfg_p.set(k, v)
+        theme.apply_theme(app, "light")
 
     # ---------------------------------------------------------------- [5] 清理
     print("\n[5] 收尾")

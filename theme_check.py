@@ -50,7 +50,7 @@ MENTION_RE = re.compile(r"setStyleSheet")
 
 # R3：约定 token（token 名 = 对外词汇，改名前必须同步本清单与 plan）
 REQUIRED_TOKENS = [
-    "BG", "BG_PANEL", "BG_INPUT", "BG_HOVER", "BG_SELECTED",
+    "BG", "BG_PANEL", "BG_INPUT", "BG_HOVER", "BG_PRESSED", "BG_SELECTED",
     "BORDER", "BORDER_STRONG",
     "TEXT", "TEXT_MUTED", "TEXT_DIM", "ACCENT", "ACCENT_HOVER",
     "ACCENT_PRESSED", "OK", "WARN", "DANGER", "SLIDER_SEGMENT",
