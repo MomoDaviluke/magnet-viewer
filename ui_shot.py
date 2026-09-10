@@ -5,11 +5,13 @@
     .venv/Scripts/python ui_shot.py .hermes/shots-dark  dark
     （第三个参数省略 = light；默认输出目录 .hermes/shots/）
 
-产物（窗口 1200x800，含真内容的四张 PNG）：
+产物（窗口 1200x800，含真内容的五张 PNG）：
     01-empty     空态（未解析）
     02-files     文件列表：**真种子**（离线假种子解析结果，目录/大小/占比都是真的）
     03-preview   图片画廊：真缩略图 + 真大图（离线写出的示例图，产品代码真加载）
     04-downloads 下载页：任务列表 + 详情（演示数据，不连网、不起真实下载）
+    05-settings  设置对话框：四个分组（界面/网络与代理/缓存与预览/下载）+ 中文按钮
+                 （真构造 SettingsDialog，不 exec 模态；高度 = 内容自然高度）
 
 为什么不是空壳截图：改造前版本只截了空窗口，看不出配色/控件/字号改动。本工具
 用 ``test_support.build_payload`` 造离线载荷（1 大视频 + 2 图 + 1 文本），
@@ -36,12 +38,16 @@ from PySide6.QtGui import (QColor, QFont, QFontDatabase, QImage,  # noqa: E402
                            QLinearGradient, QPainter)
 from PySide6.QtWidgets import QApplication             # noqa: E402
 
+from core.config import AppConfig                      # noqa: E402
 from core.models import disk_root, file_disk_path, human_size  # noqa: E402
 from core.parser import parse_torrent_file             # noqa: E402
 from test_support import build_payload, make_torrent   # noqa: E402
 from ui.downloads_pane import COL_NAME                 # noqa: E402
 from ui.main_window import MainWindow                  # noqa: E402
+from ui.settings_dialog import SettingsDialog          # noqa: E402
+from ui.style import install as install_chevron_style  # noqa: E402
 from ui.theme import apply_theme                       # noqa: E402
+import ui.theme as theme                               # noqa: E402
 
 SIZE = (1200, 800)          # 与 MainWindow 默认尺寸一致（布局改动才看得出来）
 PIECE = 16 * 1024
@@ -53,7 +59,7 @@ PAYLOAD = {
     "pics/screenshot.png": 120 * 1024,
     "readme.txt": 2048,
 }
-SHOTS = ("01-empty", "02-files", "03-preview", "04-downloads")
+SHOTS = ("01-empty", "02-files", "03-preview", "04-downloads", "05-settings")
 
 # 离屏平台在本机**没有字体库**（QFontDatabase.families() == 0 → 截图里全是
 # 豆腐块，看不到内容）。显式注册 Windows 常见字体：中文/数字才是真的可读，
@@ -185,6 +191,8 @@ def main() -> int:
     app = QApplication([])
     print("fonts loaded:", load_fonts() or "（无系统字体，文本可能不可读）")
     app.setFont(QFont("Microsoft YaHei UI", 9))   # 与 main.py 一致（排版保真）
+    # 箭头绘制：必须在 apply_theme 之前装（与 main.py 同序）
+    install_chevron_style(app)
     try:
         apply_theme(app, mode)
     except TypeError:
@@ -245,7 +253,28 @@ def main() -> int:
         w.tabs.setCurrentIndex(2)
         paths.append(_shot(app, w, out, SHOTS[3]))   # 04 下载页
 
+        # 05 设置对话框：真构造（不 exec 模态、不联网），高度 = 内容自然高度
+        # （尺寸靠窗；离屏屏幕较小时内容靠 QScrollArea 兜底）
+        dlg = SettingsDialog(AppConfig(), os.path.join(tmp, "cache"),
+                             on_clear_cache=None)
+        # 截图连贯性：下拉初值读的是**已保存配置**，截图用的是命令行主题 →
+        # 让下拉与当前渲染主题一致，避免"深色界面里显示浅色档"的误读
+        _idx = dlg.theme.findData(mode if mode in ("light", "dark")
+                                  else theme.active_mode())
+        if _idx >= 0:
+            dlg.theme.setCurrentIndex(_idx)
+        dlg.show()
+        app.processEvents()
+        dlg.resize(max(660, dlg.sizeHint().width()),
+                   min(dlg.full_height(), 1400))
+        app.processEvents()
+        paths.append(_shot(app, dlg, out, SHOTS[4]))  # 05 设置面板
+        settings_h = dlg.height()
+        dlg.close()
+        dlg.deleteLater()
+
         print(f"theme={mode}  shots={len(paths)}  "
+              f"settings_h={settings_h}  "
               f"files={len(result.view_files)}  "
               f"images={len(result.images)}  videos={len(result.videos)}")
         return 0

@@ -20,12 +20,14 @@ from __future__ import annotations
 # 固定 17 键：bg / bg_panel / bg_input / bg_hover / bg_selected / border /
 #            border_strong / text / text_muted / text_dim / accent /
 #            accent_hover / accent_pressed / ok / warn / danger / segment
-# 渲染扩展 2 键：alt_row（交替行底色）/ image_bg（图片位图占位底色）
+# 渲染扩展 3 键：alt_row（交替行底色）/ image_bg（图片位图占位底色）/
+#            bg_pressed（按钮按下底：比 hover 深一档，做出"按下去"的层次）
 LIGHT: dict = {
     "bg": "#f4f5f7",            # 窗口底
     "bg_panel": "#ffffff",      # 面板 / 卡片
     "bg_input": "#ffffff",      # 输入 / 下拉
     "bg_hover": "#eef0f3",      # 悬停
+    "bg_pressed": "#e6e9ee",    # 按下（比 hover 深一档）
     "bg_selected": "#e7effd",   # 选中行（比 accent 淡，避免大面积高饱和）
     "border": "#e1e4e9",        # 常规边框
     "border_strong": "#c9cfd8",  # 分组 / 聚焦前边框
@@ -39,7 +41,7 @@ LIGHT: dict = {
     "warn": "#9a6700",          # 警告 / 限速
     "danger": "#c0392b",        # 失败
     "segment": (0, 0, 0, 40),   # 缓冲分段（半透明黑）
-    "alt_row": "#fafbfc",       # 交替行（须与面板底可辨）
+    "alt_row": "#f3f5f8",       # 交替行（须与面板底可辨；旧 #fafbfc 对比过弱）
     "image_bg": "#eceef1",      # 图片查看器占位底（浅版）
 }
 DARK: dict = {
@@ -47,6 +49,7 @@ DARK: dict = {
     "bg_panel": "#1b1e24",
     "bg_input": "#22262e",
     "bg_hover": "#2a2f38",
+    "bg_pressed": "#262b33",
     "bg_selected": "#243043",
     "border": "#2f353f",
     "border_strong": "#3d4450",
@@ -60,7 +63,7 @@ DARK: dict = {
     "warn": "#e0a83c",
     "danger": "#ef6b62",
     "segment": (255, 255, 255, 46),  # 缓冲分段（半透明白）
-    "alt_row": "#1f232a",
+    "alt_row": "#232833",            # 交替行（旧 #1f232a 与面板底几乎同色）
     "image_bg": "#101216",           # 图片查看器占位底（深版，保持原值）
 }
 
@@ -71,7 +74,8 @@ DEFAULT_MODE = "light"
 # 调色板键 → 模块级常量名（apply_theme 据此同步，两套键集一致）
 _CONST_NAMES: dict = {
     "bg": "BG", "bg_panel": "BG_PANEL", "bg_input": "BG_INPUT",
-    "bg_hover": "BG_HOVER", "bg_selected": "BG_SELECTED",
+    "bg_hover": "BG_HOVER", "bg_pressed": "BG_PRESSED",
+    "bg_selected": "BG_SELECTED",
     "border": "BORDER", "border_strong": "BORDER_STRONG",
     "text": "TEXT", "text_muted": "TEXT_MUTED", "text_dim": "TEXT_DIM",
     "accent": "ACCENT", "accent_hover": "ACCENT_HOVER",
@@ -123,20 +127,21 @@ QLineEdit#urlInput {{ background: {p['bg_input']}; border: 1px solid {p['border'
     border-radius: {R_MD}px; padding: 7px 10px; min-height: 30px; }}
 QLineEdit#urlInput:focus {{ border: 1px solid {p['accent']}; }}
 
-/* ---------- 按钮（现代化尺寸：28px 内容高 + 9×18 内边距） ---------- */
+/* ---------- 按钮（平滑：圆角 8 + 柔和边框 + hover/pressed 色阶，无渐变） ---------- */
 QPushButton {{ background: {p['bg_input']}; color: {p['text']};
     border: 1px solid {p['border']}; border-radius: {R_MD}px;
     padding: 9px 18px; min-height: 28px; }}
 QPushButton:hover {{ background: {p['bg_hover']}; border-color: {p['border_strong']}; }}
-QPushButton:pressed {{ background: {p['bg_input']}; }}
+QPushButton:pressed {{ background: {p['bg_pressed']}; border-color: {p['border_strong']}; }}
+QPushButton:focus {{ border: 1px solid {p['accent']}; }}
 QPushButton:disabled {{ color: {p['text_dim']}; background: {p['bg_panel']};
     border-color: {p['border']}; }}
-QPushButton#primary {{ background: {p['accent']}; border-color: {p['accent']};
-    color: {ON_ACCENT}; font-weight: 600; }}
+QPushButton#primary {{ background: {p['accent']}; border: none;
+    color: {ON_ACCENT}; font-weight: 600; border-radius: {R_MD}px; }}
 QPushButton#primary:hover {{ background: {p['accent_hover']}; }}
 QPushButton#primary:pressed {{ background: {p['accent_pressed']}; }}
-QPushButton#primary:disabled {{ background: {p['bg_input']}; color: {p['text_dim']}; }}
-QPushButton#ghost {{ background: transparent; border-color: transparent;
+QPushButton#primary:disabled {{ background: {p['bg_hover']}; color: {p['text_dim']}; }}
+QPushButton#ghost {{ background: transparent; border: none;
     color: {p['text_muted']}; }}
 QPushButton#ghost:hover {{ background: {p['bg_hover']}; color: {p['text']}; }}
 QPushButton#playButton {{ background: {p['accent']}; border: none; color: {ON_ACCENT};
@@ -161,10 +166,12 @@ QLineEdit, QPlainTextEdit, QSpinBox, QComboBox {{
     selection-background-color: {p['accent']}; }}
 QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QComboBox:focus {{
     border: 1px solid {p['accent']}; }}
-QComboBox::drop-down {{ border: none; width: 28px; }}
-QComboBox::down-arrow {{ width: 0; height: 0;
-    border-left: 5px solid transparent; border-right: 5px solid transparent;
-    border-top: 6px solid {p['text_muted']}; margin-right: {SP_SM}px; }}
+/* 下拉/微调箭头：**这里故意不写任何 ::drop-down / ::down-arrow / up-button 规则**。
+   实测（见 .workbuddy/2026-09-10 打磨记录）：Qt 样式表引擎里只要存在这些子控件规则，
+   QStyleSheetStyle 就不再转发 PE_IndicatorArrowDown / PE_IndicatorSpinUp/Down 给基样式，
+   箭头要么被画成方块（旧 CSS 三角 hack：width:0;height:0;border-* transparent），
+   要么整根消失。保持静默 → 交给 ui/style.py 的 ChevronStyle 在绘制层画细雪佛龙
+   （颜色绘制时现读 ui.theme，热切换跟随；离屏 fusion 与真机 windows11 双平台实测被调用）。 */
 QComboBox QAbstractItemView {{ background: {p['bg_panel']};
     border: 1px solid {p['border_strong']}; padding: {SP_XS}px;
     selection-background-color: {p['bg_selected']}; color: {p['text']}; }}
@@ -225,10 +232,15 @@ QLabel#statusState {{ color: {p['text']}; font-size: {FS_CAPTION}px; }}
 
 /* ---------- 其他 ---------- */
 QGroupBox {{ border: 1px solid {p['border']}; border-radius: {R_LG}px;
-    margin-top: 12px; padding-top: 10px; background: {p['bg_panel']}; }}
+    margin-top: 10px; padding-top: 8px; background: {p['bg_panel']}; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: {SP_MD}px;
     padding: 0 {SP_XS}px; color: {p['text_muted']}; }}
-QCheckBox, QRadioButton {{ spacing: {SP_SM}px; }}
+/* 分组框内的表单行更紧凑（设置面板 19 行，每行省 8px ≈ 省下 150px 总高；
+   仅 QGroupBox 后代命中，主窗口控件不受影响） */
+QGroupBox QLineEdit, QGroupBox QSpinBox, QGroupBox QComboBox {{
+    padding: 5px 9px; min-height: 26px; }}
+QGroupBox QPushButton {{ padding: 5px 12px; min-height: 26px; }}
+QCheckBox, QRadioButton {{ spacing: {SP_SM}px; min-height: 26px; }}
 QCheckBox::indicator, QRadioButton::indicator {{ width: 16px; height: 16px; }}
 QVideoWidget {{ background: {VIDEO_BG}; }}
 QMessageBox {{ background: {p['bg_panel']}; }}
@@ -246,6 +258,7 @@ BG = LIGHT["bg"]
 BG_PANEL = LIGHT["bg_panel"]
 BG_INPUT = LIGHT["bg_input"]
 BG_HOVER = LIGHT["bg_hover"]
+BG_PRESSED = LIGHT["bg_pressed"]
 BG_SELECTED = LIGHT["bg_selected"]
 BORDER = LIGHT["border"]
 BORDER_STRONG = LIGHT["border_strong"]

@@ -79,7 +79,11 @@ class AddDownloadDialog(QDialog):
         buttons.rejected.connect(self.reject)
         btn_save = buttons.button(QDialogButtonBox.Save)
         if btn_save is not None:
+            btn_save.setText("保存")            # 界面全中文（与设置对话框一致）
             btn_save.setObjectName("primary")   # 主按钮样式：ui/theme.py #primary
+        btn_cancel = buttons.button(QDialogButtonBox.Cancel)
+        if btn_cancel is not None:
+            btn_cancel.setText("取消")
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)

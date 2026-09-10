@@ -111,8 +111,10 @@ class ProgressDelegate(QStyledItemDelegate):
         # 选中底色先铺（进度条外边距 6/4 就是留给它的外沿）：必须在 drawControl
         # **之前**——旧顺序把整块矩形盖在进度条与百分比文字上，选中行看不到进度。
         if option.state & QStyle.State_Selected:
-            painter.fillRect(option.rect,
-                             option.palette.highlight().color().lighter(160))
+            # 选中行底：用**主题色板**的 bg_selected（改造前取 Qt 默认调色板的
+            # highlight，不随深浅主题走，深色下会突兀发蓝）。绘制时现读
+            # ui.theme 模块属性 → 热切换跟随（同 STATE_META 的取色约定）。
+            painter.fillRect(option.rect, QColor(theme.BG_SELECTED))
         pal = QPalette(option.palette)
         if state == "COMPLETED":
             pal.setBrush(QPalette.Highlight, QColor(theme.OK))
