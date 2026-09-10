@@ -30,6 +30,9 @@ Thumbs.db
 build/
 dist/
 *.spec
+# 规范内的两份 spec 必须入库（release.yml 在 GitHub 上要靠它们复现构建）
+!magnet-viewer.spec
+!magnet-viewer-onefile.spec
 
 # 根目录单文件 exe（打包产物）
 /MagnetViewer.exe

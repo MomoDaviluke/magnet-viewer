@@ -32,6 +32,10 @@ jobs:
       - name: Upload regression logs
         if: always()
         uses: actions/upload-artifact@v4
+        # 日志上传只是调试辅助，不参与验收：2026-09-09 Regression #6 出现
+        # GitHub 对象存储 408 超时（服务端瞬时抖动）把全绿的 job 拖红，
+        # 这里降级为"失败仅警告"，回归本身的失败仍会让 job 变红。
+        continue-on-error: true
         with:
           name: regression-logs
           path: reg_*.log
