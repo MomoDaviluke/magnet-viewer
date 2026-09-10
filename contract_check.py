@@ -167,6 +167,22 @@ def main() -> int:
     sig_check("scheduler.tail_piece_window", scheduler, {
         "tail_piece_window": [("file", False), ("piece_length", False)],
     })
+    # plan/07 阶段 1：窗口按字节预算换算（大块种子 240MB 全 ASAP → 16MB 保序）。
+    # 纯函数签名 + 两个新常量按同手法冻结；LOOKAHEAD_PIECES 降级为块数上限但
+    # 取值不变（上面的 preview 绑定断言仍守着 60）。
+    sig_check("scheduler.window_pieces", scheduler, {
+        "window_pieces": [("piece_length", False)],
+    })
+    check(scheduler.LOOKAHEAD_BYTES == 16 * 1024 * 1024,
+          "scheduler.LOOKAHEAD_BYTES == 16MB（plan/07 阶段 1 播放窗口字节预算）")
+    check(scheduler.DEADLINE_STEP_MS == 400,
+          "scheduler.DEADLINE_STEP_MS == 400（窗口内 deadline 递增步长）")
+    check(scheduler.LOOKAHEAD_PIECES == 60
+          and scheduler.window_pieces(16 * 1024) == 60
+          and scheduler.window_pieces(1024 * 1024) == 16
+          and scheduler.window_pieces(4 * 1024 * 1024) == 4
+          and scheduler.window_pieces(8 * 1024 * 1024) == 4,
+          "window_pieces 换算表冻结（16KB→60 上限 / 1MB→16 / 4MB→4 / 8MB→4 下限）")
     sig_check("PreviewScheduler", scheduler.PreviewScheduler, {
         "begin": [("handle", False), ("file", False)],              # 契约 #5
         "request_range": [("start_byte", False), ("end_byte", False)],

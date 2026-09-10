@@ -1,4 +1,4 @@
-"""16 套测试回归运行器：一键全量回归，汇总退出码。
+"""18 套测试回归运行器：一键全量回归，汇总退出码。
 
 依据 README.md 退出码约定与 t4_acceptance_plan.md 回归契约（D4）：
 下载管理模块改造后必须保证 8 套旧测试全绿（0=通过 / 1=失败 / 2=SKIP）。
@@ -13,7 +13,7 @@ SKIP 判定（REVIEW-2026-09 P0-3）：部分套件因依赖缺失显式跳过�
 绝不能打印「回归全绿」。
 
 用法：
-    python regression_run.py            # 全量 16 套
+    python regression_run.py            # 全量 18 套
     python regression_run.py smoke      # 单套（按名字前缀匹配）
 
 退出码：任一测试 FAIL(1) → 本脚本退出 1；全部通过(0) → 0；
@@ -38,6 +38,7 @@ SUITES = [
     "taskops_test",       # 阶段 4 任务 CRUD 专项（假句柄+真注册表，秒级）
     "resolver_test",      # 阶段 5 解析与元数据编排专项（假会话，秒级）
     "preview_test",       # 阶段 5 预览桥与状态专项（假句柄，秒级）
+    "playback_window_test",  # plan/07 阶段 1 播放窗口按字节+deadline 递增（假句柄，秒级）
     "smoke_test",
     "local_magnet_test",
     "local_torrent_test",

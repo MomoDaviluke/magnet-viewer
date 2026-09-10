@@ -710,7 +710,10 @@ def main():
     sched = PreviewScheduler()
     sched.begin(h_sched, f_sched)
     dl = set(h_sched.deadlines)
-    assert dl >= set(range(0, 61)), "开播顺序窗口未预约"
+    # plan/07 阶段 1：窗口块数按字节预算换算（16MB / 1MB 块 = 16 块），
+    # 不再是固定 60 块——旧断言 range(0,61) 是 4MB 块下 240MB 全 ASAP
+    # 洪泛的来源，已由 playback_window_test 专项覆盖。
+    assert dl >= set(range(0, 16)), "开播顺序窗口未预约"
     assert dl >= {96, 97, 98, 99}, "尾部 moov 窗口未预约"
     assert h_sched.prios == [4, 0, 0], h_sched.prios
     # 拖动到 80MB：必须立即预约 seek 点起的窗口（旧实现只改锚点、不预约）
