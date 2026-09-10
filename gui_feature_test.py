@@ -975,10 +975,38 @@ def main() -> int:
         check(_theme.BG == LIGHT["bg"]
               and _theme.SLIDER_SEGMENT == (0, 0, 0, 40),
               "浅色板常量同步（缓冲分段 = 半透明黑，深色板为半透明白）")
-        # ③ system 档解析为实际深浅；非法值回退 light（存量脏配置不崩）
+        # ③ system 档：真机拿不到 OS 深浅时回退 light；本机离屏 colorScheme() 恒
+        #    Unknown → 用桩替换 QGuiApplication 正面验证「Dark→dark / 未知→light /
+        #    异常→light」三分支（system_mode 内部是调用时 import，可用模块属性桩）。
         got_sys = apply_theme(app, "system")
         check(got_sys in ("light", "dark"),
               f"apply_theme(app,'system') 解析为实际深浅（实得 {got_sys!r}）")
+        from PySide6.QtCore import Qt as _Qt  # noqa: E402
+        _gui_mod = sys.modules["PySide6.QtGui"]
+        _orig_gui_app = _gui_mod.QGuiApplication
+        try:
+            class _FakeHints:
+                def __init__(self, scheme):
+                    self._scheme = scheme
+
+                def colorScheme(self):
+                    return self._scheme
+
+            for _name, _scheme, _want in (
+                    ("Dark", _Qt.ColorScheme.Dark, "dark"),
+                    ("Unknown", _Qt.ColorScheme.Unknown, "light")):
+                _gui_mod.QGuiApplication = type(
+                    "_G", (), {"styleHints": staticmethod(
+                        lambda s=_scheme: _FakeHints(s))})
+                check(_theme.resolve_mode("system") == _want,
+                      f"system 档：colorScheme()={_name} → {_want}")
+            _gui_mod.QGuiApplication = type(
+                "_G", (), {"styleHints": staticmethod(
+                    lambda: (_ for _ in ()).throw(RuntimeError("无 GUI 平台")))})
+            check(_theme.resolve_mode("system") == "light",
+                  "system 档：colorScheme() 取不到（异常）→ 回退 light")
+        finally:
+            _gui_mod.QGuiApplication = _orig_gui_app
         check(apply_theme(app, "garbage") == "light",
               "非法主题值回退 light（不抛错）")
         # ④ 自绘控件取色：下载页状态色现读激活色板（热切换后跟着变）
