@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # 其后 7 套 = 旧测试兼容契约；末套 = 下载管理模块验收
 SUITES = [
     "contract_check",
+    "theme_check",          # 主题门禁：色值/内联样式只许在 ui/theme.py（plan B4）
     "persist_test",       # 阶段 1 持久化专项（假依赖，秒级，先跑最便宜的失败信号）
     "session_test",       # 阶段 2 会话核心专项（假依赖，秒级）
     "registry_test",      # 阶段 3 注册表与锁归属专项（假句柄，秒级）
