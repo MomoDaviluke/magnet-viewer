@@ -94,4 +94,7 @@ dependencies {
 
   // 对拍夹具解析（JVM 单测）
   testImplementation(libs.kotlinx.serialization.json)
+
+  // 设置持久化（DataStore Preferences；键名与桌面 core/config.py 一致）
+  implementation(libs.androidx.datastore.preferences)
 }
