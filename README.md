@@ -13,6 +13,16 @@
 - **暗色主题与缓冲可视化**：全局暗色界面（集中式主题，`ui/theme.py`）；播放进度条按分块落盘位图**分段着色**已缓存区域，拖动过程中即预取目标区间（不等松手），跳转后缓冲栏明确提示「跳转中，正在缓冲目标位置」。
 - 预览可随时取消（自动释放下载配额）。
 
+## 安卓版（原生重写，独立目录 `android/`）
+
+同一套能力已在安卓上原生实现（Kotlin + Jetpack Compose + libtorrent4j）：磁力链解析（不下载本体）→ 文件清单 → 视频边下边播 / 图片画廊，另有任务持久化与启动恢复、多任务管理（暂停/转正/移除）、缓存配额、`dataSync` 前台服务（灭屏继续下载）。
+
+- 能力清单、构建与安装、已知限制：见 [`android/README.md`](android/README.md)
+- 本机环境（JDK 17/21、SDK 36、NDK r29、`gradle.bat` 的坑）：见 [`android/ENV.md`](android/ENV.md)
+- 端到端测试靶场（本机做种 + 磁力链 peer 提示 + 模拟器 adb 驱动，不依赖公网）：见 [`android/tools/testrig/README.md`](android/tools/testrig/README.md)
+
+**两版关系**：桌面 Python 版仍是**行为参照**——调度语义（播放窗口按字节、递增 deadline、moov 尾部入口块、点播块数上限）、落盘布局（`.preview/<ih>/`、`downloads/<ih>/`、`.tasks.json`、`.resume/<ih>.fastresume`）与设置键名逐条对齐，并由**跨语言 golden 夹具**（13 组 / 155 条，`android/tools/gen_parity_fixtures.py`）机器校验一致性。
+
 ## 运行
 
 ### 一键启动（Windows）
