@@ -173,9 +173,15 @@ private fun callKeep(provider: () -> Set<String>?): Set<String>? =
  * @param keepDirs 保护名单（活跃任务落盘目录）。给回调时：入口取一次快照，
  *   **每个候选目录删除前再取一次**复核；回调抛异常 = 名单故障 → 本轮保守不删。
  *   给固定集合时行为与「一次性快照」一致（无逐项复核开销）。
- * @param deleteDir 删除实现（默认整目录递归删除）；**返回后仍以「目录是否还在」判定
- *   是否计入释放量**——`deleteRecursively()` 会吞掉删除失败（如文件被占用），
+ * @param deleteDir 删除实现（默认整目录递归删除）；**返回后仍以「目录是否还在」（[dirExists]）
+ *   判定是否计入释放量**——`deleteRecursively()` 会吞掉删除失败（如文件被占用），
  *   若把失败也计入 `freed`，配额会提前「达标」而实际仍超限。
+ * @param scanDirs 扫描实现（默认 [scanPreviewDirs]）：列出候选任务目录。
+ * @param dirExists 删除后复核用的存在性判定（默认 `File.exists()`）。
+ *
+ * [deleteDir] / [scanDirs] / [dirExists] 是本模块与文件系统的**全部接触面**，都带默认真实
+ * 实现：生产调用一个参数都不用传，测试却能整套换成内存替身——于是「删不掉」这类环境
+ * 噪声（Windows 文件占用/防病毒）不再能让断言随机翻红（见 `CacheQuotaTest` 的虚拟树用例）。
  */
 fun enforcePreviewLimit(
   previewRoot: File,
@@ -184,6 +190,8 @@ fun enforcePreviewLimit(
   keepProvider: (() -> Set<String>?)? = null,
   warn: (String) -> Unit = {},
   deleteDir: (File) -> Boolean = { it.deleteRecursively() },
+  scanDirs: (File) -> List<PreviewDirEntry> = ::scanPreviewDirs,
+  dirExists: (File) -> Boolean = { it.exists() },
 ): QuotaResult {
   val notes = ArrayList<String>(4)
   fun note(msg: String) {
@@ -196,7 +204,7 @@ fun enforcePreviewLimit(
   }
 
   val keep = if (keepProvider != null) callKeep(keepProvider) else normalizeKeep(keepDirs)
-  val items = scanPreviewDirs(previewRoot)
+  val items = scanDirs(previewRoot)
   var total = items.sumOf { it.sizeBytes }
   if (keep == null) {
     // 名单故障：一个都不删（保守），但仍然如实报告占用
@@ -248,7 +256,7 @@ fun enforcePreviewLimit(
       failed.add(item.path)
       continue
     }
-    if (!ok || target.exists()) {
+    if (!ok || dirExists(target)) {
       // 删除失败（文件被占用等）/ 假成功：**不计入 freed**，否则配额提前达标而实际仍超限
       note("删除预览目录失败（留待下次）：${item.path}")
       failed.add(item.path)
@@ -274,6 +282,9 @@ fun enforcePreviewLimit(
  * 与 [enforcePreviewLimit] 的分工：那个是「超限才按 LRU 删」的自动闸门（`limit<=0` 只统计），
  * 这个是用户显式动作（对应桌面设置页的「立即清理」= 清空非保留内容）。两条路都遵守同一个
  * 保护名单（删除前重取）与同一条失败不入账规则。
+ *
+ * 文件系统接触面与 [enforcePreviewLimit] 同款（[scanDirs] / [deleteDir] / [dirExists]，
+ * 默认全是真实实现）——生产调用不用传，测试可整套换成内存替身。
  */
 fun purgePreviewDirs(
   previewRoot: File,
@@ -281,6 +292,8 @@ fun purgePreviewDirs(
   keepProvider: (() -> Set<String>?)? = null,
   warn: (String) -> Unit = {},
   deleteDir: (File) -> Boolean = { it.deleteRecursively() },
+  scanDirs: (File) -> List<PreviewDirEntry> = ::scanPreviewDirs,
+  dirExists: (File) -> Boolean = { it.exists() },
 ): QuotaResult {
   val notes = ArrayList<String>(4)
   fun note(msg: String) {
@@ -291,7 +304,7 @@ fun purgePreviewDirs(
       // 日志本身不能成为失败点
     }
   }
-  val items = scanPreviewDirs(previewRoot)
+  val items = scanDirs(previewRoot)
   val total = items.sumOf { it.sizeBytes }
   val keepSnap = if (keepProvider != null) callKeep(keepProvider) else normalizeKeep(keepDirs)
   if (keepSnap == null) {
@@ -330,7 +343,7 @@ fun purgePreviewDirs(
       failed.add(item.path)
       continue
     }
-    if (!ok || target.exists()) {
+    if (!ok || dirExists(target)) {
       note("清理目录失败（留待下次）：${item.path}")
       failed.add(item.path)
       continue
