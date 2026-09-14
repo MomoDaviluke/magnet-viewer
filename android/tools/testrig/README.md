@@ -60,6 +60,23 @@ cd /c/Users/Administrator/Desktop/magnet-viewer
 - 自证结果：元数据 0.6s 到位；两个 mp4 sha256 与源文件逐字节一致
 - 模拟器侧：`ping 10.0.2.2` 通（1ms）、`nc 10.0.2.2 16881` 返回 0（TCP 可达）
 
+## 大夹具（灭屏 / 后台保活测试）
+
+小夹具 88KB 一眨眼就下完，测不出“灭屏后是否还在下载”。所以另配一份大夹具：
+
+- 内容：`payload_big/big.bin`（24 MiB 随机数据，256KB 分块）
+- 磁力链：`magnet_big.txt`（infohash `9003c8f6cb45c7a42c6e17dd8347b68bcc39df78`，同样带 `x.pe=10.0.2.2:16881`）
+- 用做种端**上传限速**把传输拉长到分钟级：
+
+```bash
+./.venv/Scripts/python android/tools/testrig/seed.py \
+    --torrent fixture_big.torrent --payload payload_big --limit-kbps 300
+```
+
+**同一端口同一时刻只能跑一个做种端**（两条磁力链都指向 16881）：切大夹具前先杀掉在做种的那个 python 进程，切回来同理。
+
+灭屏测试的验收口径：**灭屏 60 秒内下载字节仍在增长**（两次采样对比）+ `adb shell dumpsys activity services com.bitseed.magnetviewer | grep -i foreground` 里 FGS 存活。
+
 ## 注意
 
 - 夹具重建后 **infohash 会变**（只要视频文件重新生成），`magnet.txt` 要跟着刷新。
