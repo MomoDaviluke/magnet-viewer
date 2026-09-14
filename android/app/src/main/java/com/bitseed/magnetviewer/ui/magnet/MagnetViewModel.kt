@@ -36,6 +36,9 @@ import com.bitseed.magnetviewer.engine.ImageDownloadState
 import com.bitseed.magnetviewer.engine.RestoreReport
 import com.bitseed.magnetviewer.engine.StallWatch
 import com.bitseed.magnetviewer.engine.PARSE_ONLY_NO_SELECTION_NOTE
+import com.bitseed.magnetviewer.engine.ProxyConfig
+import com.bitseed.magnetviewer.engine.ProxyDecision
+import com.bitseed.magnetviewer.engine.decideEffectiveProxy
 import com.bitseed.magnetviewer.engine.TaskSnapshot
 import com.bitseed.magnetviewer.engine.deriveImageState
 import com.bitseed.magnetviewer.engine.stateAfterResume
@@ -156,6 +159,12 @@ data class MagnetUiState(
   val taskRows: List<TaskRow> = emptyList(),
   /** 展开看文件清单的任务 info_hash（空 = 都收起）。 */
   val expandedTask: String = "",
+  /**
+   * **代理状态提示**（I-03 的人话出口）：探活失败时设成
+   * 「代理不可达（host:port）：已回退直连（原因）」，探活通过/直连时设成「直连（未启用代理）」
+   * —— 状态行**永远说实话**，不再出现「填了坏代理却宣称已生效」。
+   */
+  val proxyNote: String? = null,
   /**
    * **下载停滞提示**（C-01 的人话出口）：下载中/元数据中且连续 20 秒零字节增长、peer=0 时
    * 设成「已 N 秒无数据增长（peer 0），源可能已掉线，正在重试」；字节恢复增长自动置回 null。
@@ -1159,13 +1168,34 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     val v = s.sanitized()
     // 「运行日志」开关的执行点（设置流每次发射都过这里）
     AppLog.syncFromSettings(v)
+    // **代理探活（I-03）**：启用中的代理先做一次真实握手；不可达 → 回退直连并如实上报。
+    // 探活是网络动作，必须在 IO 线程；失败**不静默**（状态行 + 日志都写清）。
+    val decision =
+      withContext(Dispatchers.IO) {
+        runCatching { decideEffectiveProxy(v.toProxyConfig()) }.getOrElse { e ->
+          log("代理探活异常：已按直连处理（" + (e.message ?: e.javaClass.simpleName) + "）")
+          ProxyDecision(
+            effective = ProxyConfig(com.bitseed.magnetviewer.data.PROXY_TYPE_NONE, v.proxyHost, v.proxyPort, v.proxyUser, v.proxyPass, v.proxyPeer),
+            note = "代理探活失败：已回退直连（" + (e.message ?: e.javaClass.simpleName) + "）",
+            ok = false,
+          )
+        }
+      }
+    if (decision.note != null) log("代理状态：${decision.note}")
     withContext(Dispatchers.IO) {
-      runCatching { engine.applyProxy(v.toProxyConfig()) }
+      runCatching { engine.applyProxy(decision.effective) }
       runCatching { engine.applyRateLimit(v.downloadRateLimit) }
       runCatching { engine.applyMetadataTimeout(v.metadataTimeout) }
       runCatching { engine.setPreviewCacheMode(v.previewCacheMode) }
     }
-    _state.update { it.copy(cacheMode = engine.previewCacheMode()) }
+    _state.update {
+      it.copy(
+        cacheMode = engine.previewCacheMode(),
+        proxyNote = decision.note,
+        // 探活失败的说明要出现在状态行（用户不看设置页也能知道代理没生效）
+        statusText = if (decision.note != null) decision.note else it.statusText,
+      )
+    }
     // **cache_limit_mb 的生效点**：设置一变就按新上限跑一次配额（超限即 LRU 清理非保护目录）
     enforceCacheLimit("设置变更（上限 ${v.cacheLimitMb} MB）")
     refreshCacheUsage(cacheRootOrNull())
