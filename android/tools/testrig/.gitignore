@@ -1,0 +1,6 @@
+# 派生数据不入库（用 mkfixture.py 现生成）
+payload/
+*.torrent
+magnet.txt
+seed.log
+leech*/
