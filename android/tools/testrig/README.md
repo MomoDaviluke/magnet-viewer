@@ -26,13 +26,13 @@ Android 模拟器里 **`10.0.2.2` 等价于宿主机的 `127.0.0.1`**，于是�
 cd /c/Users/Administrator/Desktop/magnet-viewer
 
 # 1) 生成/刷新夹具（已存在则跳过视频，仅重建种子与磁力链）
-./.venv/Scripts/python .hermes/android-test/mkfixture.py
+./.venv/Scripts/python android/tools/testrig/mkfixture.py
 
 # 2) 自证 seam（必须先绿，再谈 App 的问题）
-./.venv/Scripts/python .hermes/android-test/selftest.py      # 期望：结论：seam 可用 ✓
+./.venv/Scripts/python android/tools/testrig/selftest.py      # 期望：结论：seam 可用 ✓
 
 # 3) 起做种端（后台常驻；每次改完夹具要重启）
-./.venv/Scripts/python .hermes/android-test/seed.py          # 期望：[seed] ... state=seeding
+./.venv/Scripts/python android/tools/testrig/seed.py          # 期望：[seed] ... state=seeding
 
 # 4) 从模拟器内验证端口可达（应输出 nc exit=0）
 "$ANDROID_HOME/platform-tools/adb.exe" shell 'nc -w 4 10.0.2.2 16881 </dev/null; echo nc exit=$?'
@@ -45,7 +45,7 @@ cd /c/Users/Administrator/Desktop/magnet-viewer
 1. **`torrent_info.info_hash()` 不是 v1 哈希**。libtorrent 2.1 里它对混合种子返回 **v2 截断哈希**，
    磁力链的 `btih` 用的是 **`info_hashes().v1`**。拿 `info_hash()` 与磁力链对比会误判"hash 不匹配"。
 2. **做种端的 `save_path` 必须是种子内容根目录的父目录**。种子里文件路径是 `<种子名>/xxx`，
-   种子名就是 `payload`，所以 `save_path` 要用 `.hermes/android-test/`，不是 `.../payload/`。
+   种子名就是 `payload`，所以 `save_path` 要用 `android/tools/testrig/`，不是 `.../payload/`。
    写错的表现是：状态一直 `downloading`、需要下载自己已有的数据。
 3. **`listen_interfaces` 不要用 `:0`（随机端口）**：libtorrent 会按网卡各绑一个**不同的**随机端口，
    `listen_port()` 只返回其中一个，对端会拨错端口（实测连接被拒 10061）。**一律写死端口**。
