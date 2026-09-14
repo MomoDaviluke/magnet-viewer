@@ -8,24 +8,31 @@ import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
 import com.bitseed.magnetviewer.core.model.ParseResult
 import com.bitseed.magnetviewer.core.model.TorrentFile
 import com.bitseed.magnetviewer.core.model.humanSize
+import com.bitseed.magnetviewer.core.states.STATE_DELETED
 import com.bitseed.magnetviewer.core.states.STATE_DOWNLOADING
 import com.bitseed.magnetviewer.core.states.STATE_FAILED
 import com.bitseed.magnetviewer.core.states.STATE_PAUSED
 import com.bitseed.magnetviewer.data.AppSettings
 import com.bitseed.magnetviewer.data.MagnetStorage
+import com.bitseed.magnetviewer.data.PREVIEW_SUBDIR
+import com.bitseed.magnetviewer.data.QuotaResult
 import com.bitseed.magnetviewer.data.ResumeStore
 import com.bitseed.magnetviewer.data.SettingsStore
 import com.bitseed.magnetviewer.data.TaskRecord
 import com.bitseed.magnetviewer.data.applyDeletion
+import com.bitseed.magnetviewer.data.cacheUsage
+import com.bitseed.magnetviewer.data.enforcePreviewLimit
 import com.bitseed.magnetviewer.data.loadTasks
 import com.bitseed.magnetviewer.data.planDeletion
 import com.bitseed.magnetviewer.data.previewDirFor
+import com.bitseed.magnetviewer.data.purgePreviewDirs
 import com.bitseed.magnetviewer.data.removeTask
 import com.bitseed.magnetviewer.data.saveTasksQuietly
 import com.bitseed.magnetviewer.data.taskFromResult
 import com.bitseed.magnetviewer.data.upsertTask
 import com.bitseed.magnetviewer.engine.BtEngine
 import com.bitseed.magnetviewer.engine.RestoreReport
+import com.bitseed.magnetviewer.engine.TaskSnapshot
 import com.bitseed.magnetviewer.service.DownloadService
 import com.bitseed.magnetviewer.stream.StreamServer
 import java.io.File
@@ -51,6 +58,31 @@ data class MagnetFileItem(
   val path: String,
   val sizeText: String,
   val isVideo: Boolean,
+)
+
+/**
+ * 任务列表中的一行（多任务 UI）。
+ *
+ * 字段与桌面 `taskops.tasks()` 快照同名：名称 / 状态 / 总大小 / **已下载**（`fileProgress`
+ * 求和，不是磁盘占用）/ 优先级；[files] 只在展开时填充（省得每轮都拷清单）。
+ */
+data class TaskRow(
+  val infoHash: String,
+  val name: String,
+  val state: String,
+  val totalSizeText: String,
+  val downloadedText: String,
+  val progressPercent: Int,
+  val priority: Int,
+  /** 是否下载型任务（转正后 true）。 */
+  val isDownload: Boolean,
+  val savePath: String,
+  /** 是否当前焦点任务（清单/预览跟着它）。 */
+  val focused: Boolean,
+  val expanded: Boolean,
+  val files: List<MagnetFileItem> = emptyList(),
+  val error: String = "",
+  val rateText: String = "",
 )
 
 data class MagnetUiState(
@@ -94,6 +126,14 @@ data class MagnetUiState(
   val taskState: String = "",
   /** 最近一次落盘的结果文案（证明清单真的写到磁盘了）。 */
   val persistNote: String = "",
+  /** 任务列表（多任务：一行一个 info_hash）。 */
+  val taskRows: List<TaskRow> = emptyList(),
+  /** 展开看文件清单的任务 info_hash（空 = 都收起）。 */
+  val expandedTask: String = "",
+  /** 缓存占用文案（**目录实际字节**口径；与「已下载」两回事）。 */
+  val cacheUsageText: String = "",
+  /** 最近一次缓存清理的结果文案。 */
+  val cacheNote: String = "",
 )
 
 /**
@@ -117,36 +157,48 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   private val engine =
     BtEngine(
       object : BtEngine.Listener {
-        override fun onMetadataReady(infoHash: String, result: ParseResult) {
+        override fun onMetadataReady(infoHash: String, result: ParseResult, focused: Boolean) {
           watchdog?.cancel()
-          currentFiles = result.files
-          currentInfoHash = infoHash
-          log("UI 收到元数据就绪：name=${result.name} 文件数=${result.files.size} infohash=$infoHash")
-          _state.update { st ->
-            st.copy(
-              busy = false,
-              errorText = null,
-              statusText = "元数据就绪（未下载本体）",
-              torrentName = result.name,
-              infoHash = infoHash,
-              totalSizeText = humanSize(result.totalSize),
-              persistNote = st.persistNote,
-              files =
-                result.viewFiles.map { f ->
-                  MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo)
-                },
-            )
+          log("UI 收到元数据就绪：name=${result.name} 文件数=${result.files.size} infohash=${infoHash.take(12)}… focused=$focused")
+          if (focused) {
+            currentFiles = result.files
+            currentInfoHash = infoHash
+            _state.update { st ->
+              st.copy(
+                busy = false,
+                errorText = null,
+                statusText = "元数据就绪（未下载本体）",
+                torrentName = result.name,
+                infoHash = infoHash,
+                totalSizeText = humanSize(result.totalSize),
+                persistNote = st.persistNote,
+                files =
+                  result.viewFiles.map { f ->
+                    MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo)
+                  },
+              )
+            }
+          } else {
+            // 非焦点任务的元数据：不动当前展示，只更新列表与记录
+            _state.update {
+              it.copy(busy = false, statusText = "元数据就绪：${result.name}（任务列表已更新）")
+            }
           }
-          // 元数据就绪 = 清单落盘点之一（重启后靠它直接上屏，不必再等 DHT）
-          persistCurrentTask("元数据就绪", STATE_PAUSED)
+          // 清单落盘点之一（重启后靠它直接上屏，不必再等 DHT）
+          upsertRecordFromResult(infoHash, result, STATE_PAUSED)
           requestResume("元数据就绪")
+          refreshTasksSoon()
         }
 
-        override fun onMetadataError(message: String) {
+        override fun onMetadataError(message: String, infoHash: String) {
           watchdog?.cancel()
-          log("UI 收到元数据错误：$message")
+          log("UI 收到元数据错误：$message（任务=${infoHash.ifEmpty { "-" }}）")
           _state.update { it.copy(busy = false, statusText = "", errorText = message) }
-          markState(STATE_FAILED, "元数据阶段失败", error = message)
+          // 多任务：只有**知道是哪个任务**才改记录状态（不把别人的超时记到焦点头上）；
+          // 无归属（加种参数就失败）只上屏错误文案，不动任何任务记录。
+          if (infoHash.isNotEmpty() && tasks[infoHash] != null) {
+            markStateFor(infoHash, STATE_FAILED, "元数据阶段失败", error = message)
+          }
         }
 
         override fun onStatus(message: String) {
@@ -156,10 +208,24 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
 
         override fun onTaskStateChanged(infoHash: String, state: String) {
           log("UI 收到任务状态变化：${infoHash.take(12)}… → $state")
-          val cur = tasks[infoHash] ?: return // 记录还没建立（等 onMetadataReady 落盘）
-          tasks = tasks + (infoHash to cur.copy(state = state))
+          if (state == STATE_DELETED) {
+            // 引擎已摘除该任务：记录同步摘掉（removedByEngine 的路径）
+            tasks = removeTask(tasks, infoHash)
+            if (currentInfoHash == infoHash) currentInfoHash = ""
+            _state.update { it.copy(taskState = "", persistedTaskCount = tasks.size) }
+            persistTasks("任务已移除")
+            refreshTasksSoon()
+            return
+          }
+          val cur = tasks[infoHash] ?: run {
+            // 记录还没建立（等元数据/快照落盘）：拉一次快照兜住
+            refreshTasksSoon()
+            return
+          }
+          tasks = tasks + (infoHash to cur.copy(state = state, error = ""))
           if (infoHash == currentInfoHash) _state.update { it.copy(taskState = state) }
           persistTasks("状态变化 $state")
+          refreshTasksSoon()
         }
       }
     )
@@ -326,6 +392,66 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     persistTasks(reason)
   }
 
+  /**
+   * 用一次解析结果写入/更新**指定任务**的记录（多任务：不再假设对象是当前焦点）。
+   *
+   * 保留既有记录的创建时间/优先级/重试计数与「选中文件」（转正过的任务不该被清单刷新抹掉选择）。
+   */
+  private fun upsertRecordFromResult(
+    infoHash: String,
+    result: ParseResult,
+    state: String,
+    error: String = "",
+    download: Boolean = true,
+  ) {
+    val savePath = engine.taskSaveDir(infoHash)?.path ?: tasks[infoHash]?.savePath ?: ""
+    val prev = tasks[infoHash]
+    val fresh =
+      try {
+        taskFromResult(
+          result = result,
+          source = sourceFor(infoHash),
+          savePath = savePath,
+          state = state,
+          download = download,
+          error = error,
+          createdAt = prev?.createdAt ?: nowSeconds(),
+        )
+      } catch (e: Throwable) {
+        log("清单记录构造失败（${infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+        return
+      }
+    val merged =
+      if (prev == null) {
+        fresh
+      } else {
+        fresh.copy(
+          priority = prev.priority,
+          retries = prev.retries,
+          finishedAt = prev.finishedAt,
+          selected = if (prev.selected.isNotEmpty()) prev.selected else fresh.selected,
+        )
+      }
+    tasks = upsertTask(tasks, merged)
+    if (infoHash == currentInfoHash) {
+      _state.update { it.copy(taskState = merged.state, persistedTaskCount = tasks.size) }
+    }
+    persistTasks("元数据就绪")
+  }
+
+  /** 触发一次引擎快照同步（异步；任何「任务可能变了」的点都调它）。 */
+  private fun refreshTasksSoon() {
+    viewModelScope.launch {
+      try {
+        syncFromEngine()
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Throwable) {
+        log("任务列表同步异常（已忽略）：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+  }
+
   /** 只改当前任务的状态并落盘（预览开始/暂停/继续/停止、元数据失败）。 */
   private fun markState(state: String, reason: String, error: String = "") {
     val ih = currentInfoHash
@@ -416,6 +542,16 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       }
       if (shown != null && shown.error.isNotEmpty()) _state.update { it.copy(errorText = shown.error) }
       persistTasks("启动恢复")
+      // 多任务：恢复完把任务列表拉起来（引擎注册表此时已就绪），并跑一次配额
+      try {
+        syncFromEngine()
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Throwable) {
+        log("启动恢复后任务列表同步异常（已忽略）：" + (e.message ?: e.javaClass.simpleName))
+      }
+      refreshCacheUsage(root)
+      enforceCacheLimit("启动恢复")
     }
   }
 
@@ -470,63 +606,415 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     }
   }
 
+  // ---------------------------------------------------------------- 多任务（任务列表 + 逐任务操作）
+
   /**
-   * 移除当前任务：**默认只摘清单记录 + 删 fastresume，绝不删用户数据目录**（不变量 C）。
+   * 把「当前焦点」对齐到引擎（多任务）：引擎是焦点的唯一真值来源。
    *
-   * 删除动作由纯函数 [planDeletion] 决定：数据目录只有调用方**显式**传
-   * `deleteUserData = true` 且目录确实在应用私有目录内才会被删。
-   *
-   * @return 无（结果经 [MagnetUiState.restoreNote] / 日志上报）
+   * 为什么必须做：解析新磁力链/恢复任务都会在**引擎侧**切焦点，而 VM 的 `currentInfoHash`
+   * 若不同步，就会出现「列表显示 A 是焦点、记录却改到 B 头上」这类错位（实测踩到：
+   * 非焦点任务元数据超时，状态 FAILED 记到了另一个任务）。
    */
-  fun removeCurrentTask(deleteUserData: Boolean = false) {
-    val ih = currentInfoHash
-    val record = tasks[ih]
-    if (record == null) {
-      _state.update { it.copy(errorText = "没有可移除的任务（清单为空）") }
+  private suspend fun syncFocusFromEngine() {
+    val ih = withContext(Dispatchers.IO) { runCatching { engine.infoHash() }.getOrDefault("") }
+    if (ih == currentInfoHash) return
+    currentInfoHash = ih
+    val res = if (ih.isEmpty()) null else withContext(Dispatchers.IO) { engine.taskResult(ih) }
+    currentFiles = res?.files ?: tasks[ih]?.files ?: emptyList()
+    log("焦点对齐引擎：${ih.ifEmpty { "-" }}")
+    _state.update { st ->
+      st.copy(
+        torrentName = res?.name ?: tasks[ih]?.name ?: "",
+        infoHash = ih,
+        totalSizeText = humanSize(res?.totalSize ?: tasks[ih]?.totalSize ?: 0L),
+        files =
+          currentFiles.filter { !it.isPad }.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) },
+        taskState = tasks[ih]?.state ?: "",
+      )
+    }
+  }
+
+  /**
+   * 从引擎拉一次全任务快照，**并**把内存记录（`.tasks.json` 的镜像）同步到真实状态。
+   *
+   * 为什么在轮询里做：状态/进度/落盘目录的真值在引擎（句柄）那边；UI 每秒一次的快照
+   * 顺带把「转正换了目录 / 下载完成 / 优先级改了」这类变化写回记录，避免两处判断分叉。
+   */
+  private suspend fun syncFromEngine() {
+    // 焦点以**引擎为准**（用户点行/新解析都会在引擎侧切焦点；VM 不自己臆断焦点）
+    syncFocusFromEngine()
+    val snaps =
+      withContext(Dispatchers.IO) { runCatching { engine.taskSnapshots() }.getOrElse { emptyList() } }
+    if (snaps.isEmpty() && tasks.isEmpty()) {
+      _state.update { it.copy(taskRows = emptyList()) }
       return
     }
+    var next = tasks
+    var changed = false
+    for (s in snaps) {
+      if (!isPersistableKey(s.infoHash)) continue
+      val cur = next[s.infoHash]
+      val res = if (s.hasMetadata) withContext(Dispatchers.IO) { engine.taskResult(s.infoHash) } else null
+      if (cur == null) {
+        val rec =
+          try {
+            if (res != null) {
+              taskFromResult(
+                res,
+                source = sourceFor(s.infoHash),
+                savePath = s.savePath,
+                state = s.state,
+                download = s.download,
+                priority = s.priority,
+                createdAt = nowSeconds(),
+              )
+            } else {
+              TaskRecord(
+                infoHash = s.infoHash,
+                source = sourceFor(s.infoHash),
+                name = s.name,
+                state = s.state,
+                priority = s.priority,
+                savePath = s.savePath,
+                download = s.download,
+                createdAt = nowSeconds(),
+              )
+            }
+          } catch (e: Throwable) {
+            log("任务记录构造失败（${s.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+            null
+          }
+        if (rec != null) {
+          next = upsertTask(next, rec)
+          changed = true
+          log("任务记录新增（引擎快照）：${s.infoHash.take(12)}… ${s.name} state=${s.state}")
+        }
+      } else {
+        val merged =
+          if (cur.files.isEmpty() && res != null) {
+            cur.copy(
+              files = res.files,
+              totalSize = res.totalSize,
+              name = res.name.ifEmpty { cur.name },
+              selected = cur.selected.ifEmpty { res.viewFiles.map { it.path } },
+            )
+          } else {
+            cur
+          }
+        val updated =
+          merged.copy(
+            state = s.state,
+            savePath = s.savePath.ifEmpty { merged.savePath },
+            download = s.download,
+            priority = s.priority,
+            error = s.error.ifEmpty { merged.error },
+          )
+        if (updated != cur) {
+          next = next + (s.infoHash to updated)
+          changed = true
+        }
+      }
+    }
+    if (changed) {
+      tasks = next
+      persistTasks("任务同步")
+    }
+    val expanded = _state.value.expandedTask
+    val rows = snaps.filter { isPersistableKey(it.infoHash) }.map { rowOf(it, expanded, next[it.infoHash]) }
+    _state.update { it.copy(taskRows = rows, persistedTaskCount = tasks.size) }
+  }
+
+  /** 能否作为持久化键（40/64 位 hex；临时键不落盘）。 */
+  private fun isPersistableKey(ih: String): Boolean =
+    try {
+      com.bitseed.magnetviewer.data.normalizeInfoHash(ih) != null
+    } catch (_: Throwable) {
+      false
+    }
+
+  /** 记录里用的来源（已知就用已知的，否则按 info_hash 造一条可恢复的磁力链）。 */
+  private fun sourceFor(infoHash: String): String {
+    val known = tasks[infoHash]?.source?.takeIf { it.isNotEmpty() }
+    if (known != null) return known
+    if (infoHash == currentInfoHash && currentSource.isNotEmpty()) return currentSource
+    return "magnet:?xt=urn:btih:$infoHash"
+  }
+
+  private fun rowOf(s: TaskSnapshot, expanded: String, record: TaskRecord?): TaskRow {
+    val files =
+      if (expanded == s.infoHash) {
+        val from = engine.taskResult(s.infoHash)?.viewFiles ?: record?.viewFiles ?: emptyList()
+        from.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) }
+      } else {
+        emptyList()
+      }
+    return TaskRow(
+      infoHash = s.infoHash,
+      name = s.name,
+      state = s.state,
+      totalSizeText = humanSize(s.totalSize),
+      downloadedText = humanSize(s.downloadedBytes),
+      progressPercent = (s.progress * 100.0).roundToInt().coerceIn(0, 100),
+      priority = s.priority,
+      isDownload = s.download,
+      savePath = s.savePath,
+      focused = s.infoHash == currentInfoHash,
+      expanded = expanded == s.infoHash,
+      files = files,
+      error = s.error,
+      rateText = if (s.rateKbps > 0) "${s.rateKbps} KB/s" else "",
+    )
+  }
+
+  /** 点某行任务 → 设为焦点（下面的清单/预览跟着它）。 */
+  fun focusTask(infoHash: String) {
     viewModelScope.launch {
-      val root = cacheRootOrNull()
-      val dataDir = root?.let { previewDirFor(it, ih) }
-      val appRoot = root?.parentFile ?: root
-      val plan = if (dataDir != null && appRoot != null) planDeletion(ih, dataDir, appRoot, deleteUserData) else null
-      if (plan == null || !plan.valid) {
-        val msg = plan?.error?.ifEmpty { "删除计划不可用" } ?: "删除计划不可用"
-        log("移除任务中止：$msg")
-        _state.update { it.copy(errorText = msg) }
+      val ok = withContext(Dispatchers.IO) { runCatching { engine.focusTask(infoHash) }.getOrDefault(false) }
+      if (!ok) {
+        _state.update { it.copy(errorText = "切换任务失败：任务不存在（${infoHash.take(12)}…）") }
         return@launch
       }
-      val applied = withContext(Dispatchers.IO) { applyDeletion(plan, root, dataDir) }
-      val resumeDeleted = applied.resumeDeleted
-      val dataDeleted = applied.userDataDeleted
-      tasks = removeTask(tasks, ih)
-      log(
-        "移除任务：${ih.take(12)}… 清单已摘除（resume 删除=$resumeDeleted）" +
-          if (plan.removeUserDataDir) "；用户数据目录**按显式要求**删除=$dataDeleted（${plan.userDataDir}）"
-          else "；用户数据目录**保留**（${plan.userDataDir}）"
-      )
-      currentInfoHash = ""
-      currentFiles = emptyList()
-      _state.update {
-        it.copy(
-          torrentName = "",
-          infoHash = "",
-          totalSizeText = "",
-          files = emptyList(),
-          taskState = "",
+      val res = withContext(Dispatchers.IO) { engine.taskResult(infoHash) }
+      currentInfoHash = infoHash
+      currentFiles = res?.files ?: tasks[infoHash]?.files ?: emptyList()
+      _state.update { st ->
+        st.copy(
+          torrentName = res?.name ?: tasks[infoHash]?.name ?: infoHash,
+          infoHash = infoHash,
+          totalSizeText = humanSize(res?.totalSize ?: tasks[infoHash]?.totalSize ?: 0L),
+          files = currentFiles.filter { !it.isPad }.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) },
+          taskState = tasks[infoHash]?.state ?: st.taskState,
           previewIndex = -1,
           previewTitle = "",
-          previewNote = "",
-          bufferPercent = 0f,
-          bufferText = "",
           streamUrl = "",
+          previewNote = "",
+          errorText = null,
+          statusText = "焦点任务：${res?.name ?: infoHash}",
+        )
+      }
+      syncFromEngine()
+    }
+  }
+
+  /** 展开/收起某任务的文件清单（不切焦点）。 */
+  fun toggleTaskExpand(infoHash: String) {
+    val cur = _state.value.expandedTask
+    val next = if (cur == infoHash) "" else infoHash
+    _state.update { it.copy(expandedTask = next) }
+    viewModelScope.launch { syncFromEngine() }
+  }
+
+  /** 暂停任务（逐任务；桌面 `pause_task`）。 */
+  fun pauseTask(infoHash: String) {
+    viewModelScope.launch {
+      val ok = withContext(Dispatchers.IO) { runCatching { engine.pauseTask(infoHash) }.getOrDefault(false) }
+      markStateFor(infoHash, if (ok) STATE_PAUSED else null, "暂停任务", if (ok) "" else "暂停失败：句柄不可用")
+      _state.update { it.copy(statusText = if (ok) "已暂停任务（${infoHash.take(12)}…）" else "暂停失败：句柄不可用") }
+      syncFromEngine()
+    }
+  }
+
+  /** 继续任务（逐任务；桌面 `resume_task`）。 */
+  fun resumeTask(infoHash: String) {
+    viewModelScope.launch {
+      startServiceForTask()
+      val ok = withContext(Dispatchers.IO) { runCatching { engine.resumeTask(infoHash) }.getOrDefault(false) }
+      markStateFor(infoHash, if (ok) STATE_DOWNLOADING else null, "继续任务", if (ok) "" else "继续失败：句柄不可用")
+      _state.update { it.copy(statusText = if (ok) "已继续任务（${infoHash.take(12)}…）" else "继续失败：句柄不可用") }
+      syncFromEngine()
+    }
+  }
+
+  /**
+   * 转正（桌面 D10 + 本任务书要求）：任务目录 `.preview/<ih>` → `downloads/<ih>`，并继续下载该文件。
+   * 若该任务正在预览，先停预览（同一批文件不并发搬运/读写）。
+   */
+  fun promoteTask(infoHash: String) {
+    viewModelScope.launch {
+      startServiceForTask()
+      _state.update { it.copy(statusText = "正在转正（搬运数据目录 → downloads/）…") }
+      val selected = tasks[infoHash]?.selected ?: emptyList()
+      val ok =
+        withContext(Dispatchers.IO) {
+          runCatching { engine.promoteTask(infoHash, selected.ifEmpty { null }) }.getOrDefault(false)
+        }
+      if (ok) {
+        _state.update { st ->
+          st.copy(
+            previewIndex = -1,
+            previewTitle = "",
+            streamUrl = "",
+            previewNote = "",
+            statusText = "已转正：数据目录 → downloads/${infoHash.take(12)}…（继续下载该文件）",
+          )
+        }
+        // 预览流服务按旧根建的：关掉，下次预览按新目录重建
+        server?.let { runCatching { it.close() } }
+        server = null
+      } else {
+        _state.update { it.copy(errorText = "转正失败（任务不存在或句柄不可用）") }
+      }
+      syncFromEngine()
+    }
+  }
+
+  /** 设置任务优先级（0..3，影响并发）。 */
+  fun setTaskPriority(infoHash: String, priority: Int) {
+    viewModelScope.launch {
+      val ok = withContext(Dispatchers.IO) { runCatching { engine.setTaskPriority(infoHash, priority) }.getOrDefault(false) }
+      _state.update {
+        it.copy(statusText = if (ok) "优先级已设为 $priority（影响下载队列与并发）" else "优先级设置被拒绝（值域 0..3）")
+      }
+      syncFromEngine()
+    }
+  }
+
+  /**
+   * 移除任务（两个选项；桌面 `remove_task`）。
+   *
+   * - `deleteData=false`：只摘记录 + 删 fastresume，**数据目录保留**；
+   * - `deleteData=true`：经**目录包含性守卫**（受管根内 + 目录名 == info_hash）删除数据目录；
+   *   守卫拒绝时数据一律保留（绝不删到用户其它数据）。
+   */
+  fun removeTask(infoHash: String, deleteData: Boolean) {
+    val record = tasks[infoHash]
+    viewModelScope.launch {
+      val ok = withContext(Dispatchers.IO) { runCatching { engine.removeTask(infoHash, deleteData) }.getOrDefault(false) }
+      if (!ok) {
+        _state.update { it.copy(errorText = "移除失败：任务不在列表中（${infoHash.take(12)}…）") }
+        return@launch
+      }
+      tasks = removeTask(tasks, infoHash)
+      if (currentInfoHash == infoHash) {
+        currentInfoHash = ""
+        currentFiles = emptyList()
+      }
+      if (_state.value.expandedTask == infoHash) _state.update { it.copy(expandedTask = "") }
+      val root = cacheRootOrNull()
+      val dir = record?.savePath?.takeIf { it.isNotEmpty() }?.let { File(it) } ?: root?.let { previewDirFor(it, infoHash) }
+      val kept = dir != null && dir.exists()
+      log(
+        "移除任务：${infoHash.take(12)}…（删数据=$deleteData；目录 ${dir?.path}）" +
+          if (deleteData) " → 目标目录已删除=${!kept}" else " → 目标目录保留=$kept"
+      )
+      _state.update {
+        it.copy(
+          previewIndex = -1,
+          previewTitle = "",
+          streamUrl = "",
+          previewNote = "",
+          statusText =
+            if (deleteData) "已移除任务并删除数据目录" else "已移除任务（数据保留${if (dir != null) "：" + dir.path else ""}）",
           persistedTaskCount = tasks.size,
-          restoreNote =
-            "已移除任务记录（resume 删除=$resumeDeleted）；用户数据目录" +
-              if (plan.removeUserDataDir) "已按显式要求删除" else "保留：" + plan.userDataDir,
         )
       }
       persistTasks("移除任务")
+      refreshCacheUsage(root)
+      syncFromEngine()
+    }
+  }
+
+  /** 保留旧入口（当前焦点任务）：默认**保留数据**（不变量 C）。 */
+  fun removeCurrentTask(deleteUserData: Boolean = false) {
+    val ih = currentInfoHash
+    if (ih.isEmpty() || tasks[ih] == null) {
+      _state.update { it.copy(errorText = "没有可移除的任务（清单为空）") }
+      return
+    }
+    removeTask(ih, deleteUserData)
+  }
+
+  /** 改某任务记录的状态并落盘（逐任务版 [markState]）。 */
+  private fun markStateFor(infoHash: String, state: String?, reason: String, error: String = "") {
+    val cur = tasks[infoHash] ?: return
+    if (state == null) {
+      if (error.isNotEmpty()) {
+        tasks = tasks + (infoHash to cur.copy(error = error))
+        _state.update { it.copy(errorText = error) }
+        persistTasks(reason)
+      }
+      return
+    }
+    tasks = tasks + (infoHash to cur.copy(state = state, error = error))
+    if (infoHash == currentInfoHash) _state.update { it.copy(taskState = state) }
+    log("任务状态更新（$reason）：${infoHash.take(12)}… → $state")
+    persistTasks(reason)
+  }
+
+  // ---------------------------------------------------------------- 缓存配额（cache_limit_mb 生效点）
+
+  /**
+   * 配额执行：超限时按 LRU 清理 `<cache>/.preview` 下的**非保护**目录
+   * （保护名单 = 引擎里活跃任务的落盘目录，**删除前由引擎重取**，防陈旧快照误删）。
+   *
+   * 口径说明（照搬桌面注释）：配额判定走**目录实际字节**；界面「已下载」走
+   * `handle.fileProgress()` 求和——两者不可互换。
+   */
+  private fun enforceCacheLimit(reason: String) {
+    viewModelScope.launch {
+      val root = cacheRootOrNull() ?: return@launch
+      val limit = _state.value.settings.cacheLimitMb
+      val res =
+        withContext(Dispatchers.IO) {
+          runCatching {
+            enforcePreviewLimit(
+              File(root, PREVIEW_SUBDIR),
+              limit,
+              keepProvider = { engine.activeTaskDirs() },
+              warn = { w -> log("配额：$w") },
+            )
+          }.getOrElse { e ->
+            log("配额执行异常（已忽略）：" + (e.message ?: e.javaClass.simpleName))
+            QuotaResult()
+          }
+        }
+      log("缓存配额（$reason）：${res.summary()}")
+      _state.update {
+        it.copy(
+          cacheNote = "配额（$reason）：${res.summary()}",
+          cacheUsageText = usageText(root),
+        )
+      }
+    }
+  }
+
+  /** 设置页「立即清理缓存」：清理 `.preview` 下**全部非保护**目录（不只看上限）。 */
+  fun clearCacheNow() {
+    viewModelScope.launch {
+      val root = cacheRootOrNull()
+      if (root == null) {
+        _state.update { it.copy(cacheNote = "清理失败：缓存根不可用") }
+        return@launch
+      }
+      val res =
+        withContext(Dispatchers.IO) {
+          runCatching {
+            purgePreviewDirs(
+              File(root, PREVIEW_SUBDIR),
+              keepProvider = { engine.activeTaskDirs() },
+              warn = { w -> log("清理缓存：$w") },
+            )
+          }.getOrElse { e ->
+            log("清理缓存异常：" + (e.message ?: e.javaClass.simpleName))
+            QuotaResult()
+          }
+        }
+      log("立即清理缓存：${res.summary()}")
+      _state.update {
+        it.copy(cacheNote = "立即清理：${res.summary()}", cacheUsageText = usageText(root))
+      }
+      persistTasks("清理缓存")
+    }
+  }
+
+  /** 缓存占用（**目录实际字节**）：`.preview` 与 `downloads` 分别计。 */
+  private fun usageText(root: File): String = cacheUsage(root).text()
+
+  private fun refreshCacheUsage(root: File?) {
+    val r = root ?: return
+    viewModelScope.launch {
+      val text = withContext(Dispatchers.IO) { runCatching { usageText(r) }.getOrDefault("") }
+      _state.update { it.copy(cacheUsageText = text) }
     }
   }
 
@@ -569,6 +1057,9 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       runCatching { engine.setPreviewCacheMode(v.previewCacheMode) }
     }
     _state.update { it.copy(cacheMode = engine.previewCacheMode()) }
+    // **cache_limit_mb 的生效点**：设置一变就按新上限跑一次配额（超限即 LRU 清理非保护目录）
+    enforceCacheLimit("设置变更（上限 ${v.cacheLimitMb} MB）")
+    refreshCacheUsage(cacheRootOrNull())
   }
 
   /** 设置页「保存并生效」：落盘 + 下发 + 更新提示。 */
@@ -656,6 +1147,11 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       val cacheRoot = withContext(Dispatchers.IO) { MagnetStorage.cacheRoot(appContext) }
       val dir = withContext(Dispatchers.IO) { engine.addMagnet(uri, cacheRoot) }
       if (dir == null) return@launch // 失败原因已由 listener.onMetadataError 上报
+      syncFocusFromEngine()
+      refreshTasksSoon()
+      // 新任务落盘 = 缓存配额的一个自然触发点（超限时按 LRU 清非保护目录）
+      enforceCacheLimit("解析后")
+      refreshCacheUsage(cacheRootOrNull())
       watchdog?.cancel()
       watchdog =
         viewModelScope.launch {
@@ -879,10 +1375,15 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     pollJob?.cancel()
     pollJob =
       viewModelScope.launch {
+        var ticks = 0
         while (isActive) {
           try {
+            ticks++
             val previewing = _state.value.previewIndex >= 0
             if (previewing) engine.previewTick()
+            // 任务列表（多任务）：每秒从引擎拉一次快照（状态/已下载/优先级/落盘目录）
+            syncFromEngine()
+            if (ticks % CACHE_USAGE_EVERY_TICKS == 1) refreshCacheUsage(cacheRootOrNull())
             val status = withContext(Dispatchers.IO) { engine.pollStatus() }
             val percent = withContext(Dispatchers.IO) { engine.bufferProgress() }
             val buffered = withContext(Dispatchers.IO) { engine.bufferedBytes() }
@@ -958,5 +1459,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   private companion object {
     const val PREVIEW_GATE_TIMEOUT_MS = 30_000L
     const val TAG = "MagnetViewer"
+
+    /** 缓存占用（目录字节统计）每 N 秒刷一次（统计要遍历目录，不必每秒）。 */
+    const val CACHE_USAGE_EVERY_TICKS = 5
   }
 }

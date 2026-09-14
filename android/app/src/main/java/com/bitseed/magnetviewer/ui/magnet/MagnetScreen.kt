@@ -108,6 +108,9 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
       SettingsScreen(
         initial = state.settings,
         note = state.settingsNote,
+        cacheUsageText = state.cacheUsageText,
+        cacheNote = state.cacheNote,
+        onClearCache = viewModel::clearCacheNow,
         onSave = viewModel::saveSettings,
         onBack = viewModel::closeSettings,
         modifier = modifier,
@@ -123,7 +126,13 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
         onStopPreview = viewModel::stopPreview,
         onSeek = viewModel::previewSeek,
         onOpenSettings = viewModel::openSettings,
-        onRemoveTask = viewModel::removeCurrentTask,
+        onFocusTask = viewModel::focusTask,
+        onToggleExpand = viewModel::toggleTaskExpand,
+        onPauseTask = viewModel::pauseTask,
+        onResumeTask = viewModel::resumeTask,
+        onPromoteTask = viewModel::promoteTask,
+        onRemoveTask = viewModel::removeTask,
+        onSetPriority = viewModel::setTaskPriority,
         modifier = modifier,
       )
     }
@@ -141,132 +150,293 @@ internal fun MagnetContent(
   onStopPreview: () -> Unit,
   onSeek: (Float) -> Unit,
   onOpenSettings: () -> Unit,
-  onRemoveTask: (Boolean) -> Unit,
+  onFocusTask: (String) -> Unit = {},
+  onToggleExpand: (String) -> Unit = {},
+  onPauseTask: (String) -> Unit = {},
+  onResumeTask: (String) -> Unit = {},
+  onPromoteTask: (String) -> Unit = {},
+  onRemoveTask: (String, Boolean) -> Unit = { _, _ -> },
+  onSetPriority: (String, Int) -> Unit = { _, _ -> },
   modifier: Modifier = Modifier,
 ) {
   val pal = LocalPal.current
-  Column(modifier = modifier.fillMaxSize().background(pal.bg).padding(16.dp)) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Column(modifier = Modifier.weight(1f)) {
-        Text("磁力链预览器", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
-        Spacer(Modifier.height(4.dp))
-        Text(
-          "DHT 取元数据 · 不下载本体 · 点视频边下边播 · 缓存模式 ${state.cacheMode}",
-          fontSize = 13.sp,
-          color = pal.textMuted,
-        )
-      }
-      TextButton(onClick = onOpenSettings) { Text("设置", fontSize = 14.sp, color = pal.accent) }
-    }
-    Spacer(Modifier.height(12.dp))
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      OutlinedTextField(
-        value = state.input,
-        onValueChange = onInput,
-        modifier = Modifier.weight(1f),
-        singleLine = true,
-        enabled = !state.busy,
-        textStyle = TextStyle(fontSize = 14.sp, color = pal.text),
-        placeholder = { Text("粘贴磁力链接 magnet:?xt=urn:btih:…", fontSize = 13.sp, color = pal.textDim) },
-      )
-      Spacer(Modifier.width(8.dp))
-      Button(onClick = onResolve, enabled = !state.busy, shape = RoundedCornerShape(8.dp)) {
-        Text(if (state.busy) "解析中…" else "解析", fontSize = 14.sp)
-      }
-    }
-
-    if (state.statusText.isNotEmpty()) {
-      Spacer(Modifier.height(8.dp))
-      Text(state.statusText, fontSize = 13.sp, color = pal.textMuted, maxLines = 3, overflow = TextOverflow.Ellipsis)
-    }
-    state.errorText?.let {
-      Spacer(Modifier.height(8.dp))
-      Text(it, fontSize = 13.sp, color = pal.danger)
-    }
-
-    if (state.restoreNote.isNotEmpty()) {
-      Spacer(Modifier.height(8.dp))
-      Text(state.restoreNote, fontSize = 12.sp, color = pal.textMuted, maxLines = 4, overflow = TextOverflow.Ellipsis)
-    }
-    if (state.persistNote.isNotEmpty()) {
-      Spacer(Modifier.height(4.dp))
-      Text(state.persistNote, fontSize = 12.sp, color = pal.textDim, maxLines = 3, overflow = TextOverflow.Ellipsis)
-    }
-
-    if (state.torrentName.isNotEmpty()) {
-      Spacer(Modifier.height(12.dp))
-      PanelCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+  // 单列可滚动布局：任务列表变高后，文件清单/预览不能再被顶出屏幕（实测踩过——
+  // 多任务列表把文件清单挤出可视区，预览点不到）。整屏一个 LazyColumn，文件行作为它的 items。
+  LazyColumn(
+    modifier = modifier.fillMaxSize().background(pal.bg).padding(16.dp),
+    verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+  ) {
+    item(key = "header") {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+          Text("磁力链预览器", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
+          Spacer(Modifier.height(4.dp))
           Text(
-            state.torrentName,
-            modifier = Modifier.weight(1f),
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = pal.text,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+            "DHT 取元数据 · 不下载本体 · 点视频边下边播 · 缓存模式 ${state.cacheMode}",
+            fontSize = 13.sp,
+            color = pal.textMuted,
           )
-          if (state.taskState.isNotEmpty()) {
-            Text(state.taskState, fontSize = 12.sp, color = pal.textMuted)
+        }
+        TextButton(onClick = onOpenSettings) { Text("设置", fontSize = 14.sp, color = pal.accent) }
+      }
+    }
+    item(key = "input") {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+          value = state.input,
+          onValueChange = onInput,
+          modifier = Modifier.weight(1f),
+          singleLine = true,
+          enabled = !state.busy,
+          textStyle = TextStyle(fontSize = 14.sp, color = pal.text),
+          placeholder = { Text("粘贴磁力链接 magnet:?xt=urn:btih:…", fontSize = 13.sp, color = pal.textDim) },
+        )
+        Spacer(Modifier.width(8.dp))
+        Button(onClick = onResolve, enabled = !state.busy, shape = RoundedCornerShape(8.dp)) {
+          Text(if (state.busy) "解析中…" else "解析", fontSize = 14.sp)
+        }
+      }
+    }
+    if (state.statusText.isNotEmpty() || state.errorText != null ||
+      state.restoreNote.isNotEmpty() || state.persistNote.isNotEmpty()
+    ) {
+      item(key = "status") {
+        Column(modifier = Modifier.fillMaxWidth()) {
+          if (state.statusText.isNotEmpty()) {
+            Text(state.statusText, fontSize = 13.sp, color = pal.textMuted, maxLines = 3, overflow = TextOverflow.Ellipsis)
+          }
+          state.errorText?.let { Text(it, fontSize = 13.sp, color = pal.danger) }
+          if (state.restoreNote.isNotEmpty()) {
+            Text(state.restoreNote, fontSize = 12.sp, color = pal.textMuted, maxLines = 4, overflow = TextOverflow.Ellipsis)
+          }
+          if (state.persistNote.isNotEmpty()) {
+            Text(state.persistNote, fontSize = 12.sp, color = pal.textDim, maxLines = 3, overflow = TextOverflow.Ellipsis)
           }
         }
-        Spacer(Modifier.height(4.dp))
-        Text(
-          "总大小 ${state.totalSizeText} · ${state.files.size} 个文件${if (state.infoHash.isNotEmpty()) " · " + state.infoHash.take(16) + "…" else ""}",
-          fontSize = 13.sp,
-          color = pal.textMuted,
+      }
+    }
+    // 多任务列表（每行：名称/状态/总大小/已下载/优先级）
+    if (state.taskRows.isNotEmpty()) {
+      item(key = "tasks") {
+        TaskListPanel(
+          rows = state.taskRows,
+          onFocus = onFocusTask,
+          onToggleExpand = onToggleExpand,
+          onPause = onPauseTask,
+          onResume = onResumeTask,
+          onPromote = onPromoteTask,
+          onRemove = onRemoveTask,
+          onPriority = onSetPriority,
         )
-        Spacer(Modifier.height(4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
+      }
+    }
+    if (state.torrentName.isNotEmpty()) {
+      item(key = "focus") {
+        PanelCard {
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+              state.torrentName,
+              modifier = Modifier.weight(1f),
+              fontSize = 16.sp,
+              fontWeight = FontWeight.SemiBold,
+              color = pal.text,
+              maxLines = 2,
+              overflow = TextOverflow.Ellipsis,
+            )
+            if (state.taskState.isNotEmpty()) {
+              Text(state.taskState, fontSize = 12.sp, color = pal.textMuted)
+            }
+          }
+          Spacer(Modifier.height(4.dp))
           Text(
-            "清单来自磁盘清单文件 .tasks.json（重启/被杀后无需重新解析）",
-            modifier = Modifier.weight(1f),
+            "总大小 ${state.totalSizeText} · ${state.files.size} 个文件${if (state.infoHash.isNotEmpty()) " · " + state.infoHash.take(16) + "…" else ""}",
+            fontSize = 13.sp,
+            color = pal.textMuted,
+          )
+          Spacer(Modifier.height(4.dp))
+          Text(
+            "清单来自磁盘清单文件 .tasks.json（重启/被杀后无需重新解析）· 操作见上方任务列表",
             fontSize = 12.sp,
             color = pal.textDim,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
           )
-          TextButton(onClick = { onRemoveTask(false) }) {
-            Text("移除任务（保留数据）", fontSize = 12.sp, color = pal.danger)
-          }
         }
       }
     }
-
     if (state.previewIndex >= 0) {
-      Spacer(Modifier.height(12.dp))
-      PreviewPane(
-        streamUrl = state.streamUrl,
-        title = state.previewTitle,
-        note = state.previewNote,
-        bufferText = state.bufferText,
-        bufferPercent = state.bufferPercent,
+      item(key = "preview") {
+        PreviewPane(
+          streamUrl = state.streamUrl,
+          title = state.previewTitle,
+          note = state.previewNote,
+          bufferText = state.bufferText,
+          bufferPercent = state.bufferPercent,
+          paused = state.previewPaused,
+          cacheMode = state.cacheMode,
+          seekFraction = state.seekFraction,
+          seekSeq = state.seekSeq,
+          seekNote = state.seekNote,
+          onSeek = onSeek,
+          onPause = onPausePreview,
+          onResume = onResumePreview,
+          onStop = onStopPreview,
+        )
+      }
+    }
+    items(state.files, key = { it.index }) { item ->
+      FileRow(
+        item = item,
+        selected = item.index == state.previewIndex,
         paused = state.previewPaused,
-        cacheMode = state.cacheMode,
-        seekFraction = state.seekFraction,
-        seekSeq = state.seekSeq,
-        seekNote = state.seekNote,
-        onSeek = onSeek,
+        onClick = { onPreview(item.index) },
         onPause = onPausePreview,
         onResume = onResumePreview,
         onStop = onStopPreview,
       )
     }
+  }
+}
 
-    Spacer(Modifier.height(12.dp))
-    LazyColumn(modifier = Modifier.weight(1f)) {
-      items(state.files, key = { it.index }) { item ->
-        FileRow(
-          item = item,
-          selected = item.index == state.previewIndex,
-          paused = state.previewPaused,
-          onClick = { onPreview(item.index) },
-          onPause = onPausePreview,
-          onResume = onResumePreview,
-          onStop = onStopPreview,
+/**
+ * 任务列表（多任务）：一行一个 info_hash。
+ *
+ * 每行展示 **名称 / 状态 / 总大小 / 已下载 / 优先级**（与桌面 `taskops.tasks()` 快照同口径），
+ * 行内可：切焦点（点行）· 展开文件清单 · 暂停/继续 · **转正** · 移除（保留数据 / 删数据）· 优先级 0..3。
+ */
+@Composable
+private fun TaskListPanel(
+  rows: List<TaskRow>,
+  onFocus: (String) -> Unit,
+  onToggleExpand: (String) -> Unit,
+  onPause: (String) -> Unit,
+  onResume: (String) -> Unit,
+  onPromote: (String) -> Unit,
+  onRemove: (String, Boolean) -> Unit,
+  onPriority: (String, Int) -> Unit,
+) {
+  val pal = LocalPal.current
+  PanelCard {
+    Text("任务列表（${rows.size}）", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = pal.text)
+    Spacer(Modifier.height(2.dp))
+    Text(
+      "每行：名称 / 状态 / 总大小 / 已下载（fileProgress 求和）/ 优先级；点行切焦点（清单与预览跟随）",
+      fontSize = 12.sp,
+      color = pal.textMuted,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
+    )
+    rows.forEach { row ->
+      Spacer(Modifier.height(8.dp))
+      TaskRowView(
+        row = row,
+        onFocus = onFocus,
+        onToggleExpand = onToggleExpand,
+        onPause = onPause,
+        onResume = onResume,
+        onPromote = onPromote,
+        onRemove = onRemove,
+        onPriority = onPriority,
+      )
+    }
+  }
+}
+
+@Composable
+private fun TaskRowView(
+  row: TaskRow,
+  onFocus: (String) -> Unit,
+  onToggleExpand: (String) -> Unit,
+  onPause: (String) -> Unit,
+  onResume: (String) -> Unit,
+  onPromote: (String) -> Unit,
+  onRemove: (String, Boolean) -> Unit,
+  onPriority: (String, Int) -> Unit,
+) {
+  val pal = LocalPal.current
+  Column(
+    modifier =
+      Modifier.fillMaxWidth()
+        .clip(RoundedCornerShape(8.dp))
+        .background(if (row.focused) pal.bgSelected else pal.bgInput)
+        .border(1.dp, if (row.focused) pal.accent else pal.border, RoundedCornerShape(8.dp))
+        .clickable { onFocus(row.infoHash) }
+        .padding(horizontal = 10.dp, vertical = 8.dp)
+  ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(
+        (if (row.focused) "▶ " else "") + row.name,
+        modifier = Modifier.weight(1f),
+        fontSize = 14.sp,
+        fontWeight = FontWeight.Medium,
+        color = pal.text,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(row.state, fontSize = 12.sp, color = pal.textMuted)
+    }
+    Spacer(Modifier.height(2.dp))
+    Text(
+      "总大小 ${row.totalSizeText} · 已下载 ${row.downloadedText}（${row.progressPercent}%）" +
+        (if (row.rateText.isNotEmpty()) " · ${row.rateText}" else "") +
+        " · 优先级 P${row.priority}" +
+        (if (row.isDownload) " · 下载任务" else " · 仅解析"),
+      fontSize = 12.sp,
+      color = pal.textMuted,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
+    )
+    if (row.error.isNotEmpty()) {
+      Text(row.error, fontSize = 12.sp, color = pal.danger, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+    // 优先级（0..3；影响下载队列与并发）
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text("优先级", fontSize = 12.sp, color = pal.textDim)
+      for (p in 0..3) {
+        TextButton(onClick = { onPriority(row.infoHash, p) }) {
+          Text(
+            "P$p",
+            fontSize = 12.sp,
+            color = if (p == row.priority) pal.accent else pal.textMuted,
+            fontWeight = if (p == row.priority) FontWeight.SemiBold else FontWeight.Normal,
+          )
+        }
+      }
+    }
+    // 任务操作（逐条对齐桌面 taskops：转正 / 暂停继续 / 移除两档）
+    // 「已转正」只按**落盘目录**判定（downloads/<ih> 才叫转正过）——预览任务同样是下载型，
+    // 但它的数据还在 .preview/ 里（此时按钮该显示「转正」，点了才搬到 downloads/）。
+    val promoted = row.savePath.contains("/downloads/")
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      TextButton(onClick = { onPromote(row.infoHash) }) {
+        Text(if (promoted) "已转正" else "转正", fontSize = 13.sp, color = pal.accent)
+      }
+      TextButton(onClick = { onPause(row.infoHash) }) { Text("暂停", fontSize = 13.sp, color = pal.accent) }
+      TextButton(onClick = { onResume(row.infoHash) }) { Text("继续", fontSize = 13.sp, color = pal.accent) }
+      TextButton(onClick = { onRemove(row.infoHash, false) }) {
+        Text("移除(保留数据)", fontSize = 13.sp, color = pal.danger)
+      }
+      TextButton(onClick = { onRemove(row.infoHash, true) }) {
+        Text("移除(删数据)", fontSize = 13.sp, color = pal.danger)
+      }
+      TextButton(onClick = { onToggleExpand(row.infoHash) }) {
+        Text(if (row.expanded) "收起文件" else "展开文件", fontSize = 13.sp, color = pal.accent)
+      }
+    }
+    if (row.expanded) {
+      Text(
+        "文件清单（${row.files.size} 个，已过滤 .pad）",
+        fontSize = 12.sp,
+        color = pal.textDim,
+      )
+      row.files.forEach { f ->
+        Text(
+          "${f.name} · ${f.sizeText}" + (if (f.isVideo) " · 视频" else ""),
+          fontSize = 12.sp,
+          color = pal.text,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
         )
-        Spacer(Modifier.height(6.dp))
       }
     }
   }

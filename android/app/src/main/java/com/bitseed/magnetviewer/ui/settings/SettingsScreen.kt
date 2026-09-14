@@ -68,6 +68,9 @@ import com.bitseed.magnetviewer.theme.LocalPal
 fun SettingsScreen(
   initial: AppSettings,
   note: String,
+  cacheUsageText: String = "",
+  cacheNote: String = "",
+  onClearCache: () -> Unit = {},
   onSave: (AppSettings) -> Unit,
   onBack: () -> Unit,
   modifier: Modifier = Modifier,
@@ -133,6 +136,30 @@ fun SettingsScreen(
       Text("预览缓存", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = pal.text)
       Spacer(Modifier.height(8.dp))
       Field("缓存上限（MB，0 = 不限，默认 2048）", cacheText, { cacheText = it }, "2048", numeric = true)
+      Spacer(Modifier.height(8.dp))
+      // 当前占用（**目录实际字节**口径；「已下载」另算，两者不互换——桌面同款口径说明）
+      Text(
+        if (cacheUsageText.isNotEmpty()) "当前占用：$cacheUsageText" else "当前占用：统计中…",
+        fontSize = 12.sp,
+        color = pal.textMuted,
+        maxLines = 3,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Spacer(Modifier.height(6.dp))
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Button(onClick = onClearCache, shape = RoundedCornerShape(8.dp)) {
+          Text("立即清理缓存", fontSize = 13.sp)
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(
+          cacheNote.ifEmpty { "清理 <缓存根>/.preview 下的非保护目录（活跃任务目录保留）" },
+          modifier = Modifier.weight(1f),
+          fontSize = 12.sp,
+          color = pal.textMuted,
+          maxLines = 3,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
       Spacer(Modifier.height(8.dp))
       Text("关闭预览时（stopPreview 语义由它决定）", fontSize = 12.sp, color = pal.textMuted)
       Spacer(Modifier.height(6.dp))

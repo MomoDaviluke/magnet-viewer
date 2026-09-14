@@ -184,8 +184,8 @@ data class DeletionPlan(
 /**
  * 计算删除任务时该做什么（**不变量：默认绝不删用户数据目录**）。
  *
- * 即便调用方显式传 `deleteUserData = true`，目标目录也必须位于 [appRoot] 内，
- * 否则一律拒绝（防止坏路径把删除扩到应用私有目录之外）。
+ * 实现已统一到 [planRemoveTask]（同一套守卫：受管根包含性 + 目录名 == info_hash），
+ * 本函数只是把结果适配成旧的 [DeletionPlan] 形状以避免调用方改动。
  */
 fun planDeletion(
   infoHash: String,
@@ -197,20 +197,15 @@ fun planDeletion(
   if (ih == null) {
     return DeletionPlan(infoHash = infoHash, error = "info_hash 非法，拒绝删除")
   }
-  val inside = isWithin(appRoot, userDataDir)
-  val wantData = deleteUserData && inside
+  val p = planRemoveTask(ih, userDataDir.path, appRoot, deleteData = deleteUserData)
   return DeletionPlan(
     infoHash = ih,
-    valid = true,
-    removeTaskEntry = true,
-    removeResumeFile = true,
-    removeUserDataDir = wantData,
+    valid = p.valid,
+    removeTaskEntry = p.removeEntry,
+    removeResumeFile = p.removeResume,
+    removeUserDataDir = p.deleteData,
     userDataDir = userDataDir.path,
-    error =
-      when {
-        deleteUserData && !inside -> "拒绝删除数据目录（不在应用私有目录内）：${userDataDir.path}"
-        else -> ""
-      },
+    error = p.error,
   )
 }
 
@@ -224,21 +219,21 @@ data class DeletionResult(
  * 按 [plan] 执行删除（纯 IO，**单测可直接验证「默认保留用户数据」这条不变量**）。
  *
  * [userDataDir] 传进来只是为了让调用方拿到实际目录；真删与否完全由
- * `plan.removeUserDataDir` 决定（它是 `deleteUserData && 在应用私有目录内` 的合取）。
+ * `plan.removeUserDataDir` 决定（它是 `deleteUserData && 守卫通过` 的合取）。
  */
 fun applyDeletion(plan: DeletionPlan, cacheDir: File?, userDataDir: File?): DeletionResult {
   if (!plan.valid) return DeletionResult()
-  val resumeDeleted =
-    if (plan.removeResumeFile && cacheDir != null) ResumeStore.delete(cacheDir, plan.infoHash) else false
-  val dataDeleted =
-    if (plan.removeUserDataDir && userDataDir != null) {
-      try {
-        userDataDir.deleteRecursively()
-      } catch (_: Throwable) {
-        false
-      }
-    } else {
-      false
-    }
-  return DeletionResult(resumeDeleted = resumeDeleted, userDataDeleted = dataDeleted)
+  val r =
+    applyRemoveTask(
+      RemovePlan(
+        infoHash = plan.infoHash,
+        valid = plan.valid,
+        dataDir = userDataDir,
+        deleteData = plan.removeUserDataDir,
+        removeEntry = plan.removeTaskEntry,
+        removeResume = plan.removeResumeFile,
+      ),
+      cacheDir,
+    )
+  return DeletionResult(resumeDeleted = r.resumeDeleted, userDataDeleted = r.dataDeleted)
 }

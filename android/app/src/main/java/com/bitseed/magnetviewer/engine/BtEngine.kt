@@ -10,15 +10,33 @@ import com.bitseed.magnetviewer.core.model.safeRelPath
 import com.bitseed.magnetviewer.core.normalizePreviewCacheMode
 import com.bitseed.magnetviewer.core.states.BOOTSTRAP_TRACKERS
 import com.bitseed.magnetviewer.core.states.METADATA_TIMEOUT_SECONDS
+import com.bitseed.magnetviewer.core.states.STATE_COMPLETED
+import com.bitseed.magnetviewer.core.states.STATE_DELETED
 import com.bitseed.magnetviewer.core.states.STATE_DOWNLOADING
 import com.bitseed.magnetviewer.core.states.STATE_FAILED
+import com.bitseed.magnetviewer.core.states.STATE_META_FETCH
 import com.bitseed.magnetviewer.core.states.STATE_PAUSED
+import com.bitseed.magnetviewer.core.states.STATE_QUEUED
+import com.bitseed.magnetviewer.core.states.STATE_READY
+import com.bitseed.magnetviewer.core.states.STATE_VALIDATE
 import com.bitseed.magnetviewer.data.RestorePlan
 import com.bitseed.magnetviewer.data.RestoreSource
+import com.bitseed.magnetviewer.data.RemoveOutcome
 import com.bitseed.magnetviewer.data.ResumeStore
 import com.bitseed.magnetviewer.data.TaskRecord
+import com.bitseed.magnetviewer.data.applyRemoveTask
+import com.bitseed.magnetviewer.data.clampTaskPriority
+import com.bitseed.magnetviewer.data.downloadedBytes
 import com.bitseed.magnetviewer.data.isResumeKey
+import com.bitseed.magnetviewer.data.isValidTaskPriority
+import com.bitseed.magnetviewer.data.isWithin
+import com.bitseed.magnetviewer.data.ltPriority
+import com.bitseed.magnetviewer.data.planPromote
+import com.bitseed.magnetviewer.data.planRemoveTask
 import com.bitseed.magnetviewer.data.planRestore
+import com.bitseed.magnetviewer.data.previewDirFor
+import com.bitseed.magnetviewer.data.priorityQueueOrder
+import com.bitseed.magnetviewer.data.promoteDirFor
 import com.bitseed.magnetviewer.data.stateAfterRestore
 import com.bitseed.magnetviewer.stream.PieceSource
 import java.io.File
@@ -43,6 +61,8 @@ import org.libtorrent4j.alerts.MetadataFailedAlert
 import org.libtorrent4j.alerts.MetadataReceivedAlert
 import org.libtorrent4j.alerts.SaveResumeDataAlert
 import org.libtorrent4j.alerts.SaveResumeDataFailedAlert
+import org.libtorrent4j.alerts.StorageMovedAlert
+import org.libtorrent4j.alerts.StorageMovedFailedAlert
 import org.libtorrent4j.alerts.TorrentErrorAlert
 
 /**
@@ -99,6 +119,71 @@ data class PollStatus(
 )
 
 /**
+ * 一个任务的**快照**（引擎 → UI；全是普通类型，句柄不出本包）。
+ *
+ * 与桌面 `core/taskops.py: tasks()` 的字段对齐（`info_hash/name/state/total_size/progress/
+ * down_rate/priority/save_path/error/selected_files/seed/download`），另加本 demo 需要的
+ * [files]（清单条数）与 [hasMetadata]。
+ */
+data class TaskSnapshot(
+  val infoHash: String,
+  val name: String,
+  val state: String,
+  val totalSize: Long,
+  /** **已下载字节**（`handle.fileProgress()` 求和 = 显示口径；与磁盘占用是两回事）。 */
+  val downloadedBytes: Long = 0L,
+  val rateKbps: Int = 0,
+  val peers: Int = 0,
+  val priority: Int = 0,
+  /** 是否下载型任务（转正后/续传任务为 true；只解析看清单的为 false）。 */
+  val download: Boolean = false,
+  val savePath: String = "",
+  val error: String = "",
+  val files: Int = 0,
+  val selected: List<String> = emptyList(),
+  val hasMetadata: Boolean = false,
+  val seed: Boolean = false,
+) {
+  /** 进度 0..1（总大小未知时按 0；已完成按 1）。 */
+  val progress: Double
+    get() =
+      when {
+        state == STATE_COMPLETED -> 1.0
+        totalSize > 0 -> minOf(1.0, downloadedBytes.toDouble() / totalSize.toDouble())
+        else -> 0.0
+      }
+}
+
+/**
+ * 引擎里的一个任务（**所有 libtorrent4j 对象都关在本包内**）。
+ *
+ * 句柄纪律与焦点任务的 `currentHandle` 一致：只放 [reacquireHandle] / `addTorrent` 拿到的
+ * **自有副本**，每次调用前先 `isValid()`。
+ */
+internal class EngineTask(
+  val infoHash: String,
+  /** 创建序（列表顺序 / 优先级稳定排序都用它）。 */
+  val order: Int,
+  var source: String = "",
+  var saveDir: File? = null,
+  var state: String = STATE_QUEUED,
+  var priority: Int = 0,
+  /** 是否下载型任务（转正 / 续传 / 预览开始过）。 */
+  var download: Boolean = false,
+  var selected: List<String> = emptyList(),
+  var error: String = "",
+) {
+  @Volatile var handle: TorrentHandle? = null
+  @Volatile var result: ParseResult? = null
+
+  /** 元数据获取起表（毫秒；0 = 不在等待元数据）。每任务独立计时 → 多任务各自超时。 */
+  @Volatile var metaStartedMs: Long = 0L
+
+  val name: String get() = result?.name ?: infoHash
+  val totalSize: Long get() = result?.totalSize ?: 0L
+}
+
+/**
  * 一个 info_hash 的会话持有者：磁力链解析（DHT 拿元数据，**不下载本体**）+
  * 单文件预览调度 + 流服务的分块可用性来源。
  *
@@ -121,11 +206,21 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /** 引擎 → 宿主（ViewModel）的事件回调；回调可能来自 libtorrent 告警线程。 */
   interface Listener {
-    /** 元数据就绪：清单已解析、句柄已暂停（不下载本体）。 */
-    fun onMetadataReady(infoHash: String, result: ParseResult)
+    /**
+     * 元数据就绪：清单已解析（「只解析」任务会按 upload_mode + 暂停收回，不下载本体）。
+     *
+     * [focused] = 这条任务是否是当前焦点任务（多任务：宿主据此决定要不要更新中间的清单区）。
+     * 默认 true 保持旧调用点语义不变。
+     */
+    fun onMetadataReady(infoHash: String, result: ParseResult, focused: Boolean = true)
 
-    /** 元数据阶段失败（含 add 失败 / DHT 失败 / 超时）。 */
-    fun onMetadataError(message: String)
+    /**
+     * 元数据阶段失败（含 add 失败 / DHT 失败 / 超时）。
+     *
+     * [infoHash] = 出错的任务（多任务：不能把「某个任务的超时」记到当前焦点头上；
+     * 空串 = 无归属，宿主按焦点处理）。
+     */
+    fun onMetadataError(message: String, infoHash: String = "")
 
     /** 一般性状态文本（中文，UI 直接显示）。 */
     fun onStatus(message: String)
@@ -150,6 +245,21 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /** 缓存根（`<filesDir>/magnet/cache`）：fastresume 落盘与恢复都从这里推路径。 */
   @Volatile private var cacheRoot: File? = null
+
+  // ---- 任务注册表（多任务：桌面 `core/registry.py` 的最小对应物）----
+  /**
+   * 全任务注册表：键 = v1 info_hash（与 `.tasks.json` / `.resume/<ih>.fastresume` 同一套键）。
+   *
+   * 为什么要有它：单任务焦点（`currentHandle` 等）只够跑一次预览，而「解析新磁力链不覆盖
+   * 已有任务 / 同 hash 复用 / 逐任务暂停继续移除」必须按 info_hash 各自记账。句柄纪律不变：
+   * 每个任务只存**自有副本**，任何调用前先 `isValid()`。
+   */
+  private val taskLock = Any()
+  private val taskMap = LinkedHashMap<String, EngineTask>()
+
+  /** 哈希别名 → 主键（混合种子自报 v2 截断哈希时用它把告警路由回正确任务）。 */
+  private val taskAliases = HashMap<String, String>()
+  private var taskSeq = 0
 
   /**
    * 「恢复续传」的 info_hash 集合：这些任务的元数据到达后**不要**按解析语义暂停
@@ -202,6 +312,9 @@ class BtEngine(private val listener: Listener) : EngineControl {
           // fastresume：save_resume_data 是异步请求，落盘时机在告警里（桌面 core/resume.py 同款）
           AlertType.SAVE_RESUME_DATA.swig(),
           AlertType.SAVE_RESUME_DATA_FAILED.swig(),
+          // 转正（moveStorage）的回执：搬运完成/失败都要能在日志里看见
+          AlertType.STORAGE_MOVED.swig(),
+          AlertType.STORAGE_MOVED_FAILED.swig(),
         )
 
       override fun alert(alert: Alert<*>?) {
@@ -363,6 +476,10 @@ class BtEngine(private val listener: Listener) : EngineControl {
       currentResult = null
       previewFile = null
       metaFetching = false
+      synchronized(taskLock) {
+        taskMap.clear()
+        taskAliases.clear()
+      }
       // 控权面交还：只有仍归属本实例时才摘除（避免把重建后的新引擎摘掉）
       if (EngineHub.control === this) {
         EngineHub.attach(null)
@@ -394,7 +511,23 @@ class BtEngine(private val listener: Listener) : EngineControl {
         listener.onMetadataError("磁力链接无效：" + (e.message ?: e.javaClass.simpleName))
         return null
       }
-    val ih = infoHashOf(atp)
+    val magnetHash = infoHashOf(atp)
+    // **同一 info_hash 重复解析：复用既有任务**（不重复建、不覆盖别人的任务；桌面 add_task 去重同款）
+    if (magnetHash.isNotEmpty()) {
+      val existing = taskOf(magnetHash)
+      if (existing != null) {
+        log("加种复用：info_hash=$magnetHash 已在任务列表（不重复建）")
+        if (existing.source.isEmpty()) existing.source = uri
+        focusTaskImpl(existing.infoHash)
+        val dir = existing.saveDir ?: previewDir(cacheRoot, magnetHash)
+        val done = existing.result
+        if (done != null) listener.onMetadataReady(existing.infoHash, done, true)
+        listener.onStatus("该磁力链已在任务列表（复用既有任务，不重复建）")
+        publishActivity()
+        return dir
+      }
+    }
+    val ih = magnetHash
     val dir = previewDir(cacheRoot, ih)
     // 落盘目录必须在 addTorrent **之前**建好：目录不存在时加种会失败
     if (!dir.exists() && !dir.mkdirs()) {
@@ -423,11 +556,19 @@ class BtEngine(private val listener: Listener) : EngineControl {
         listener.onMetadataError("加入 DHT 会话失败：句柄无效")
         return null
       }
-      currentHandle = h
-      currentResult = null
-      currentInfoHash = ih
-      saveDir = dir
-      previewFile = null
+      // 入表：新任务是「只解析」任务（download=false），是否下载由「转正」或「预览」决定
+      val task =
+        registerTask(
+          infoHash = ih.ifEmpty { tempTaskKey() },
+          handle = h,
+          saveDir = dir,
+          source = uri,
+          download = false,
+          priority = 0,
+          state = STATE_META_FETCH,
+        )
+      registerHandleAliases(task, h)
+      focusTaskImpl(task.infoHash)
       // 超时判定起表：解析阶段从这一刻开始计时（applyMetadataTimeout 的落点）
       metaFetching = true
       metaTimeoutFired = false
@@ -509,11 +650,13 @@ class BtEngine(private val listener: Listener) : EngineControl {
         onMetadataReceived(h)
       }
       AlertType.METADATA_FAILED -> {
-        val err = (a as? MetadataFailedAlert)?.getError()
+        val alert = a as? MetadataFailedAlert
+        val err = alert?.getError()
         val msg = "元数据获取失败：" + (err?.getMessage() ?: "未知原因")
         log(msg)
         metaFetching = false
-        listener.onMetadataError(msg)
+        // 多任务：失败要记在**出错的那个任务**头上（用告警句柄反查主键）
+        listener.onMetadataError(msg, taskKeyOfAlertHandle(alert?.handle()))
         publishActivity()
       }
       AlertType.ADD_TORRENT -> {
@@ -541,6 +684,19 @@ class BtEngine(private val listener: Listener) : EngineControl {
       AlertType.SAVE_RESUME_DATA_FAILED -> {
         val err = (a as? SaveResumeDataFailedAlert)?.error()
         log("fastresume 请求失败告警：" + (err?.getMessage() ?: "未知原因"))
+      }
+      AlertType.STORAGE_MOVED -> {
+        // 转正搬运完成：复核句柄的 save_path 是否已指向新目录（日志是验收证据的一部分）
+        val p = (a as? StorageMovedAlert)?.storagePath() ?: "?"
+        log("转正搬运完成（storage_moved）：目录=$p")
+        listener.onStatus("转正搬运完成：$p")
+        publishActivity()
+      }
+      AlertType.STORAGE_MOVED_FAILED -> {
+        val err = (a as? StorageMovedFailedAlert)?.error()
+        val msg = "转正搬运失败（storage_moved_failed）：" + (err?.getMessage() ?: "未知原因")
+        log(msg)
+        listener.onStatus(msg)
       }
       else -> {
         // 其余告警不参与本 demo 的状态机
@@ -601,10 +757,13 @@ class BtEngine(private val listener: Listener) : EngineControl {
         ""
       }
     val magnetHash = currentInfoHash.trim().lowercase()
-    val ih = listOf(magnetHash, tiV1, alertHash).firstOrNull { isResumeKey(it) } ?: magnetHash
+    // **多任务路由**：告警只按哈希说话（不再假设「当前焦点就是它」）。
+    // 候选顺序：元数据自报的 v1 → 句柄自报哈希（混合种子这里是 v2 截断哈希）→ 焦点任务
+    val routeCandidates = listOf(tiV1, alertHash, magnetHash).filter { it.isNotEmpty() }.distinct()
+    val ih = resolveTaskKey(routeCandidates) ?: routeCandidates.firstOrNull { isResumeKey(it) } ?: magnetHash
     log(
       "元数据到位：name=${ti.name()} 文件数=${ti.numFiles()} 分块数=${ti.numPieces()} " +
-        "块长=${ti.pieceLength()} info_hash=$ih"
+        "块长=${ti.pieceLength()} info_hash=$ih（候选=${routeCandidates.joinToString(",") { it.take(8) }}）"
     )
     val result =
       try {
@@ -612,28 +771,32 @@ class BtEngine(private val listener: Listener) : EngineControl {
       } catch (e: Throwable) {
         log("元数据处理异常：" + (e.message ?: e.javaClass.simpleName))
         metaFetching = false
-        listener.onMetadataError("元数据处理失败：" + (e.message ?: e.javaClass.simpleName))
+        listener.onMetadataError("元数据处理失败：" + (e.message ?: e.javaClass.simpleName), ih)
         return
       }
     // 关键一步：丢掉告警内视图，换成会话里的自有句柄（否则后续轮询 = 悬垂指针 → SIGSEGV）
-    // 候选顺序：磁力链 v1 btih（主键）→ 句柄自报哈希（混合种子这里是 v2 截断哈希）
-    val h = reacquireHandle(listOf(currentInfoHash, ih))
+    // 候选顺序：本任务主键（磁力链 v1 btih）→ 句柄自报哈希
+    val h = reacquireHandle(listOf(ih, magnetHash, alertHash))
     if (h == null || !h.isValid()) {
       log("元数据已就绪但自有句柄获取失败：不写入 currentHandle，报错给 UI")
       metaFetching = false
-      listener.onMetadataError("元数据已到位，但会话句柄获取失败（种子可能已被移除）")
+      listener.onMetadataError("元数据已到位，但会话句柄获取失败（种子可能已被移除）", ih)
       return
     }
+    // 入表 / 更新既有记录（多任务：对象是「这条哈希的任务」，不是「当前焦点」）
+    val task = taskForUpdate(ih, h, result, previewDirFor(cacheRoot ?: File("."), ih))
+    registerHandleAliases(task, h)
     // 恢复续传任务：清单早已从磁盘展示过，元数据一到就该继续下（不按「解析」语义暂停）
     val pauseAfterMeta =
-      pauseAfterMetadataHashes.remove(ih) || pauseAfterMetadataHashes.remove(currentInfoHash)
+      pauseAfterMetadataHashes.remove(ih) || pauseAfterMetadataHashes.remove(magnetHash)
     val keepDownloading =
-      !pauseAfterMeta && (continuationHashes.remove(ih) || continuationHashes.remove(currentInfoHash))
+      !pauseAfterMeta && (continuationHashes.remove(ih) || continuationHashes.remove(magnetHash))
+    val wantDownload = keepDownloading || task.download
     try {
-      if (keepDownloading) {
+      if (wantDownload) {
         h.unsetFlags(TorrentFlags.AUTO_MANAGED)
         h.resume()
-        log("元数据到位（恢复续传任务）：保持下载，不暂停、不清优先级")
+        log("元数据到位（下载型任务）：保持下载，不暂停、不清优先级")
       } else {
         val n = ti.numFiles()
         if (n > 0) h.prioritizeFiles(Priority.array(Priority.IGNORE, n))
@@ -646,17 +809,29 @@ class BtEngine(private val listener: Listener) : EngineControl {
       log("暂停句柄失败（不影响清单）：" + (e.message ?: e.javaClass.simpleName))
       listener.onStatus("暂停句柄失败（不影响清单）：" + (e.message ?: e.javaClass.simpleName))
     }
-    currentHandle = h
-    currentResult = result
-    currentInfoHash = ih
-    metaFetching = false
-    if (saveDir == null) log("警告：落盘目录未知（saveDir=null），预览流可能不可用")
+    val newState = when {
+      wantDownload -> STATE_DOWNLOADING
+      task.download -> STATE_PAUSED
+      else -> STATE_PAUSED
+    }
+    synchronized(taskLock) {
+      task.state = newState
+      task.error = ""
+      task.metaStartedMs = 0L
+    }
+    if (task.infoHash == currentInfoHash) {
+      applyFocusAliases(task)
+      metaFetching = false
+      if (saveDir == null) log("警告：落盘目录未知（saveDir=null），预览流可能不可用")
+    } else {
+      log("元数据到位（非焦点任务 ${task.infoHash.take(12)}…）：只更新该任务，不动焦点")
+    }
     log("元数据就绪：清单 " + result.files.size + " 个（非 pad " + result.viewFiles.size + " 个），总大小 " + result.totalSize + " 字节")
     result.viewFiles.take(MAX_LOGGED_FILES).forEach { f ->
       log("清单条目：index=${f.index} name=${f.name} size=${f.size} 分块 ${f.startPiece}..${f.endPiece}")
     }
-    listener.onTaskStateChanged(ih, if (keepDownloading) STATE_DOWNLOADING else STATE_PAUSED)
-    listener.onMetadataReady(ih, result)
+    listener.onTaskStateChanged(ih, newState)
+    listener.onMetadataReady(ih, result, task.infoHash == currentInfoHash)
     publishActivity()
   }
 
@@ -875,6 +1050,11 @@ class BtEngine(private val listener: Listener) : EngineControl {
   @Synchronized
   fun restoreTasks(cacheDir: File, tasks: List<TaskRecord>): RestoreReport {
     setCacheRoot(cacheDir)
+    // 恢复是启动期的一次性动作：先清注册表（避免重复恢复把同一任务记两份）
+    synchronized(taskLock) {
+      taskMap.clear()
+      taskAliases.clear()
+    }
     if (tasks.isEmpty()) {
       log("启动恢复：磁盘上没有任务")
       return RestoreReport()
@@ -971,7 +1151,9 @@ class BtEngine(private val listener: Listener) : EngineControl {
           null
         }
       val hasMeta = ti != null
-      val state = stateAfterRestore(t.state, hasMeta, plan.pauseAfterAdd)
+      val stateFromDisk = stateAfterRestore(t.state, hasMeta, plan.pauseAfterAdd)
+      // 「只解析」任务（download=false）：清单在，但不下载本体 —— 恢复成 upload_mode + 暂停
+      val state = if (t.download) stateFromDisk else STATE_PAUSED
       var result: ParseResult? = null
       if (ti != null) {
         result =
@@ -983,7 +1165,24 @@ class BtEngine(private val listener: Listener) : EngineControl {
           }
       }
       try {
-        if (plan.pauseAfterAdd && hasMeta) {
+        if (!t.download) {
+          if (hasMeta) {
+            val n = ti?.numFiles() ?: 0
+            if (n > 0) h.prioritizeFiles(Priority.array(Priority.IGNORE, n))
+            h.pause()
+            h.unsetFlags(TorrentFlags.AUTO_MANAGED)
+            h.setFlags(TorrentFlags.UPLOAD_MODE)
+            pausedCount++
+            log("恢复：只解析任务（download=false）→ upload_mode + 暂停（不下载本体）")
+          } else {
+            // 元数据不在：先放开去拉，拿到后由 onMetadataReceived 按 upload_mode/暂停收回
+            h.resume()
+            h.unsetFlags(TorrentFlags.AUTO_MANAGED)
+            pauseAfterMetadataHashes.add(plan.infoHash)
+            pausedCount++
+            log("恢复：只解析任务且缺元数据 → 先放开拉元数据，元数据到位后再收成 upload_mode")
+          }
+        } else if (plan.pauseAfterAdd && hasMeta) {
           h.pause()
           h.unsetFlags(TorrentFlags.AUTO_MANAGED)
           pausedCount++
@@ -1004,17 +1203,30 @@ class BtEngine(private val listener: Listener) : EngineControl {
       } catch (e: Throwable) {
         log("恢复暂停/续传动作异常：" + (e.message ?: e.javaClass.simpleName))
       }
-      if (!plan.pauseAfterAdd && !hasMeta) {
+      if (t.download && !plan.pauseAfterAdd && !hasMeta) {
         // 元数据还没到（无 resume）：到达后按「续传」处理，不要再暂停
         continuationHashes.add(plan.infoHash)
         waitingMeta++
       }
-      if (currentHandle == null) {
-        currentHandle = h
-        currentResult = result
-        currentInfoHash = plan.infoHash
-        saveDir = dir
-        previewFile = null
+      // 入表（多任务）：恢复出来的任务同样进注册表 —— UI 列表、逐任务操作、缓存配额保护名单都用它
+      val et =
+        registerTask(
+          infoHash = plan.infoHash,
+          handle = h,
+          saveDir = dir,
+          source = t.source,
+          download = t.download,
+          priority = t.priority,
+          state = state,
+        )
+      synchronized(taskLock) {
+        et.result = result
+        et.download = t.download
+        et.selected = t.selected
+        et.error = ""
+      }
+      if (currentInfoHash.isEmpty()) {
+        focusTaskImpl(plan.infoHash)
         if (!hasMeta) {
           metaFetching = true
           metaTimeoutFired = false
@@ -1063,6 +1275,581 @@ class BtEngine(private val listener: Listener) : EngineControl {
     return report
   }
 
+  // ---------------------------------------------------------------- 任务注册表（多任务）
+
+  /** 临时任务键（磁力链里没有 btih 时；不落盘——持久化要求合法 info_hash）。 */
+  private fun tempTaskKey(): String = "tmp-" + (++taskSeq)
+
+  /** 登记任务（幂等：同键已存在则只补句柄/目录）。 */
+  private fun registerTask(
+    infoHash: String,
+    handle: TorrentHandle?,
+    saveDir: File?,
+    source: String,
+    download: Boolean,
+    priority: Int,
+    state: String,
+  ): EngineTask =
+    synchronized(taskLock) {
+      val existing = taskMap[infoHash]
+      if (existing != null) {
+        if (handle != null) existing.handle = handle
+        if (saveDir != null) existing.saveDir = saveDir
+        if (source.isNotEmpty()) existing.source = source
+        return@synchronized existing
+      }
+      val t =
+        EngineTask(
+          infoHash = infoHash,
+          order = taskSeq++,
+          source = source,
+          saveDir = saveDir,
+          state = state,
+          priority = clampTaskPriority(priority),
+          download = download,
+        )
+      t.handle = handle
+      if (state == STATE_META_FETCH) t.metaStartedMs = System.currentTimeMillis()
+      taskMap[infoHash] = t
+      log("任务登记：${infoHash.take(12)}… state=$state download=$download 共 ${taskMap.size} 个任务")
+      t
+    }
+
+  /** 按 info_hash 取任务（键归一化；找不到返回 null）。 */
+  private fun taskOf(infoHash: String): EngineTask? {
+    val key = infoHash.trim().lowercase()
+    if (key.isEmpty()) return null
+    return synchronized(taskLock) { taskMap[key] ?: taskAliases[key]?.let { taskMap[it] } }
+  }
+
+  /** 公开：某任务是否有清单（UI 取清单用）。 */
+  fun taskResult(infoHash: String): ParseResult? = taskOf(infoHash)?.result
+
+  /** 公开：某任务是否下载型（转正/预览过）。 */
+  fun isDownloadTask(infoHash: String): Boolean = taskOf(infoHash)?.download == true
+
+  /** 公开：某任务当前落盘目录（无记录返回 null）。 */
+  fun taskSaveDir(infoHash: String): File? = taskOf(infoHash)?.saveDir
+
+  /**
+   * **缓存配额的保护名单**：当前活跃任务的落盘目录。
+   *
+   * 每调用一次取一次**当下**快照（配额侧在每次删除前再调一次，防陈旧快照误删）。
+   */
+  fun activeTaskDirs(): Set<String> =
+    synchronized(taskLock) { taskMap.values.mapNotNull { it.saveDir?.path }.toSet() }
+
+  /** 按候选哈希找已登记任务（含别名；都没命中返回 null）。 */
+  private fun resolveTaskKey(candidates: List<String>): String? =
+    synchronized(taskLock) {
+      for (c in candidates) {
+        val k = c.trim().lowercase()
+        if (k.isEmpty()) continue
+        if (taskMap.containsKey(k)) return@synchronized k
+        val alias = taskAliases[k]
+        if (alias != null && taskMap.containsKey(alias)) return@synchronized alias
+      }
+      null
+    }
+
+  /**
+   * 告警里的句柄 → 已登记任务键（找不到返回 ""）。
+   *
+   * 只在告警回调内读 `info_hash`（非持有视图的只读访问是安全的），绝不把句柄放出去。
+   */
+  private fun taskKeyOfAlertHandle(h: TorrentHandle?): String {
+    if (h == null) return ""
+    return try {
+      if (!h.isValid()) return ""
+      val self = h.infoHash()?.toString()?.trim()?.lowercase().orEmpty()
+      resolveTaskKey(listOf(self)) ?: ""
+    } catch (e: Throwable) {
+      log("告警任务反查异常：" + (e.message ?: e.javaClass.simpleName))
+      ""
+    }
+  }
+
+  /** 登记句柄自报哈希的别名（混合种子的 v2 截断哈希 / 非主键 v1）→ 告警能路由回正确任务。 */
+  private fun registerHandleAliases(task: EngineTask, h: TorrentHandle) {
+    try {
+      if (!isHandleUsable(h)) return
+      val self = h.infoHash()?.toString()?.trim()?.lowercase().orEmpty()
+      if (self.isNotEmpty() && self != task.infoHash) {
+        synchronized(taskLock) { taskAliases[self] = task.infoHash }
+        log("登记哈希别名：${self.take(12)}… → ${task.infoHash.take(12)}…")
+      }
+      val ti =
+        try {
+          h.torrentFile()
+        } catch (e: Throwable) {
+          null
+        }
+      val ihs = ti?.infoHashes() ?: return
+      if (ihs.hasV1()) {
+        val v1 = ihs.getV1()?.toString()?.trim()?.lowercase().orEmpty()
+        if (v1.isNotEmpty() && v1 != task.infoHash) synchronized(taskLock) { taskAliases[v1] = task.infoHash }
+      }
+    } catch (e: Throwable) {
+      log("登记哈希别名异常：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * 元数据到达时的任务归属：优先命中已登记任务；未登记则**补建**（临时键 → 真实哈希的升级路径）。
+   */
+  private fun taskForUpdate(
+    infoHash: String,
+    handle: TorrentHandle,
+    result: ParseResult,
+    fallbackDir: File,
+  ): EngineTask =
+    synchronized(taskLock) {
+      val existing = taskMap[infoHash]
+      if (existing != null) {
+        existing.handle = handle
+        existing.result = result
+        if (existing.saveDir == null) existing.saveDir = fallbackDir
+        return@synchronized existing
+      }
+      val dir = cacheRoot?.let { previewDirFor(it, infoHash) } ?: fallbackDir
+      val t =
+        EngineTask(
+          infoHash = infoHash,
+          order = taskSeq++,
+          saveDir = dir,
+          state = STATE_META_FETCH,
+          priority = 0,
+          download = false,
+        )
+      t.handle = handle
+      t.result = result
+      // 临时键（磁力链无 btih）升级为真实哈希：把旧条目摘掉，避免同一任务两份记录
+      val stale = currentInfoHash.trim().lowercase()
+      if (stale.isNotEmpty() && stale != infoHash && !isResumeKey(stale) && taskMap.containsKey(stale)) {
+        taskMap.remove(stale)
+        log("任务键升级：$stale → ${infoHash.take(12)}…（临时键已摘除）")
+      }
+      taskMap[infoHash] = t
+      log("任务补建（元数据到达时未在注册表）：${infoHash.take(12)}… → ${dir.path}")
+      t
+    }
+
+  /** 把焦点别名（currentHandle/currentResult/saveDir/currentInfoHash）指向某任务。 */
+  private fun applyFocusAliases(t: EngineTask) {
+    currentInfoHash = t.infoHash
+    currentHandle = t.handle
+    currentResult = t.result
+    saveDir = t.saveDir
+  }
+
+  /** 公开：把某任务设为「当前」（UI 点行 → 展示它的清单/预览它）。 */
+  fun focusTask(infoHash: String): Boolean = focusTaskImpl(infoHash)
+
+  private fun focusTaskImpl(infoHash: String): Boolean {
+    val t = taskOf(infoHash) ?: return false
+    if (t.infoHash != currentInfoHash) {
+      // 切换焦点 = 停掉当前预览（同一时刻只播一个）
+      try {
+        if (scheduler.active) scheduler.stop()
+      } catch (e: Throwable) {
+        log("焦点切换停预览异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+      previewFile = null
+    }
+    applyFocusAliases(t)
+    log("焦点任务：${t.infoHash.take(12)}…（state=${t.state} download=${t.download}）")
+    return true
+  }
+
+  /** 全任务快照（键序 = 创建序；UI 任务列表直接用；句柄访问全部先过 isValid）。 */
+  fun taskSnapshots(): List<TaskSnapshot> {
+    val list: List<EngineTask> = synchronized(taskLock) { taskMap.values.sortedBy { it.order } }
+    val running = isRunning()
+    val out = ArrayList<TaskSnapshot>(list.size)
+    for (t in list) {
+      var downloaded = 0L
+      var rate = 0
+      var peers = 0
+      var finished = false
+      val h = t.handle
+      if (h != null && running && isHandleUsable(h)) {
+        try {
+          val st = h.status()
+          rate = st.downloadRate() / 1024
+          peers = st.numPeers()
+          finished = st.isFinished() || st.isSeeding()
+        } catch (e: Throwable) {
+          log("任务状态读取异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+        }
+        try {
+          // **已下载字节**（显示口径）= fileProgress 求和；与磁盘占用（配额口径）不可互换
+          downloaded = downloadedBytes(h.fileProgress())
+        } catch (e: Throwable) {
+          log("任务已下载字节读取异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+        }
+      }
+      val state =
+        if (finished && t.state == STATE_DOWNLOADING) STATE_COMPLETED else t.state
+      if (state != t.state && state == STATE_COMPLETED) {
+        synchronized(taskLock) {
+          t.state = STATE_COMPLETED
+          t.error = ""
+        }
+        log("任务完成：${t.infoHash.take(12)}…（下载 $downloaded 字节）")
+        listener.onTaskStateChanged(t.infoHash, STATE_COMPLETED)
+      }
+      out.add(
+        TaskSnapshot(
+          infoHash = t.infoHash,
+          name = t.name,
+          state = state,
+          totalSize = t.totalSize,
+          downloadedBytes = downloaded,
+          rateKbps = rate,
+          peers = peers,
+          priority = t.priority,
+          download = t.download,
+          savePath = t.saveDir?.path ?: "",
+          error = t.error,
+          files = t.result?.files?.size ?: 0,
+          selected = t.selected,
+          hasMetadata = t.result != null,
+          seed = finished,
+        )
+      )
+    }
+    return out
+  }
+
+  // ---------------------------------------------------------------- 任务操作（对齐桌面 taskops）
+
+  /**
+   * 暂停任务（桌面 `pause_task`：`pause` + 撤 `auto_managed`）。
+   *
+   * 若该任务正在预览，同时把预览调度器冻结（缓冲读数不再增长，「继续」可原地恢复）。
+   */
+  fun pauseTask(infoHash: String): Boolean {
+    val t = taskOf(infoHash) ?: return false
+    val h = t.handle
+    if (h == null || !isHandleUsable(h)) {
+      log("暂停任务中止：句柄不可用（${t.infoHash.take(12)}…）")
+      return false
+    }
+    try {
+      h.pause()
+      h.unsetFlags(TorrentFlags.AUTO_MANAGED)
+    } catch (e: Throwable) {
+      log("暂停任务异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+    }
+    synchronized(taskLock) {
+      t.state = STATE_PAUSED
+      t.error = ""
+    }
+    if (t.infoHash == currentInfoHash) {
+      try {
+        if (scheduler.active && !scheduler.paused) scheduler.pause()
+      } catch (e: Throwable) {
+        log("暂停任务时冻结预览异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+    requestResumeDataFor(t, "暂停任务")
+    listener.onTaskStateChanged(t.infoHash, STATE_PAUSED)
+    publishActivity()
+    return true
+  }
+
+  /** 继续任务（桌面 `resume_task`：清 error、按有无元数据定状态、重新激活下载）。 */
+  fun resumeTask(infoHash: String): Boolean {
+    val t = taskOf(infoHash) ?: return false
+    val h = t.handle
+    if (h == null || !isHandleUsable(h)) {
+      log("继续任务中止：句柄不可用（${t.infoHash.take(12)}…）")
+      return false
+    }
+    val hasMeta = t.result != null
+    val state = if (hasMeta) STATE_DOWNLOADING else STATE_META_FETCH
+    synchronized(taskLock) {
+      t.error = ""
+      t.state = state
+      t.metaStartedMs = if (hasMeta) 0L else System.currentTimeMillis()
+    }
+    if (hasMeta) {
+      if (t.download) activateTask(t) else {
+        // 「只解析」任务点继续 = 重新放开去拉元数据/保持只读（不下载本体）
+        try {
+          h.resume()
+        } catch (e: Throwable) {
+          log("继续只解析任务异常：" + (e.message ?: e.javaClass.simpleName))
+        }
+      }
+    } else {
+      try {
+        h.resume()
+        h.unsetFlags(TorrentFlags.AUTO_MANAGED)
+      } catch (e: Throwable) {
+        log("继续任务（等元数据）异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+    if (t.infoHash == currentInfoHash) {
+      try {
+        if (scheduler.active && scheduler.paused) {
+          val ok = scheduler.resume(TorrentHandleOps(h))
+          if (ok) previewFile = scheduler.previewFile
+          log("继续任务：预览调度器已恢复=$ok")
+        }
+      } catch (e: Throwable) {
+        log("继续任务重放预览异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+    requestResumeDataFor(t, "继续任务")
+    listener.onTaskStateChanged(t.infoHash, state)
+    publishActivity()
+    return true
+  }
+
+  /** 设置任务优先级（0..3；值域外**拒绝**，不改变现状——桌面 `set_priority` 同款）。 */
+  fun setTaskPriority(infoHash: String, priority: Int): Boolean {
+    val t = taskOf(infoHash) ?: return false
+    if (!isValidTaskPriority(priority)) {
+      log("优先级设置忽略：$priority（值域 0..3）")
+      return false
+    }
+    synchronized(taskLock) { t.priority = priority }
+    applyQueueOrder()
+    val h = t.handle
+    if (h != null && isHandleUsable(h)) {
+      try {
+        if (t.priority > 0) h.setFlags(TorrentFlags.AUTO_MANAGED)
+      } catch (e: Throwable) {
+        log("优先级联动 auto_managed 异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+    log("任务优先级：${t.infoHash.take(12)}… = $priority（libtorrent 权重 ${ltPriority(priority)}）")
+    listener.onTaskStateChanged(t.infoHash, t.state)
+    return true
+  }
+
+  /** 把优先级下发给会话：高优先 → 队列靠前（配合 `active_downloads` 限制并发）。 */
+  private fun applyQueueOrder() {
+    val entries: List<Pair<String, Int>>
+    val byKey: Map<String, EngineTask>
+    synchronized(taskLock) {
+      entries = taskMap.values.map { it.infoHash to it.priority }
+      byKey = LinkedHashMap(taskMap)
+    }
+    if (entries.isEmpty()) return
+    val order = priorityQueueOrder(entries)
+    order.forEachIndexed { pos, key ->
+      val t = byKey[key] ?: return@forEachIndexed
+      val h = t.handle ?: return@forEachIndexed
+      if (!isHandleUsable(h)) return@forEachIndexed
+      try {
+        // libtorrent 2.1 用「队列位置」表达优先级（torrent_priority 已无对应 API，见 data/TaskOps.kt 头注释）
+        h.swig().queue_position_set_ex(pos)
+      } catch (e: Throwable) {
+        log("设置队列位置异常（${key.take(12)}… p$pos）：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+    log("优先级已下发（高优先在前）：" + order.joinToString(",") { it.take(8) + "@" + (byKey[it]?.priority ?: 0) })
+  }
+
+  /**
+   * **转正**：把任务目录 `.preview/<ih>` 转成 `<cache>/downloads/<ih>` 并继续下载该文件
+   * （桌面 D10「沿用已下载分块、零额外下载」+ 本任务书的落盘要求）。
+   *
+   * 步骤：停预览（若在预览）→ `moveStorage`（异步，落盘由 libtorrent 搬）→ 解 upload_mode →
+   * 按选中文件置优先级 → auto_managed → resume。搬运完成有 `storage_moved_alert` 回执。
+   */
+  fun promoteTask(infoHash: String, selectedFiles: List<String>? = null): Boolean {
+    val t = taskOf(infoHash) ?: return false
+    val root = cacheRoot
+    if (root == null) {
+      log("转正中止：缓存根未知")
+      return false
+    }
+    val plan = planPromote(t.infoHash, root, t.saveDir?.path ?: "")
+    if (!plan.valid) {
+      log("转正中止：${plan.error}")
+      listener.onStatus(plan.error)
+      return false
+    }
+    val h = t.handle
+    if (h == null || !isHandleUsable(h)) {
+      log("转正中止：句柄不可用（${t.infoHash.take(12)}…）")
+      listener.onStatus("转正失败：句柄不可用（任务可能已被移除）")
+      return false
+    }
+    val toDir = plan.toDir!!
+    val selected =
+      (selectedFiles ?: t.selected).ifEmpty { t.result?.viewFiles?.map { it.path } ?: emptyList() }
+    if (!toDir.exists() && !toDir.mkdirs()) {
+      log("转正中止：无法创建下载目录 ${toDir.path}")
+      listener.onStatus("转正失败：无法创建目录 ${toDir.path}")
+      return false
+    }
+    // 正在预览它：先停预览（搬运期间不对同一批文件读写）
+    if (t.infoHash == currentInfoHash) {
+      try {
+        scheduler.stop()
+      } catch (e: Throwable) {
+        log("转正停预览异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+      previewFile = null
+    }
+    try {
+      if (!plan.alreadyPromoted) {
+        h.pause()
+        h.moveStorage(toDir.path)
+        log("转正：moveStorage 已下发 ${plan.fromDir?.path} → ${toDir.path}（异步搬运，等 storage_moved 告警）")
+      } else {
+        log("转正：任务已在 downloads/（幂等，不重复搬运）")
+      }
+    } catch (e: Throwable) {
+      log("转正失败（moveStorage 异常）：" + (e.message ?: e.javaClass.simpleName))
+      listener.onStatus("转正失败：" + (e.message ?: e.javaClass.simpleName))
+      return false
+    }
+    synchronized(taskLock) {
+      t.download = true
+      t.saveDir = toDir
+      t.selected = selected
+      t.state = STATE_DOWNLOADING
+      t.error = ""
+    }
+    // 继续下载「该文件」（selected 为空 = 全部非 pad 文件）
+    activateTask(t, selected)
+    requestResumeDataFor(t, "转正")
+    listener.onTaskStateChanged(t.infoHash, STATE_DOWNLOADING)
+    listener.onStatus("已转正：数据目录 → ${toDir.path}（继续下载 ${selected.size} 个文件）")
+    publishActivity()
+    return true
+  }
+
+  /** 让任务真正开始下载（桌面 `activate_download`：解 upload_mode → 按 selected 置文件优先级 → auto_managed → resume）。 */
+  private fun activateTask(t: EngineTask, selected: List<String>? = null) {
+    val h = t.handle
+    if (h == null || !isHandleUsable(h)) {
+      log("激活任务中止：句柄不可用（${t.infoHash.take(12)}…）")
+      return
+    }
+    try {
+      h.unsetFlags(TorrentFlags.UPLOAD_MODE)
+      h.setFlags(TorrentFlags.AUTO_MANAGED)
+      val sel = (selected ?: t.selected).toSet()
+      val ti = h.torrentFile()
+      if (ti != null) {
+        val n = ti.numFiles()
+        if (n > 0) {
+          val prio = Priority.array(Priority.IGNORE, n)
+          val pathByIdx = HashMap<Int, String>()
+          t.result?.files?.forEach { f -> pathByIdx[f.index] = f.path }
+          for (i in 0 until n) {
+            val p = pathByIdx[i]
+            // selected 为空 = 全选（桌面 `not selected or f.path in selected` 的同一判式）
+            if (sel.isEmpty() || (p != null && p in sel)) prio[i] = Priority.DEFAULT
+          }
+          h.prioritizeFiles(prio)
+        }
+      }
+      if (t.priority > 0) applyQueueOrder()
+      h.resume()
+      log("任务已激活：${t.infoHash.take(12)}… 选中 ${sel.size} 个文件（selected 空 = 全选）")
+    } catch (e: Throwable) {
+      log("激活任务异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * **移除任务**（桌面 `remove_task`）：断句柄（可选连带删文件）→ 摘注册表 →
+   * `deleteData=true` 时删除落盘目录。
+   *
+   * **删数据必须过守卫**（`data/planRemoveTask`）：目录要在受管根内**且**目录名 == info_hash；
+   * 守卫拒绝时数据一律保留——绝不删到用户其它数据。
+   */
+  fun removeTask(infoHash: String, deleteData: Boolean = false): Boolean {
+    val t = taskOf(infoHash) ?: return false
+    val root = cacheRoot
+    val plan = planRemoveTask(t.infoHash, t.saveDir?.path ?: "", root ?: File("."), deleteData)
+    if (plan.rejected) {
+      log("移除任务：守卫拒绝删数据 → ${plan.error}")
+      listener.onStatus("已移除任务记录，但**拒绝删除**数据目录：" + plan.error)
+    }
+    if (t.infoHash == currentInfoHash) {
+      try {
+        if (scheduler.active) scheduler.stop()
+      } catch (e: Throwable) {
+        log("移除任务停预览异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+      previewFile = null
+    }
+    val h = t.handle
+    if (h != null && isRunning() && isHandleUsable(h)) {
+      try {
+        val ses = SessionHandle(manager.swig())
+        if (plan.deleteData) {
+          ses.removeTorrent(h, SessionHandle.DELETE_FILES)
+        } else {
+          ses.removeTorrent(h)
+        }
+      } catch (e: Throwable) {
+        log("移除任务断句柄异常（已忽略）：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+    val outcome = if (root != null) applyRemoveTask(plan, root) else RemoveOutcome(note = plan.note)
+    synchronized(taskLock) {
+      taskMap.remove(t.infoHash)
+      taskAliases.entries.removeAll { it.value == t.infoHash }
+    }
+    if (currentInfoHash == t.infoHash) {
+      currentInfoHash = ""
+      currentHandle = null
+      currentResult = null
+      saveDir = null
+      previewFile = null
+      metaFetching = false
+    } else {
+      applyFocusAliasesToCurrentOrClear()
+    }
+    log(
+      "移除任务：${t.infoHash.take(12)}…（删数据=${plan.deleteData} 结果=${outcome.dataDeleted}，" +
+        "守卫拒绝=${plan.rejected}，resume 删除=${outcome.resumeDeleted}）${plan.note}"
+    )
+    listener.onTaskStateChanged(t.infoHash, STATE_DELETED)
+    listener.onStatus(
+      "已移除任务（${if (plan.deleteData) "数据已删除" else if (plan.rejected) "数据保留：守卫拒绝删除" else "数据保留"}）"
+    )
+    publishActivity()
+    return true
+  }
+
+  /** 焦点任务被摘除后，把别名指向剩余的第一个任务（或清空）。 */
+  private fun applyFocusAliasesToCurrentOrClear() {
+    val next = synchronized(taskLock) { taskMap.values.minByOrNull { it.order } }
+    if (next == null) {
+      currentInfoHash = ""
+      currentHandle = null
+      currentResult = null
+      saveDir = null
+    } else if (taskOf(currentInfoHash) == null) {
+      applyFocusAliases(next)
+      log("焦点任务已摘除：焦点顺延到 ${next.infoHash.take(12)}…")
+    }
+  }
+
+  /** 按任务请求 fastresume（多任务：不再假设「当前焦点就是它」）。 */
+  private fun requestResumeDataFor(t: EngineTask, reason: String) {
+    val h = t.handle ?: return
+    if (!isResumeKey(t.infoHash)) return
+    if (h == null || !isHandleUsable(h)) return
+    try {
+      h.setFlags(TorrentFlags.NEED_SAVE_RESUME)
+      h.saveResumeData(TorrentHandle.SAVE_INFO_DICT.or_(TorrentHandle.FLUSH_DISK_CACHE))
+      log("已请求 fastresume（${reason.ifEmpty { "-" }}）：${t.infoHash.take(12)}…（含 info-dict）")
+    } catch (e: Throwable) {
+      log("请求 fastresume 异常（$reason）：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
   // ---------------------------------------------------------------- 预览
 
   /** 当前预览文件所在目录（流服务根目录）。 */
@@ -1080,8 +1867,20 @@ class BtEngine(private val listener: Listener) : EngineControl {
     return try {
       scheduler.begin(TorrentHandleOps(h), file)
       previewFile = file
-      // 预览开始 = 状态变化点：立刻请求一次 fastresume（下到一半被杀也有续传数据）
-      requestResumeData("预览开始")
+      // 预览 = 真的在下载（该文件）：任务转成下载型并记住选中文件（转正/重启续传都靠它）
+      val t = taskOf(currentInfoHash)
+      if (t != null) {
+        synchronized(taskLock) {
+          t.download = true
+          t.selected = listOf(file.path)
+          t.state = STATE_DOWNLOADING
+          t.error = ""
+        }
+        requestResumeDataFor(t, "预览开始")
+      } else {
+        requestResumeData("预览开始")
+      }
+      listener.onStatus("预览开始：${file.name}（只下这一个文件的分块）")
       publishActivity()
       true
     } catch (e: Throwable) {
@@ -1380,18 +2179,35 @@ class BtEngine(private val listener: Listener) : EngineControl {
     publishActivity()
   }
 
-  /** 解析阶段超时判定（[applyMetadataTimeout] 的落点）：超时判定为资源无做种。 */
+  /**
+   * 解析阶段超时判定（[applyMetadataTimeout] 的落点）：超时判定为「资源无做种」。
+   *
+   * **每任务独立计时**（多任务：一个任务没做种不该把别人的钟一起打掉）。焦点任务的超时
+   * 额外走 [Listener.onMetadataError]（UI 的 busy 态据此收尾）。
+   */
   private fun checkMetadataTimeout() {
-    if (!metaFetching || metaTimeoutFired) return
-    val start = metaFetchStartMs
-    if (start <= 0L) return
     val limit = metadataTimeoutSeconds.toLong() * 1000L
-    if (System.currentTimeMillis() - start < limit) return
-    metaTimeoutFired = true
-    metaFetching = false
-    val msg = "资源无做种（${metadataTimeoutSeconds}s 内未获取到元数据）"
-    log("元数据超时：$msg")
-    listener.onMetadataError(msg)
+    if (limit <= 0) return
+    val now = System.currentTimeMillis()
+    val timedOut = ArrayList<EngineTask>(2)
+    synchronized(taskLock) {
+      for (t in taskMap.values) {
+        if (t.state != STATE_META_FETCH) continue
+        val start = t.metaStartedMs
+        if (start <= 0L) continue
+        if (now - start < limit) continue
+        t.metaStartedMs = 0L
+        t.state = STATE_FAILED
+        t.error = "资源无做种（${metadataTimeoutSeconds}s 内未获取到元数据）"
+        timedOut.add(t)
+      }
+    }
+    for (t in timedOut) {
+      val msg = t.error
+      log("元数据超时（${t.infoHash.take(12)}…）：$msg")
+      listener.onTaskStateChanged(t.infoHash, STATE_FAILED)
+      listener.onMetadataError(msg, t.infoHash)
+    }
   }
 
   override fun onPauseRequest() {
