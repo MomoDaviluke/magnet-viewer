@@ -136,6 +136,28 @@ cd /c/Users/Administrator/Desktop/magnet-viewer
 
 ## 已知限制与坑（我实测踩过的，别重复浪费时间）
 
+0. **⚠️ 端口上「服务的是哪份夹具」必须核对，不然所有症状都像网络 flaky**（2026-09-14 血的教训）：
+   多个代理/多轮实验会在同一台机器上留下**多份残留做种端**，端口被"另一份夹具"占着时，磁力链 infohash 与做种内容**对不上**，
+   表现是「能加种、但永远拿不到元数据」——和传输 flaky 一模一样。**开测前先做两件事**：
+   ```bash
+   # ① 列出所有做种端及其夹具，确认没有陌生的占用者
+   powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { \$_.CommandLine -like '*seed.py*' } | ForEach-Object { \$_.ProcessId.ToString() + ' :: ' + (\$_.CommandLine -replace '.*testrig/','') }"
+   # ② 用宿主机探针核对「该端口服务的 infohash == 你要用的磁力链」——这一步是判据，别跳
+   ./.venv/Scripts/python - <<'PY'
+   import libtorrent as lt, time, pathlib, warnings; warnings.filterwarnings("ignore")
+   m = pathlib.Path("android/tools/testrig/magnet.txt").read_text().strip().replace("10.0.2.2","127.0.0.1")
+   p = pathlib.Path(".hermes/leech_probe"); p.mkdir(exist_ok=True)
+   ses = lt.session({"listen_interfaces":"0.0.0.0:0","enable_dht":False,"enable_lsd":False})
+   atp = lt.parse_magnet_uri(m); atp.save_path = str(p); h = ses.add_torrent(atp); t0=time.time()
+   while time.time()-t0 < 20:
+       if h.status().has_metadata:
+           print("✓ 端口服务的就是这份夹具"); break
+       time.sleep(0.3)
+   else: print("✗ 拿不到元数据 → 先查端口上到底是谁在做种（别去查网络）")
+   PY
+   ```
+   收工前把不该留的做种端 taskkill 干净。
+
 1. **做种端 ↔ 模拟器的传输会偶发"连上即掉线"**：能拿到元数据（约 10KB 上传），但载荷传输停在十几 KB、做种端显示 `peers=0 rate=0`。表现随机，重试可恢复。
    - 重试方法：**重新加种**（peer 提示在首次连接失败后基本被消费掉）——即 `pm clear`/重开 App 后重新粘贴磁力链，或重启做种端后重开 App；
    - 同一夹具在宿主机 client 之间互传从不出问题，只在"模拟器↔宿主机"这条路上出现，属环境侧。
