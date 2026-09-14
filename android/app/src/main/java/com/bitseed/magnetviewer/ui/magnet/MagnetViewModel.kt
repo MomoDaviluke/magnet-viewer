@@ -39,6 +39,8 @@ import com.bitseed.magnetviewer.engine.PARSE_ONLY_NO_SELECTION_NOTE
 import com.bitseed.magnetviewer.engine.ProxyConfig
 import com.bitseed.magnetviewer.engine.ProxyDecision
 import com.bitseed.magnetviewer.engine.decideEffectiveProxy
+import com.bitseed.magnetviewer.engine.previewGateFailedStatus
+import com.bitseed.magnetviewer.engine.previewGateTimeoutNote
 import com.bitseed.magnetviewer.engine.TaskSnapshot
 import com.bitseed.magnetviewer.engine.deriveImageState
 import com.bitseed.magnetviewer.engine.stateAfterResume
@@ -131,6 +133,14 @@ data class MagnetUiState(
   val streamUrl: String = "",
   /** 预览是否处于「暂停（冻结）」态（hold 语义；缓冲读数应当不动）。 */
   val previewPaused: Boolean = false,
+  /**
+   * **预览是否失败**（D-01，字段名固定：UI 代理按这个名字渲染「重试」按钮）。
+   *
+   * true = 上次预览没开起来（30s 门控超时等），此时 [previewIndex] 已复位为 -1
+   * （状态行不再写「预览中」、文件行的「预览」按钮回到用户手里），
+   * 用户可点重试 → `retryPreview()` 重试同一文件。
+   */
+  val previewFailed: Boolean = false,
   /** 当前生效的预览缓存模式：`convert` / `hold`（停止预览的结果文案据此区分）。 */
   val cacheMode: String = "convert",
   /** 拖动条位置（文件比例 0..1，拖动结束时才有值）。 */
@@ -297,6 +307,9 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
 
   /** 下载停滞看门狗（C-01）：每秒喂一次「已下载字节 / peer 数」，产出 `stallNote`。 */
   private val stallWatch = StallWatch()
+
+  /** 最近一次尝试预览的文件下标（-1 = 没有）；[retryPreview] 用它重试同一文件（D-01）。 */
+  @Volatile private var lastPreviewFileIndex: Int = -1
   private var pollJob: Job? = null
   private var settingsJob: Job? = null
 
@@ -1318,6 +1331,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
         it.copy(
           previewIndex = file.index,
           previewTitle = file.name,
+          previewFailed = false,
           previewNote = "正在预约索引块与头部数据…",
           bufferPercent = 0f,
           bufferText = "",
@@ -1361,11 +1375,41 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
           false
         }
       if (!ready) {
-        _state.update { it.copy(previewNote = "索引块/头部数据等待超时（可能无做种）") }
+        // **D-01 复位**：超时不能卡死。文案按 peer 数区分（peer>0 = 源较慢，
+        // 不许归因「可能无做种」）；预览状态复位（previewIndex=-1 → 状态行不再写
+        // 「预览中」、文件行的「预览」按钮回来）；previewFailed=true 供屏幕渲染重试。
+        val peers = withContext(Dispatchers.IO) { runCatching { engine.pollStatus() }.getOrNull()?.peers ?: 0 }
+        lastPreviewFileIndex = file.index
+        stopPreviewInternal(wantStopService = false)
+        _state.update {
+          it.copy(
+            previewIndex = -1,
+            previewFailed = true,
+            streamUrl = "",
+            previewNote = previewGateTimeoutNote(peers),
+            statusText = previewGateFailedStatus(peers),
+          )
+        }
+        log("预览门控超时：${previewGateTimeoutNote(peers)}（已复位预览状态，可重试）")
         return@launch
       }
-      _state.update { it.copy(previewNote = "索引块就绪，开始播放", streamUrl = url) }
+      _state.update { it.copy(previewNote = "索引块就绪，开始播放", streamUrl = url, previewFailed = false) }
     }
+  }
+
+  /**
+   * **重试上一次失败的预览**（D-01；屏幕的重试按钮接它）。
+   *
+   * 失败原因不清（无做种/源慢）时用户反复点也应该安全：这里只是重放 [preview]。
+   */
+  fun retryPreview() {
+    val idx = lastPreviewFileIndex
+    if (idx < 0) {
+      _state.update { it.copy(errorText = "没有可重试的预览（上次预览的文件已不在清单里）") }
+      return
+    }
+    log("重试预览：fileIndex=$idx")
+    preview(idx)
   }
 
   /** 暂停预览（冻结：缓冲读数不动；「继续」原地恢复）。 */
@@ -1417,6 +1461,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     _state.update {
       it.copy(
         previewIndex = -1,
+        previewFailed = false,
         previewTitle = "",
         previewNote = "",
         bufferPercent = 0f,
