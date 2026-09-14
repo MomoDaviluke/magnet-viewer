@@ -77,7 +77,15 @@ cd /c/Users/Administrator/Desktop/magnet-viewer
 
 灭屏测试的验收口径：**灭屏 60 秒内下载字节仍在增长**（两次采样对比）+ `adb shell dumpsys activity services com.bitseed.magnetviewer | grep -i foreground` 里 FGS 存活。
 
-## 注意
+## 已知限制与坑（我实测踩过的，别重复浪费时间）
+
+1. **做种端 ↔ 模拟器的传输会偶发"连上即掉线"**：能拿到元数据（约 10KB 上传），但载荷传输停在十几 KB、做种端显示 `peers=0 rate=0`。表现随机，重试可恢复。
+   - 重试方法：**重新加种**（peer 提示在首次连接失败后基本被消费掉）——即 `pm clear`/重开 App 后重新粘贴磁力链，或重启做种端后重开 App；
+   - 同一夹具在宿主机 client 之间互传从不出问题，只在"模拟器↔宿主机"这条路上出现，属环境侧。
+2. **开关屏一定要用确定性的键码**：`input keyevent 26` 是 **电源键 toggle**，你不知道当前是开还是关，会出现"我以为关屏了其实开着、点击全落空"；用 `224`（WAKEUP）/`223`（SLEEP）并在每次后 `dumpsys power | grep mWakefulness` 确认。
+3. **当前 App 还没做持久化**：`am force-stop`、Activity 重建（含反复开关屏）之后**清单会丢**，回到"无任务"态。所以**灭屏类测试必须一次性连贯跑完**（解析→预览→关屏→采样），中途别开关屏。持久化落地后此条应失效。
+4. `du -k` 对大文件要数**已分配块**（稀疏文件），`ls -l` 的表面大小会一直等于文件全长，不能用来看进度。
+5. 切换夹具必须重启做种端（同一端口只能跑一个），并确认它打印的 `infohash(v1)` 与磁力链一致（用 `info_hashes().v1`，别用 `info_hash()`）。
 
 - 夹具重建后 **infohash 会变**（只要视频文件重新生成），`magnet.txt` 要跟着刷新。
 - 改完 `seed.py` 必须重启做种端才生效（后台常驻进程不会自动重载）。
