@@ -1,0 +1,2021 @@
+{
+  "cases": {
+    "bootstrap_trackers": [
+      {
+        "expect": [
+          "udp://exodus.desync.com:6969/announce",
+          "udp://open.tracker.cl:1337/announce",
+          "udp://tracker.openbittorrent.com:6969/announce",
+          "udp://tracker.opentrackr.org:1337/announce",
+          "udp://tracker.torrent.eu.org:451/announce"
+        ],
+        "input": {}
+      }
+    ],
+    "contiguous_bytes": [
+      {
+        "expect": 12,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 8,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            3,
+            4
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 40,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            9
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            9
+          ],
+          "limit": 1000,
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 5,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2
+          ],
+          "limit": 5,
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 6,
+        "input": {
+          "end_piece": 2,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 2,
+          "piece_length": 4,
+          "size": 10,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 0,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": -1,
+          "size": 40,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_piece": 15,
+          "have_pieces": [
+            13,
+            14,
+            15
+          ],
+          "offset": 0,
+          "piece_length": 262144,
+          "size": 4194304,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 524288,
+        "input": {
+          "end_piece": 15,
+          "have_pieces": [
+            0,
+            1,
+            14,
+            15
+          ],
+          "offset": 0,
+          "piece_length": 262144,
+          "size": 4194304,
+          "start_piece": 0
+        }
+      }
+    ],
+    "download_states": [
+      {
+        "expect": [
+          "COMPLETED",
+          "DELETED",
+          "DOWNLOADING",
+          "FAILED",
+          "META_FETCH",
+          "PAUSED",
+          "QUEUED",
+          "SEEDING",
+          "STOPPED",
+          "VALIDATE"
+        ],
+        "input": {}
+      }
+    ],
+    "human_size": [
+      {
+        "expect": "0 B",
+        "input": 0
+      },
+      {
+        "expect": "1 B",
+        "input": 1
+      },
+      {
+        "expect": "1023 B",
+        "input": 1023
+      },
+      {
+        "expect": "1.0 KB",
+        "input": 1024
+      },
+      {
+        "expect": "1.5 KB",
+        "input": 1536
+      },
+      {
+        "expect": "10.0 KB",
+        "input": 10240
+      },
+      {
+        "expect": "5.0 MB",
+        "input": 5242880
+      },
+      {
+        "expect": "1.0 GB",
+        "input": 1073741824
+      },
+      {
+        "expect": "1.5 GB",
+        "input": 1610612736
+      },
+      {
+        "expect": "1.0 TB",
+        "input": 1099511627776
+      },
+      {
+        "expect": "1.0 PB",
+        "input": 1125899906842624
+      }
+    ],
+    "lt_proxy_settings": [
+      {
+        "expect": {
+          "proxy_peer_connections": false,
+          "proxy_tracker_connections": false,
+          "proxy_type": 0
+        },
+        "input": null
+      },
+      {
+        "expect": {
+          "proxy_peer_connections": false,
+          "proxy_tracker_connections": false,
+          "proxy_type": 0
+        },
+        "input": {}
+      },
+      {
+        "expect": {
+          "proxy_peer_connections": false,
+          "proxy_tracker_connections": false,
+          "proxy_type": 0
+        },
+        "input": {
+          "host": "proxy.local",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "none",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_peer_connections": false,
+          "proxy_tracker_connections": false,
+          "proxy_type": 0
+        },
+        "input": {
+          "host": "",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "socks5",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_peer_connections": false,
+          "proxy_tracker_connections": false,
+          "proxy_type": 0
+        },
+        "input": {
+          "host": "",
+          "pass": "p",
+          "peer": true,
+          "port": 1080,
+          "type": "socks5",
+          "user": "u"
+        }
+      },
+      {
+        "expect": {
+          "proxy_peer_connections": false,
+          "proxy_tracker_connections": false,
+          "proxy_type": 0
+        },
+        "input": {
+          "host": "proxy.local",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_peer_connections": false,
+          "proxy_tracker_connections": false,
+          "proxy_type": 0
+        },
+        "input": {
+          "host": "proxy.local",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "socks4",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.1",
+          "proxy_peer_connections": true,
+          "proxy_port": 1080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 2
+        },
+        "input": {
+          "host": "10.0.0.1",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "socks5",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.1",
+          "proxy_peer_connections": true,
+          "proxy_port": 1080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 2
+        },
+        "input": {
+          "host": " 10.0.0.1 ",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "socks5",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.1",
+          "proxy_peer_connections": true,
+          "proxy_port": 1080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 2
+        },
+        "input": {
+          "host": "10.0.0.1",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "SOCKS5",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.1",
+          "proxy_password": "p",
+          "proxy_peer_connections": true,
+          "proxy_port": 1080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 3,
+          "proxy_username": "u"
+        },
+        "input": {
+          "host": "10.0.0.1",
+          "pass": "p",
+          "peer": true,
+          "port": 1080,
+          "type": "socks5",
+          "user": "u"
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.1",
+          "proxy_password": "",
+          "proxy_peer_connections": true,
+          "proxy_port": 1080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 3,
+          "proxy_username": "u"
+        },
+        "input": {
+          "host": "10.0.0.1",
+          "pass": "",
+          "peer": true,
+          "port": 1080,
+          "type": "socks5",
+          "user": "u"
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.2",
+          "proxy_password": "p",
+          "proxy_peer_connections": true,
+          "proxy_port": 8080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 5,
+          "proxy_username": "u"
+        },
+        "input": {
+          "host": "10.0.0.2",
+          "pass": "p",
+          "peer": true,
+          "port": 8080,
+          "type": "http",
+          "user": "u"
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.2",
+          "proxy_peer_connections": true,
+          "proxy_port": 8080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 4
+        },
+        "input": {
+          "host": "10.0.0.2",
+          "pass": "",
+          "peer": true,
+          "port": 8080,
+          "type": "http",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.2",
+          "proxy_peer_connections": false,
+          "proxy_port": 8080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 4
+        },
+        "input": {
+          "host": "10.0.0.2",
+          "pass": "",
+          "peer": false,
+          "port": 8080,
+          "type": "http",
+          "user": ""
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.1",
+          "proxy_peer_connections": true,
+          "proxy_port": 1080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 2
+        },
+        "input": {
+          "host": "10.0.0.1",
+          "type": "socks5"
+        }
+      },
+      {
+        "expect": {
+          "proxy_hostname": "10.0.0.1",
+          "proxy_peer_connections": true,
+          "proxy_port": 8080,
+          "proxy_tracker_connections": true,
+          "proxy_type": 2
+        },
+        "input": {
+          "host": "10.0.0.1",
+          "pass": "",
+          "peer": true,
+          "port": "8080",
+          "type": "socks5",
+          "user": ""
+        }
+      }
+    ],
+    "range_available": [
+      {
+        "expect": true,
+        "input": {
+          "end_excl": 0,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": true,
+        "input": {
+          "end_excl": 2,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 5,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": true,
+        "input": {
+          "end_excl": -4,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": false,
+        "input": {
+          "end_excl": 41,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": false,
+        "input": {
+          "end_excl": 8,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 0,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": true,
+        "input": {
+          "end_excl": 8,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": false,
+        "input": {
+          "end_excl": 8,
+          "end_piece": 9,
+          "have_pieces": [
+            0
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": false,
+        "input": {
+          "end_excl": 5,
+          "end_piece": 9,
+          "have_pieces": [
+            0
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 3,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": true,
+        "input": {
+          "end_excl": 40,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": false,
+        "input": {
+          "end_excl": 6,
+          "end_piece": 2,
+          "have_pieces": [
+            0
+          ],
+          "offset": 2,
+          "piece_length": 4,
+          "size": 10,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": true,
+        "input": {
+          "end_excl": 524288,
+          "end_piece": 15,
+          "have_pieces": [
+            0,
+            1,
+            14,
+            15
+          ],
+          "offset": 0,
+          "piece_length": 262144,
+          "size": 4194304,
+          "start": 0,
+          "start_piece": 0
+        }
+      }
+    ],
+    "ready_until": [
+      {
+        "expect": 12,
+        "input": {
+          "end_excl": 40,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 40,
+        "input": {
+          "end_excl": 40,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 40,
+        "input": {
+          "end_excl": 40,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 8,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 5,
+        "input": {
+          "end_excl": 5,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 5,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_excl": 41,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 0,
+        "input": {
+          "end_excl": 40,
+          "end_piece": 9,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 0,
+          "size": 40,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 9,
+        "input": {
+          "end_excl": 20,
+          "end_piece": 9,
+          "have_pieces": [
+            0
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 9,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 4,
+        "input": {
+          "end_excl": 20,
+          "end_piece": 9,
+          "have_pieces": [
+            0
+          ],
+          "offset": 0,
+          "piece_length": 4,
+          "size": 40,
+          "start": 2,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 2,
+        "input": {
+          "end_excl": 10,
+          "end_piece": 2,
+          "have_pieces": [
+            0
+          ],
+          "offset": 2,
+          "piece_length": 4,
+          "size": 10,
+          "start": 0,
+          "start_piece": 0
+        }
+      },
+      {
+        "expect": 524288,
+        "input": {
+          "end_excl": 4194304,
+          "end_piece": 15,
+          "have_pieces": [
+            0,
+            1
+          ],
+          "offset": 0,
+          "piece_length": 262144,
+          "size": 4194304,
+          "start": 0,
+          "start_piece": 0
+        }
+      }
+    ],
+    "safe_rel_path": [
+      {
+        "expect": "Windows/win.ini",
+        "input": [
+          "..",
+          "..",
+          "Windows",
+          "win.ini"
+        ]
+      },
+      {
+        "expect": "unnamed",
+        "input": [
+          ".."
+        ]
+      },
+      {
+        "expect": "etc/passwd",
+        "input": [
+          "../..",
+          "etc",
+          "passwd"
+        ]
+      },
+      {
+        "expect": "boot.ini",
+        "input": [
+          "..",
+          "..",
+          "..",
+          "..",
+          "boot.ini"
+        ]
+      },
+      {
+        "expect": "Users/evil.txt",
+        "input": [
+          "C:",
+          "Users",
+          "evil.txt"
+        ]
+      },
+      {
+        "expect": "Users/evil.txt",
+        "input": [
+          "C:\\Users\\evil.txt"
+        ]
+      },
+      {
+        "expect": "evil.txt",
+        "input": [
+          "D:evil.txt"
+        ]
+      },
+      {
+        "expect": "a_b_c_d_e_f_g",
+        "input": [
+          "a<b>c|d?e*f\"g"
+        ]
+      },
+      {
+        "expect": "foo/bar",
+        "input": [
+          "foo",
+          "",
+          "bar"
+        ]
+      },
+      {
+        "expect": "unnamed",
+        "input": [
+          ""
+        ]
+      },
+      {
+        "expect": "unnamed",
+        "input": [
+          "",
+          "",
+          ""
+        ]
+      },
+      {
+        "expect": "unnamed",
+        "input": [
+          "   "
+        ]
+      },
+      {
+        "expect": "name",
+        "input": [
+          "\u0000name\u0000"
+        ]
+      },
+      {
+        "expect": "a/b/c",
+        "input": [
+          "a//b///c"
+        ]
+      },
+      {
+        "expect": "unnamed",
+        "input": [
+          ".",
+          ".",
+          ".."
+        ]
+      },
+      {
+        "expect": "abs/path",
+        "input": [
+          "/abs/path"
+        ]
+      },
+      {
+        "expect": "evil",
+        "input": [
+          "..\\..\\evil"
+        ]
+      },
+      {
+        "expect": ".hidden",
+        "input": [
+          ".hidden"
+        ]
+      },
+      {
+        "expect": "dir/file",
+        "input": [
+          "dir",
+          "..",
+          "file"
+        ]
+      },
+      {
+        "expect": "b_c",
+        "input": [
+          "a:b:c"
+        ]
+      }
+    ],
+    "state_constants": [
+      {
+        "expect": "COMPLETED",
+        "input": {
+          "name": "STATE_COMPLETED"
+        }
+      },
+      {
+        "expect": "DELETED",
+        "input": {
+          "name": "STATE_DELETED"
+        }
+      },
+      {
+        "expect": "DOWNLOADING",
+        "input": {
+          "name": "STATE_DOWNLOADING"
+        }
+      },
+      {
+        "expect": "FAILED",
+        "input": {
+          "name": "STATE_FAILED"
+        }
+      },
+      {
+        "expect": "META_FETCH",
+        "input": {
+          "name": "STATE_META_FETCH"
+        }
+      },
+      {
+        "expect": "PAUSED",
+        "input": {
+          "name": "STATE_PAUSED"
+        }
+      },
+      {
+        "expect": "QUEUED",
+        "input": {
+          "name": "STATE_QUEUED"
+        }
+      },
+      {
+        "expect": "READY",
+        "input": {
+          "name": "STATE_READY"
+        }
+      },
+      {
+        "expect": "SEEDING",
+        "input": {
+          "name": "STATE_SEEDING"
+        }
+      },
+      {
+        "expect": "STOPPED",
+        "input": {
+          "name": "STATE_STOPPED"
+        }
+      },
+      {
+        "expect": "VALIDATE",
+        "input": {
+          "name": "STATE_VALIDATE"
+        }
+      }
+    ],
+    "tail_entry_pieces": [
+      {
+        "expect": [
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "input": {
+          "file": {
+            "end_piece": 19,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "input": {
+          "file": {
+            "end_piece": 19,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          1
+        ],
+        "input": {
+          "file": {
+            "end_piece": 1,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [
+          1
+        ],
+        "input": {
+          "file": {
+            "end_piece": 1,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [
+          15633,
+          15634,
+          15635,
+          15636,
+          15637,
+          15638,
+          15639,
+          15640
+        ],
+        "input": {
+          "file": {
+            "end_piece": 15640,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          15633,
+          15634,
+          15635,
+          15636,
+          15637,
+          15638,
+          15639,
+          15640
+        ],
+        "input": {
+          "file": {
+            "end_piece": 15640,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          977
+        ],
+        "input": {
+          "file": {
+            "end_piece": 977,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [
+          977
+        ],
+        "input": {
+          "file": {
+            "end_piece": 977,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": null,
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 0,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 0
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": -1
+        }
+      },
+      {
+        "expect": [
+          0
+        ],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 100,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          1
+        ],
+        "input": {
+          "file": {
+            "end_piece": 1,
+            "ext": ".mp4",
+            "offset": 1000,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      }
+    ],
+    "tail_piece_window": [
+      {
+        "expect": [
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "input": {
+          "file": {
+            "end_piece": 19,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 19,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          1
+        ],
+        "input": {
+          "file": {
+            "end_piece": 1,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 1,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [
+          15601,
+          15602,
+          15603,
+          15604,
+          15605,
+          15606,
+          15607,
+          15608,
+          15609,
+          15610,
+          15611,
+          15612,
+          15613,
+          15614,
+          15615,
+          15616,
+          15617,
+          15618,
+          15619,
+          15620,
+          15621,
+          15622,
+          15623,
+          15624,
+          15625,
+          15626,
+          15627,
+          15628,
+          15629,
+          15630,
+          15631,
+          15632,
+          15633,
+          15634,
+          15635,
+          15636,
+          15637,
+          15638,
+          15639,
+          15640
+        ],
+        "input": {
+          "file": {
+            "end_piece": 15640,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 15640,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          975,
+          976,
+          977
+        ],
+        "input": {
+          "file": {
+            "end_piece": 977,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 977,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [
+          0
+        ],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 100,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          0
+        ],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 102400,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [
+          62434,
+          62435,
+          62436,
+          62437,
+          62438,
+          62439,
+          62440,
+          62441,
+          62442,
+          62443,
+          62444,
+          62445,
+          62446,
+          62447,
+          62448,
+          62449,
+          62450,
+          62451,
+          62452,
+          62453,
+          62454,
+          62455,
+          62456,
+          62457,
+          62458,
+          62459,
+          62460,
+          62461,
+          62462,
+          62463,
+          62464,
+          62465,
+          62466,
+          62467,
+          62468,
+          62469,
+          62470,
+          62471,
+          62472,
+          62473,
+          62474,
+          62475,
+          62476,
+          62477,
+          62478,
+          62479,
+          62480,
+          62481,
+          62482,
+          62483,
+          62484,
+          62485,
+          62486,
+          62487,
+          62488,
+          62489,
+          62490,
+          62491,
+          62492,
+          62493,
+          62494,
+          62495,
+          62496,
+          62497,
+          62498,
+          62499,
+          62500,
+          62501,
+          62502,
+          62503,
+          62504,
+          62505,
+          62506,
+          62507,
+          62508,
+          62509,
+          62510,
+          62511,
+          62512,
+          62513,
+          62514,
+          62515,
+          62516,
+          62517,
+          62518,
+          62519,
+          62520,
+          62521,
+          62522,
+          62523,
+          62524,
+          62525,
+          62526,
+          62527,
+          62528,
+          62529,
+          62530,
+          62531,
+          62532,
+          62533,
+          62534,
+          62535,
+          62536,
+          62537,
+          62538,
+          62539,
+          62540,
+          62541,
+          62542,
+          62543,
+          62544,
+          62545,
+          62546,
+          62547,
+          62548,
+          62549,
+          62550,
+          62551,
+          62552,
+          62553,
+          62554,
+          62555,
+          62556,
+          62557,
+          62558,
+          62559,
+          62560,
+          62561
+        ],
+        "input": {
+          "file": {
+            "end_piece": 62561,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 65536
+        }
+      },
+      {
+        "expect": [
+          31202,
+          31203,
+          31204,
+          31205,
+          31206,
+          31207,
+          31208,
+          31209,
+          31210,
+          31211,
+          31212,
+          31213,
+          31214,
+          31215,
+          31216,
+          31217,
+          31218,
+          31219,
+          31220,
+          31221,
+          31222,
+          31223,
+          31224,
+          31225,
+          31226,
+          31227,
+          31228,
+          31229,
+          31230,
+          31231,
+          31232,
+          31233,
+          31234,
+          31235,
+          31236,
+          31237,
+          31238,
+          31239,
+          31240,
+          31241,
+          31242,
+          31243,
+          31244,
+          31245,
+          31246,
+          31247,
+          31248,
+          31249,
+          31250,
+          31251,
+          31252,
+          31253,
+          31254,
+          31255,
+          31256,
+          31257,
+          31258,
+          31259,
+          31260,
+          31261,
+          31262,
+          31263,
+          31264,
+          31265,
+          31266,
+          31267,
+          31268,
+          31269,
+          31270,
+          31271,
+          31272,
+          31273,
+          31274,
+          31275,
+          31276,
+          31277,
+          31278,
+          31279,
+          31280
+        ],
+        "input": {
+          "file": {
+            "end_piece": 31280,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 131072
+        }
+      },
+      {
+        "expect": [
+          975,
+          976,
+          977
+        ],
+        "input": {
+          "file": {
+            "end_piece": 977,
+            "ext": ".mp4",
+            "offset": 4096,
+            "size": 4100000000,
+            "start_piece": 0
+          },
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 0,
+            "start_piece": 0
+          },
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mp4",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": 0
+        }
+      },
+      {
+        "expect": [],
+        "input": {
+          "file": {
+            "end_piece": 0,
+            "ext": ".mkv",
+            "offset": 0,
+            "size": 5242880,
+            "start_piece": 0
+          },
+          "piece_length": -1
+        }
+      }
+    ],
+    "tail_window_bytes": [
+      {
+        "expect": 0,
+        "input": {
+          "size": 0
+        }
+      },
+      {
+        "expect": 1,
+        "input": {
+          "size": 1
+        }
+      },
+      {
+        "expect": 102400,
+        "input": {
+          "size": 102400
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 524288000
+        }
+      },
+      {
+        "expect": 2500000,
+        "input": {
+          "size": 1000000000
+        }
+      },
+      {
+        "expect": 2684354,
+        "input": {
+          "size": 1073741824
+        }
+      },
+      {
+        "expect": 10250000,
+        "input": {
+          "size": 4100000000
+        }
+      },
+      {
+        "expect": 10249999,
+        "input": {
+          "size": 4099999999
+        }
+      },
+      {
+        "expect": 10250000,
+        "input": {
+          "size": 4100000001
+        }
+      },
+      {
+        "expect": 2097151,
+        "input": {
+          "size": 2097151
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 2097152
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 2097153
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 838860799
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 838860800
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 838860801
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 16777215
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 16777216
+        }
+      },
+      {
+        "expect": 2097152,
+        "input": {
+          "size": 16777217
+        }
+      },
+      {
+        "expect": 16777215,
+        "input": {
+          "size": 6710886399
+        }
+      },
+      {
+        "expect": 16777216,
+        "input": {
+          "size": 6710886400
+        }
+      },
+      {
+        "expect": 16777216,
+        "input": {
+          "size": 6710886401
+        }
+      }
+    ],
+    "window_pieces": [
+      {
+        "expect": 60,
+        "input": {
+          "piece_length": 16384
+        }
+      },
+      {
+        "expect": 60,
+        "input": {
+          "piece_length": 262144
+        }
+      },
+      {
+        "expect": 16,
+        "input": {
+          "piece_length": 1048576
+        }
+      },
+      {
+        "expect": 8,
+        "input": {
+          "piece_length": 2097152
+        }
+      },
+      {
+        "expect": 4,
+        "input": {
+          "piece_length": 4194304
+        }
+      },
+      {
+        "expect": 4,
+        "input": {
+          "piece_length": 8388608
+        }
+      },
+      {
+        "expect": 60,
+        "input": {
+          "piece_length": 0
+        }
+      },
+      {
+        "expect": 60,
+        "input": {
+          "piece_length": -1
+        }
+      },
+      {
+        "expect": 4,
+        "input": {
+          "piece_length": 16777216
+        }
+      }
+    ]
+  },
+  "generated_by": "android/tools/gen_parity_fixtures.py",
+  "source_sha": "0b14991aa76a30c3a45eb4e1ce0c6d22a75082ca"
+}

@@ -49,6 +49,7 @@ SDK 管理用新的 `android` CLI（2026 版已废弃 `sdkmanager`）：
 - APK 内含 `lib/arm64-v8a/libtorrent4j.so`（15.9MB）、`lib/x86_64/libtorrent4j.so`（16.4MB）。
 - `zipalign -c -P 16 -v 4 app-debug.apk` → `Verification successful`（16KB 页对齐达标）。
 - `:app:testDebugUnitTest` 通过（JVM 单测链路可用）。
+- **未装 NDK**：因此 `stripDebugDebugSymbols` 会报 `Unable to strip … libtorrent4j.so, packaging them as they are`——原样打包未剥符号（debug 60+MB / 双 ABI）。不影响正确性与 16KB 对齐，只影响体积。**发布前（阶段 7）再装 NDK r29**（约 1GB）让 AGP 剥符号；debug 阶段不用管。
 - **尚未安装**：模拟器与系统镜像 —— 待定（真机 USB 调试 or 模拟器）。
 - 工程骨架来自 `android create empty-activity` 模板：Gradle 9.1 / AGP 9.0.1 / Kotlin 2.3.20 / Compose BOM 2026.03.01；包名 `com.bitseed.magnetviewer`，minSdk 28 / targetSdk 36。
 
