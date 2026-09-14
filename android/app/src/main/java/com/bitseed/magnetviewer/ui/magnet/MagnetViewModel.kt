@@ -217,7 +217,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   private val engine =
     BtEngine(
       object : BtEngine.Listener {
-        override fun onMetadataReady(infoHash: String, result: ParseResult, focused: Boolean) {
+        override fun onMetadataReady(infoHash: String, result: ParseResult, focused: Boolean, download: Boolean) {
           watchdog?.cancel()
           log("UI 收到元数据就绪：name=${result.name} 文件数=${result.files.size} infohash=${infoHash.take(12)}… focused=$focused")
           if (focused) {
@@ -244,8 +244,11 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
               it.copy(busy = false, statusText = "元数据就绪：${result.name}（任务列表已更新）")
             }
           }
-          // 清单落盘点之一（重启后靠它直接上屏，不必再等 DHT）
-          upsertRecordFromResult(infoHash, result, STATE_PAUSED)
+          // 清单落盘点之一（重启后靠它直接上屏，不必再等 DHT）。
+          // download 取**引擎真值**：仅解析任务是 false（重启只恢复清单、不续传本体），
+          // 转正/续传任务是 true —— 记录的该字段必须与引擎一致，否则「继续」的状态判据会分叉。
+          // download 用引擎在回调里给的**真值**（仅解析 = false）
+          upsertRecordFromResult(infoHash, result, STATE_PAUSED, download = download)
           requestResume("元数据就绪")
           refreshTasksSoon()
         }
@@ -809,6 +812,10 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     val stallNote =
       if (focusSnap == null) stallWatch.sample(active = false, downloadedBytes = 0L, peers = 0)
       else stallWatch.sample(downloading, focusSnap.downloadedBytes, focusSnap.peers)
+    if (stallNote != _state.value.stallNote) {
+      // 变化时留痕（排查「下载卡住」时先看这条；恢复增长也会打一条 note=null）
+      log("下载停滞提示：" + (stallNote ?: "已恢复（字节继续增长）"))
+    }
     _state.update { it.copy(taskRows = rows, persistedTaskCount = tasks.size, stallNote = stallNote) }
   }
 
@@ -915,11 +922,11 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   fun resumeTask(infoHash: String) {
     viewModelScope.launch {
       startServiceForTask()
-      val rec = tasks[infoHash]
       val ok = withContext(Dispatchers.IO) { runCatching { engine.resumeTask(infoHash) }.getOrDefault(false) }
       // J-01：仅解析任务（没有选中要下载的文件）点「继续」不进入下载态 ——
-      // 状态口径与引擎同一判据（stateAfterResume），并给一句人话提示。
-      val nextState = if (ok && rec != null) stateAfterResume(rec.download, rec.selected) else null
+      // 状态判据取**引擎真值**（记录里的 selected 是「全选」的显示默认值，拿它判会把
+      // 仅解析任务误判成下载型），并给一句人话提示。
+      val nextState = if (ok) withContext(Dispatchers.IO) { runCatching { engine.resumeStateFor(infoHash) }.getOrNull() } else null
       val parseOnly = nextState == STATE_PAUSED
       markStateFor(infoHash, nextState, "继续任务", if (ok) "" else "继续失败：句柄不可用")
       _state.update {

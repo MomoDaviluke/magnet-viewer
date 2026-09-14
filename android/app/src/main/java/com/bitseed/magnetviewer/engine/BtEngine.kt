@@ -221,7 +221,12 @@ class BtEngine(private val listener: Listener) : EngineControl {
      * [focused] = 这条任务是否是当前焦点任务（多任务：宿主据此决定要不要更新中间的清单区）。
      * 默认 true 保持旧调用点语义不变。
      */
-    fun onMetadataReady(infoHash: String, result: ParseResult, focused: Boolean = true)
+    /**
+     * [download] = 该任务此刻是不是**下载型**（引擎真值：仅解析任务为 false，重启只恢复
+     * 清单不续传本体）。宿主写记录时要用它，别用「全选」的显示默认值 —— 那是 J-01 的
+     * 残留来源（记录说 download=true，引擎其实是 false）。
+     */
+    fun onMetadataReady(infoHash: String, result: ParseResult, focused: Boolean = true, download: Boolean = true)
 
     /**
      * 元数据阶段失败（含 add 失败 / DHT 失败 / 超时）。
@@ -857,7 +862,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
       log("清单条目：index=${f.index} name=${f.name} size=${f.size} 分块 ${f.startPiece}..${f.endPiece}")
     }
     listener.onTaskStateChanged(ih, newState)
-    listener.onMetadataReady(ih, result, task.infoHash == currentInfoHash)
+    listener.onMetadataReady(ih, result, task.infoHash == currentInfoHash, task.download)
     publishActivity()
   }
 
@@ -1353,6 +1358,19 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /** 公开：某任务是否下载型（转正/预览过）。 */
   fun isDownloadTask(infoHash: String): Boolean = taskOf(infoHash)?.download == true
+
+  /**
+   * 「继续」之后该显示什么状态（**引擎侧真值**；VM 与引擎共用同一判据 [stateAfterResume]）。
+   *
+   * 为什么要暴露它：记录的 `selected` 是「全选」的显示默认值，拿它判「有没有选中要下载的
+   * 文件」会把**仅解析任务**误判成下载任务（J-01 的残留：引擎保持 PAUSED、VM 却先写成
+   * DOWNLOADING 再被快照纠正）。真值只在引擎的任务对象上。
+   */
+  fun resumeStateFor(infoHash: String): String {
+    val t = taskOf(infoHash) ?: return STATE_PAUSED
+    if (t.result == null) return STATE_META_FETCH
+    return stateAfterResume(t.download, t.selected)
+  }
 
   /** 公开：某任务当前落盘目录（无记录返回 null）。 */
   fun taskSaveDir(infoHash: String): File? = taskOf(infoHash)?.saveDir
