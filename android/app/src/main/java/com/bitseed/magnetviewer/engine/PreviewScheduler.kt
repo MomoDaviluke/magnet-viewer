@@ -1,7 +1,6 @@
 package com.bitseed.magnetviewer.engine
 
 import android.util.Log
-import com.bitseed.magnetviewer.core.model.PieceMap
 import com.bitseed.magnetviewer.core.model.TorrentFile
 import com.bitseed.magnetviewer.core.model.contiguousBytes
 import com.bitseed.magnetviewer.core.sched.DEADLINE_STEP_MS
@@ -11,74 +10,32 @@ import com.bitseed.magnetviewer.core.sched.tailEntryPieces
 import com.bitseed.magnetviewer.core.sched.tailPieceWindow
 import com.bitseed.magnetviewer.core.sched.tailPlan
 import com.bitseed.magnetviewer.core.sched.windowPieces
-import org.libtorrent4j.PieceIndexBitfield
 import org.libtorrent4j.Priority
-import org.libtorrent4j.TorrentFlags
-import org.libtorrent4j.TorrentHandle
-import org.libtorrent4j.TorrentStatus
-
-/**
- * 一次 `TorrentHandle.status(QUERY_PIECES)` 的位图快照（P2-1 口径：1 次绑定调用 +
- * Kotlin 侧 O(1) 索引，而不是逐块 `havePiece()`）。
- *
- * 位图不可用（`pieces()` 返回 0 指针 / 空位图）时退化为逐块 `havePiece()`；
- * 两者都判不出来一律返回 false（不可判定按**不可用**处理，绝不误判可读）。
- */
-internal class TorrentPieceSnapshot(
-  private val status: TorrentStatus?,
-  private val handle: TorrentHandle?,
-) {
-  private val bits: PieceIndexBitfield? =
-    try {
-      status?.pieces()
-    } catch (e: Throwable) {
-      null
-    }
-
-  private val bitCount: Int =
-    try {
-      bits?.size() ?: 0
-    } catch (e: Throwable) {
-      0
-    }
-
-  val hasBitfield: Boolean
-    get() = bits != null && bitCount > 0
-
-  fun have(piece: Int): Boolean {
-    if (piece < 0) return false
-    val b = bits
-    if (hasBitfield && b != null) {
-      return try {
-        if (piece >= bitCount) false else b.getBit(piece)
-      } catch (e: Throwable) {
-        false
-      }
-    }
-    val h = handle ?: return false
-    return try {
-      // 位图不可用时才逐块问句柄：同样必须先判 isValid（失效句柄 = 原生崩溃）
-      if (!h.isValid()) false else h.havePiece(piece)
-    } catch (e: Throwable) {
-      false
-    }
-  }
-
-  /** 供流服务使用的「已下载分块」视图（status 被闭包持有 → 位图内存存活）。 */
-  fun toPieceMap(file: TorrentFile, pieceLength: Int): PieceMap =
-    PieceMap(pieceLength, file.offset, file.startPiece, file.endPiece, file.size) { p -> have(p) }
-}
 
 /**
  * 预览调度器：桌面 `core/scheduler.py:PreviewScheduler` 的 Kotlin 移植。
  *
  * 调度参数全部走 `core.sched` 的纯函数（窗口按字节、尾部窗口收敛、deadline 递增），
- * 本类只负责「把计划真正下发给句柄」。所有 libtorrent4j 调用都在 try/catch 内，
- * 失败只记不抛（与桌面 `log_warning` 语义一致：调度失败不该打断播放）。
+ * 本类只负责「把计划真正下发给句柄」。句柄一律走 [PreviewHandleOps] 窄接口
+ * （swig 的 `TorrentHandle` 造不进 JVM 单测；窄接口可以，于是暂停/继续/停止的
+ * **调用序列**能被单测逐条断言）。所有句柄调用都在 try/catch 内，失败只记不抛
+ * （与桌面 `log_warning` 语义一致：调度失败不该打断播放）。
+ *
+ * 三种生命周期操作与桌面 `stop(release_only=…)` 的对应：
+ * - [pause]：**hold 档**——清 deadline + 文件优先级全 0 + 撤 auto_managed + pause；
+ *   与桌面 `stop(release_only=False)` 的句柄动作逐条一致，区别只在于本移植保留
+ *   句柄/文件引用与进度查询能力（否则暂停后 UI 的缓冲区读数会掉回 0，而实际
+ *   已落盘数据一点没少）。[resume] 是它的逆操作。
+ * - [stop]`(releaseOnly=false)`：hold 档的**完整**停止——执行 pause 的句柄动作后，
+ *   再释放句柄/文件引用（调度器回到 inactive，与桌面一致）。
+ * - [stop]`(releaseOnly=true)`：**convert 档**——只清 deadline + 还原锚点，
+ *   不清优先级、不 pause、不撤 auto_managed；是否转正由宿主在锁外决策。
+ *   本移植保留句柄/文件引用（[released] = true）以便继续供应分块可用性，
+ *   但 tick/seek 不再自动补窗。
  */
 class PreviewScheduler(private val log: (String) -> Unit = {}) {
 
-  private var handle: TorrentHandle? = null
+  private var handle: PreviewHandleOps? = null
   private var file: TorrentFile? = null
   private var pieceLength: Int = 0
   private var scheduledTo: Int = -1
@@ -87,11 +44,22 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
   private var tailPieces: List<Int> = emptyList()
   private var entryPieces: Set<Int> = emptySet()
 
+  /** 预览已暂停（hold 档）：不再自动补窗，也不接受 seek；缓冲读数保持冻结。 */
+  var paused: Boolean = false
+    private set
+
+  /**
+   * 预览已**释放**（convert 档 stop）：只清 deadline/还原锚点，不 pause；
+   * tick/seek 不再自动补窗（桌面此时由任务级路径接管），但分块可用性查询照旧。
+   */
+  var released: Boolean = false
+    private set
+
   /**
    * **句柄有效性守卫**：失效句柄上的任何 swig 调用（status/prioritizeFiles/pause/…）
    * 都可能原生 SIGSEGV，`try/catch` 接不住。返回 null 表示「本调用必须放弃」。
    */
-  private fun usable(h: TorrentHandle?, what: String): TorrentHandle? {
+  private fun usable(h: PreviewHandleOps?, what: String): PreviewHandleOps? {
     if (h == null) return null
     val ok =
       try {
@@ -133,29 +101,30 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
   // ---------------------------------------------------------------- 生命周期
 
   /**
-   * 开始预览指定文件：
+   * 开始（或恢复）预览指定文件：
    * 只保留目标文件优先级（其余置 `Priority.IGNORE`），解除 upload_mode、
    * 打开 auto_managed 并 resume，然后预约尾部索引窗口 + 顺序窗口。
    *
    * 优先级取 `Priority.DEFAULT`（= 4）——与桌面 `scheduler.begin` 里 `prio[idx] = 4`
    * 逐位对齐（libtorrent4j 的 4 就是 `Priority.DEFAULT`）。
    */
-  fun begin(h: TorrentHandle, target: TorrentFile) {
+  fun begin(h: PreviewHandleOps, target: TorrentFile) {
     val guarded = usable(h, "begin") ?: throw IllegalStateException("句柄无效（isValid=false）")
-    val ti = guarded.torrentFile() ?: throw IllegalStateException("元数据尚未就绪")
-    val pl = ti.pieceLength()
+    val pl = guarded.pieceLength()
     if (pl <= 0) throw IllegalStateException("块长非法：$pl")
-    val n = ti.numFiles()
+    val n = guarded.numFiles()
     val prio = Priority.array(Priority.IGNORE, maxOf(1, n))
     if (target.index in 0 until prio.size) prio[target.index] = Priority.DEFAULT
-    safe("begin.flags") { guarded.unsetFlags(TorrentFlags.UPLOAD_MODE) }
-    safe("begin.auto_managed") { guarded.setFlags(TorrentFlags.AUTO_MANAGED) }
+    safe("begin.flags") { guarded.unsetUploadMode() }
+    safe("begin.auto_managed") { guarded.setAutoManaged() }
     safe("begin.resume") { guarded.resume() }
     safe("begin.prioritize") { guarded.prioritizeFiles(prio) }
 
     handle = guarded
     file = target
     pieceLength = pl
+    paused = false
+    released = false
     scheduledTo = target.startPiece - 1
     playFrom = target.startPiece
     headN = windowPieces(pl)
@@ -166,20 +135,105 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
     tick()
   }
 
-  /** 取消预览：清空全部 deadline，并按桌面 hold 档把全部文件优先级置 0 + 暂停。 */
-  fun stop() {
+  /**
+   * 暂停预览（**hold 档语义**，逐条对齐桌面 `stop(release_only=False)` 的句柄动作）：
+   * 清全部 deadline → 文件优先级全 0 → 撤 `AUTO_MANAGED`（否则队列管理会自动 resume）
+   * → `pause()`。
+   *
+   * 保留句柄/文件与进度查询：暂停后缓冲区读数应**冻结**而不是掉 0。
+   */
+  fun pause() {
+    val h = usable(handle, "pause")
+    if (h == null) {
+      if (handle != null) logcat("pause: 句柄失效，只重置本地状态")
+      resetLocal()
+      return
+    }
+    safe("pause.clear_deadlines") { h.clearPieceDeadlines() }
+    val n = usable(h, "pause.num_files")?.numFiles() ?: 0
+    if (n > 0) safe("pause.prioritize") { h.prioritizeFiles(Priority.array(Priority.IGNORE, n)) }
+    safe("pause.auto_managed") { h.unsetAutoManaged() }
+    safe("pause.pause") { h.pause() }
+    paused = true
+    released = false
+    logcat("pause: 已冻结（deadline 已清 / 优先级全 0 / 撤 auto_managed / pause）")
+  }
+
+  /**
+   * 继续预览：把 [pause]（或 convert 档释放）撤掉——重放 `begin` 的句柄动作
+   * （优先级、auto_managed、resume）并重建「尾部窗口 + 顺序窗口」。
+   *
+   * [fresh] 非空时替换当前句柄（宿主在句柄失效时重新 `find_torrent` 拿到的自有副本）。
+   * 返回 true 表示已重新拉起。
+   */
+  fun resume(fresh: PreviewHandleOps? = null): Boolean {
+    if (fresh != null) handle = fresh
+    val h = usable(handle, "resume")
+    val f = file
+    if (h == null || f == null || pieceLength <= 0) {
+      logcat("resume: 无可用预览任务（句柄/文件缺失），忽略")
+      return false
+    }
+    val n = usable(h, "resume.num_files")?.numFiles() ?: 0
+    val prio = Priority.array(Priority.IGNORE, maxOf(1, n))
+    if (f.index in 0 until prio.size) prio[f.index] = Priority.DEFAULT
+    safe("resume.flags") { h.unsetUploadMode() }
+    safe("resume.auto_managed") { h.setAutoManaged() }
+    safe("resume.resume") { h.resume() }
+    safe("resume.prioritize") { h.prioritizeFiles(prio) }
+    paused = false
+    released = false
+    scheduledTo = f.startPiece - 1
+    playFrom = f.startPiece
+    headN = windowPieces(pieceLength)
+    tailPieces = tailPieceWindow(f, pieceLength)
+    entryPieces = if (tailPieces.isNotEmpty()) tailEntryPieces(f, pieceLength).toSet() else emptySet()
+    logcat("resume: 已恢复（优先级/auto_managed/resume + 重建窗口）")
+    requestTail()
+    tick()
+    return true
+  }
+
+  /**
+   * 停止预览（桌面 `stop(release_only=…)` 的移植）。
+   *
+   * - `releaseOnly = false`（hold 档／基线）：[pause] 的句柄动作之后再释放句柄/文件，
+   *   调度器回到 inactive；
+   * - `releaseOnly = true`（convert 档）：**只**清 deadline + 还原锚点——
+   *   不清优先级、不 pause、不撤 auto_managed（[released] = true，tick/seek 停手，
+   *   由调用方决定是否转正）。
+   */
+  fun stop(releaseOnly: Boolean = false) {
     val h = usable(handle, "stop")
     if (h != null) {
       safe("stop.clear_deadlines") { h.clearPieceDeadlines() }
-      // 桌面 stop(release_only=False)：全部优先级置 0、撤 auto_managed、pause
-      // —— 停止预览后不在后台继续拉这个文件的分块（再次预览时 begin() 会重新拉起）。
-      safe("stop.prioritize") {
-        val n = if (usable(h, "stop.torrent_file") != null) h.torrentFile()?.numFiles() ?: 0 else 0
-        if (n > 0) h.prioritizeFiles(Priority.array(Priority.IGNORE, n))
+      if (!releaseOnly) {
+        val n = usable(h, "stop.num_files")?.numFiles() ?: 0
+        if (n > 0) safe("stop.prioritize") { h.prioritizeFiles(Priority.array(Priority.IGNORE, n)) }
+        safe("stop.auto_managed") { h.unsetAutoManaged() }
+        safe("stop.pause") { h.pause() }
       }
-      safe("stop.auto_managed") { h.unsetFlags(TorrentFlags.AUTO_MANAGED) }
-      safe("stop.pause") { h.pause() }
+      logcat(if (releaseOnly) "stop(release_only=true)：只清 deadline + 还原锚点" else "stop：冻结并释放")
     }
+    // 锚点一律还原（桌面 stop 的两个分支都做）
+    scheduledTo = -1
+    playFrom = -1
+    headN = 0
+    paused = false
+    if (releaseOnly) {
+      // convert 档：保留句柄/文件（分块可用性查询、点播继续可用），只是不再自动补窗
+      released = true
+    } else {
+      handle = null
+      file = null
+      pieceLength = 0
+      tailPieces = emptyList()
+      entryPieces = emptySet()
+      released = false
+    }
+  }
+
+  private fun resetLocal() {
     handle = null
     file = null
     pieceLength = 0
@@ -188,12 +242,15 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
     headN = 0
     tailPieces = emptyList()
     entryPieces = emptySet()
+    paused = false
+    released = false
   }
 
   // ---------------------------------------------------------------- 预约
 
   /** 尾部索引窗口预约（幂等）：入口块提前，其余尾块排在头窗之后。 */
   private fun requestTail() {
+    if (paused || released) return
     val h = usable(handle, "request_tail") ?: return
     if (tailPieces.isEmpty()) return
     for (d in tailPlan(headN, tailPieces, entryPieces, DEADLINE_STEP_MS)) {
@@ -204,8 +261,12 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
   /**
    * 按字节区间即时点播（文件内相对偏移，[endByteExcl] 为开区间）。
    * 单次上限 60 块，**不移动顺序锚点**（点播是临时插队）。
+   *
+   * 暂停期间忽略（句柄已 pause，下 deadline 没有意义）；convert 档释放后仍生效
+   * （文件正在全量缓存，点播只是加急）。
    */
   fun requestRange(startByte: Long, endByteExcl: Long) {
+    if (paused) return
     val h = usable(handle, "request_range") ?: return
     val f = file ?: return
     if (pieceLength <= 0) return
@@ -217,8 +278,17 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
   /**
    * 跳转：先 `clearPieceDeadlines()` 清掉旧位置的 ASAP 预约，再重建
    * 「尾部窗口 + 新位置窗口」（窗口块数走 `windowPieces`，deadline 从新位置起递增）。
+   *
+   * 为什么必须先清（桌面 `scheduler.seek_to_byte` 的原注释）：拖到未缓存区再拖回
+   * 已缓存区时，**残留的远端分块仍在以最高优先级并行下载**，与新播放位置争带宽 ——
+   * 明明已缓存的区域反而卡顿。清完再重建，旧位置的预约才真正失效。
+   * 尾部 moov 窗口同样被这次清理波及，所以重建顺序是「清 → 尾窗 → 新位置头窗」。
    */
   fun seekToByte(byteOffset: Long) {
+    if (paused || released) {
+      logcat("seek: 预览已暂停/已释放，忽略跳转（byteOffset=$byteOffset）")
+      return
+    }
     val h = usable(handle, "seek") ?: return
     val f = file ?: return
     if (pieceLength <= 0) return
@@ -233,6 +303,7 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
       safe("seek.deadline piece=${d.piece}") { h.setPieceDeadline(d.piece, d.deadlineMs) }
     }
     scheduledTo = maxOf(scheduledTo, target - 1)
+    logcat("seek: 清旧预约后重建窗口 $piece..$target")
     tick()
   }
 
@@ -241,6 +312,7 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
    * 尾部窗口未齐时持续补拉（入口就绪不取消整尾窗）。
    */
   fun tick() {
+    if (paused || released) return
     val h = usable(handle, "tick") ?: return
     val f = file ?: return
     if (pieceLength <= 0) return
@@ -258,9 +330,9 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
 
   // ---------------------------------------------------------------- 状态查询
 
-  internal fun snapshot(): TorrentPieceSnapshot? {
+  internal fun snapshot(): PieceAvailability? {
     val h = usable(handle, "snapshot") ?: return null
-    return snapshotOf(h)
+    return h.availability()
   }
 
   /** 尾部索引窗口是否已全部落盘（无窗口时恒为 true）。 */
@@ -311,38 +383,5 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
 
   companion object {
     private const val TAG = "MagnetViewer"
-
-    /**
-     * `TorrentHandle.status(QUERY_PIECES)` 快照（要拿最新分块位图必须带这个 flag）。
-     *
-     * **先判 `isValid()`**：失效句柄上的 `status()` 会在 swig 层解引用空 shared_ptr →
-     * SIGSEGV，`try/catch` 拦不住（本次 P0 的第二个调用点）。
-     */
-    internal fun snapshotOf(h: TorrentHandle): TorrentPieceSnapshot? =
-      try {
-        val ok =
-          try {
-            h.isValid()
-          } catch (e: Throwable) {
-            false
-          }
-        if (!ok) {
-          try {
-            Log.i(TAG, "snapshot: 句柄失效（isValid=false），跳过 status(QUERY_PIECES)")
-          } catch (e: Throwable) {
-            // ignore
-          }
-          null
-        } else {
-          TorrentPieceSnapshot(h.status(TorrentHandle.QUERY_PIECES), h)
-        }
-      } catch (e: Throwable) {
-        try {
-          Log.i(TAG, "snapshot 异常：${e.javaClass.simpleName}: ${e.message}")
-        } catch (e2: Throwable) {
-          // ignore
-        }
-        null
-      }
   }
 }

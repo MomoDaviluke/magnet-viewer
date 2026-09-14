@@ -4,8 +4,13 @@
     <!-- 磁力链解析（DHT/tracker）与本地流服务播放 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- 边下边播期间保持唤醒（后续前台服务化时复用） -->
+    <!-- 边下边播期间保持唤醒（前台服务里按「有活跃传输」精确持有/释放） -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 前台服务（dataSync：解析/下载/预览驻留；Android 15+ 有 6h/24h 上限，见 DownloadService.onTimeout） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 通知可见性（Android 13+ 运行时权限） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -24,6 +29,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 下载/预览前台服务：无常驻时自行 stopSelf；通知带「暂停/继续」「停止」动作 -->
+        <service
+            android:name=".service.DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

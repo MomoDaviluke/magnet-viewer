@@ -18,8 +18,19 @@ interface HandleProbe {
   fun statusReading(): StatusReading
 }
 
-/** [HandleProbe.statusReading] 的结果（只含普通类型，便于单测断言）。 */
-data class StatusReading(val peers: Int, val seeds: Int, val downloadRateKbps: Int)
+/**
+ * [HandleProbe.statusReading] 的结果（只含普通类型，便于单测断言）。
+ *
+ * [progress] 是 `TorrentStatus.progress()`（0..1，按「想要的数据」计）：前台服务用它
+ * 判断 convert 档释放后的后台缓存是否已经下完（>= 1 即无任务）。默认 1f = 当作已完成，
+ * 这样旧调用点（只关心 peer/速度）不受影响。
+ */
+data class StatusReading(
+  val peers: Int,
+  val seeds: Int,
+  val downloadRateKbps: Int,
+  val progress: Float = 1f,
+)
 
 /** 句柄读取结果。 */
 sealed interface HandleReadResult {

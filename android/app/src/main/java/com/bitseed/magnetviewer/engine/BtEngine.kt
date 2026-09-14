@@ -1,11 +1,15 @@
 package com.bitseed.magnetviewer.engine
 
 import android.util.Log
+import com.bitseed.magnetviewer.core.PREVIEW_CACHE_CONVERT
+import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
 import com.bitseed.magnetviewer.core.model.ParseResult
 import com.bitseed.magnetviewer.core.model.PieceMap
 import com.bitseed.magnetviewer.core.model.TorrentFile
 import com.bitseed.magnetviewer.core.model.safeRelPath
+import com.bitseed.magnetviewer.core.normalizePreviewCacheMode
 import com.bitseed.magnetviewer.core.states.BOOTSTRAP_TRACKERS
+import com.bitseed.magnetviewer.core.states.METADATA_TIMEOUT_SECONDS
 import com.bitseed.magnetviewer.stream.PieceSource
 import java.io.File
 import org.libtorrent4j.AddTorrentParams
@@ -48,21 +52,24 @@ data class PollStatus(
  *
  * **句柄纪律（本文件的核心不变量）**：
  * 1. 任何 `TorrentHandle.xxx()` 之前先 `isValid()`——`status()` 等 swig 调用对失效句柄
- *    会原生 SIGSEGV，`try/catch` 接不住（见 [HandleAccess]）。
+ *    会原生 SIGSEGV，`try/catch` 接不住（见 [HandleAccess]）。句柄类的调用统一走
+ *    [TorrentHandleOps]（它在每次调用前再守一道）。
  * 2. **绝不缓存告警里拿到的句柄**：`TorrentAlert.handle()` 返回的是 `swigCMemOwn=false`
  *    的**非持有视图**（指针指向告警对象内部的 `torrent_handle` 成员）；告警一旦被释放
  *    （GC/delete），这个句柄就是悬垂指针，下次 `status()` 直接崩。
  *    正确做法：在告警回调内读信息，然后按 info_hash 从会话**重新取一个自有副本**
  *    （`SessionManager.find` → `find_torrent`，swig 侧 `new torrent_handle(ptr, true)`）。
+ * 3. 引擎把「我在干什么」发布到 [EngineHub]（前台服务据此驻留/更新通知/持唤醒锁），
+ *    并实现 [EngineControl] 接收服务侧的通知动作（暂停/继续/停止/超时）。
  */
-class BtEngine(private val listener: Listener) {
+class BtEngine(private val listener: Listener) : EngineControl {
 
   /** 引擎 → 宿主（ViewModel）的事件回调；回调可能来自 libtorrent 告警线程。 */
   interface Listener {
     /** 元数据就绪：清单已解析、句柄已暂停（不下载本体）。 */
     fun onMetadataReady(infoHash: String, result: ParseResult)
 
-    /** 元数据阶段失败（含 add 失败 / DHT 失败）。 */
+    /** 元数据阶段失败（含 add 失败 / DHT 失败 / 超时）。 */
     fun onMetadataError(message: String)
 
     /** 一般性状态文本（中文，UI 直接显示）。 */
@@ -78,6 +85,24 @@ class BtEngine(private val listener: Listener) {
   @Volatile private var currentInfoHash: String = ""
   @Volatile private var saveDir: File? = null
   @Volatile private var previewFile: TorrentFile? = null
+
+  // ---- 热更新配置（applyProxy / applyRateLimit / applyMetadataTimeout / setPreviewCacheMode）----
+  @Volatile private var lastProxy: ProxyConfig? = null
+  @Volatile private var lastRateLimitKbps: Int = 0
+  @Volatile private var metadataTimeoutSeconds: Int = METADATA_TIMEOUT_SECONDS
+
+  /** 预览缓存模式：`convert`（默认，桌面 config 默认值）/ `hold`；只由 setPreviewCacheMode 改。 */
+  @Volatile private var cacheMode: String = PREVIEW_CACHE_CONVERT
+
+  // ---- 元数据阶段（解析）状态：超时判定用 ----
+  @Volatile private var metaFetching = false
+  @Volatile private var metaFetchStartMs = 0L
+  @Volatile private var metaTimeoutFired = false
+
+  init {
+    // 前台服务通过 EngineHub 找到本引擎（进程级控制面，见 EngineActivity.kt）
+    EngineHub.attach(this)
+  }
 
   /** 统一日志（tag = MagnetViewer）：下一次出问题能靠 `logcat | grep MagnetViewer` 定位。 */
   private fun log(message: String) {
@@ -123,6 +148,7 @@ class BtEngine(private val listener: Listener) {
   fun ensureStarted(): Boolean {
     if (started && isRunning()) {
       log("会话已在运行，复用（监听 $LISTEN_INTERFACES）")
+      reapplyHotSettings()
       return true
     }
     if (started && !isRunning()) {
@@ -150,6 +176,7 @@ class BtEngine(private val listener: Listener) {
       started = true
       log("会话启动完成（监听 $LISTEN_INTERFACES，isRunning=" + isRunning() + "）")
       listener.onStatus("DHT 会话已启动（监听 $LISTEN_INTERFACES）")
+      reapplyHotSettings()
       true
     } catch (e: Throwable) {
       log("会话启动失败（" + (e.message ?: e.javaClass.simpleName) + "）：回退随机端口重试")
@@ -168,12 +195,23 @@ class BtEngine(private val listener: Listener) {
         started = true
         log("会话启动完成（随机端口回退，isRunning=" + isRunning() + "）")
         listener.onStatus("DHT 会话已启动（随机端口回退）")
+        reapplyHotSettings()
         true
       } catch (e2: Throwable) {
         log("会话启动失败（回退也失败）：" + (e2.message ?: e2.javaClass.simpleName))
         listener.onMetadataError("DHT 会话启动失败：" + (e2.message ?: e2.javaClass.simpleName))
         false
       }
+    }
+  }
+
+  /** 会话（重）启动后，把之前热更新过的代理/限速重新下发一次（否则重建会话即丢配置）。 */
+  private fun reapplyHotSettings() {
+    try {
+      if (lastRateLimitKbps > 0) applyRateLimitNow(lastRateLimitKbps)
+      lastProxy?.let { applyProxyNow(it) }
+    } catch (e: Throwable) {
+      log("重放热更新设置异常：" + (e.message ?: e.javaClass.simpleName))
     }
   }
 
@@ -210,6 +248,12 @@ class BtEngine(private val listener: Listener) {
       currentHandle = null
       currentResult = null
       previewFile = null
+      metaFetching = false
+      // 控权面交还：只有仍归属本实例时才摘除（避免把重建后的新引擎摘掉）
+      if (EngineHub.control === this) {
+        EngineHub.attach(null)
+        EngineHub.reset()
+      }
       log("会话已关闭（句柄引用已清空）")
     }
   }
@@ -269,6 +313,10 @@ class BtEngine(private val listener: Listener) {
       currentInfoHash = ih
       saveDir = dir
       previewFile = null
+      // 超时判定起表：解析阶段从这一刻开始计时（applyMetadataTimeout 的落点）
+      metaFetching = true
+      metaTimeoutFired = false
+      metaFetchStartMs = System.currentTimeMillis()
       // 重复解析同一磁力链：libtorrent 返回既有句柄，可能不会再发 metadata_received
       val already = try {
         if (h.isValid()) h.torrentFile() else null
@@ -277,9 +325,11 @@ class BtEngine(private val listener: Listener) {
         null
       }
       if (already != null) onMetadataReceived(h) else listener.onStatus("正在通过 DHT 获取元数据…")
+      publishActivity()
       dir
     } catch (e: Throwable) {
       log("加种异常：" + (e.message ?: e.javaClass.simpleName))
+      metaFetching = false
       listener.onMetadataError("加入 DHT 会话失败：" + (e.message ?: e.javaClass.simpleName))
       null
     }
@@ -347,13 +397,17 @@ class BtEngine(private val listener: Listener) {
         val err = (a as? MetadataFailedAlert)?.getError()
         val msg = "元数据获取失败：" + (err?.getMessage() ?: "未知原因")
         log(msg)
+        metaFetching = false
         listener.onMetadataError(msg)
+        publishActivity()
       }
       AlertType.ADD_TORRENT -> {
         val err = (a as? AddTorrentAlert)?.error()
         if (err != null && err.isError) {
           log("加种告警失败：" + err.getMessage())
+          metaFetching = false
           listener.onMetadataError("加入会话失败：" + err.getMessage())
+          publishActivity()
         } else {
           log("加种告警：成功")
         }
@@ -387,6 +441,7 @@ class BtEngine(private val listener: Listener) {
     }
     if (!valid) {
       log("元数据到位但告警句柄无效：放弃本次处理")
+      metaFetching = false
       listener.onMetadataError("元数据处理失败：告警句柄无效")
       return
     }
@@ -398,6 +453,7 @@ class BtEngine(private val listener: Listener) {
     }
     if (ti == null) {
       log("元数据处理失败：torrent_file 为空")
+      metaFetching = false
       listener.onMetadataError("元数据处理失败：torrent_file 为空")
       return
     }
@@ -417,6 +473,7 @@ class BtEngine(private val listener: Listener) {
         resultFromTorrentInfo(ti, ih)
       } catch (e: Throwable) {
         log("元数据处理异常：" + (e.message ?: e.javaClass.simpleName))
+        metaFetching = false
         listener.onMetadataError("元数据处理失败：" + (e.message ?: e.javaClass.simpleName))
         return
       }
@@ -425,6 +482,7 @@ class BtEngine(private val listener: Listener) {
     val h = reacquireHandle(listOf(currentInfoHash, ih))
     if (h == null || !h.isValid()) {
       log("元数据已就绪但自有句柄获取失败：不写入 currentHandle，报错给 UI")
+      metaFetching = false
       listener.onMetadataError("元数据已到位，但会话句柄获取失败（种子可能已被移除）")
       return
     }
@@ -441,12 +499,14 @@ class BtEngine(private val listener: Listener) {
     currentHandle = h
     currentResult = result
     currentInfoHash = ih
+    metaFetching = false
     if (saveDir == null) log("警告：落盘目录未知（saveDir=null），预览流可能不可用")
     log("元数据就绪：清单 " + result.files.size + " 个（非 pad " + result.viewFiles.size + " 个），总大小 " + result.totalSize + " 字节")
     result.viewFiles.take(MAX_LOGGED_FILES).forEach { f ->
       log("清单条目：index=${f.index} name=${f.name} size=${f.size} 分块 ${f.startPiece}..${f.endPiece}")
     }
     listener.onMetadataReady(ih, result)
+    publishActivity()
   }
 
   /**
@@ -505,8 +565,9 @@ class BtEngine(private val listener: Listener) {
       return false
     }
     return try {
-      scheduler.begin(h, file)
+      scheduler.begin(TorrentHandleOps(h), file)
       previewFile = file
+      publishActivity()
       true
     } catch (e: Throwable) {
       log("预览启动失败：" + (e.message ?: e.javaClass.simpleName))
@@ -515,9 +576,81 @@ class BtEngine(private val listener: Listener) {
     }
   }
 
+  /**
+   * 暂停预览（**hold 档语义**）：清 deadline + 文件优先级全 0 + 撤 AUTO_MANAGED + pause。
+   *
+   * 逐条对齐桌面 `core/scheduler.py:stop(release_only=False)` 的句柄动作；
+   * 与桌面全量 stop 的唯一区别是**保留句柄/文件与进度查询**——暂停后缓冲读数应当
+   * 冻结（而不是掉回 0：数据其实一点没少），[resumePreview] 才能原地继续。
+   *
+   * @return false = 当前没有预览任务
+   */
+  fun pausePreview(): Boolean {
+    if (!scheduler.active) {
+      log("暂停预览：当前没有预览任务")
+      return false
+    }
+    scheduler.pause()
+    listener.onStatus("预览已暂停（缓冲不再增长；「继续」可恢复）")
+    publishActivity()
+    return true
+  }
+
+  /**
+   * 继续预览：把 [pausePreview]（或 convert 档的释放）撤掉——重放优先级/auto_managed/resume
+   * 并重建「尾部窗口 + 顺序窗口」。句柄失效时先按 info_hash 从会话重取自有副本。
+   *
+   * @return true = 已重新拉起（下载继续推进）
+   */
+  fun resumePreview(): Boolean {
+    val f = previewFile
+    if (f == null) {
+      log("继续预览：没有可恢复的预览任务")
+      return false
+    }
+    var h = currentHandle
+    if (h == null || !isHandleUsable(h)) {
+      log("继续预览：句柄不可用，尝试按 info_hash 重取自有副本")
+      h = reacquireHandle(listOf(currentInfoHash))
+      if (h == null) {
+        listener.onMetadataError(HANDLE_INVALID_TEXT)
+        return false
+      }
+      currentHandle = h
+    }
+    val ok =
+      try {
+        scheduler.resume(TorrentHandleOps(h))
+      } catch (e: Throwable) {
+        log("继续预览失败：" + (e.message ?: e.javaClass.simpleName))
+        false
+      }
+    listener.onStatus(if (ok) "预览已恢复" else "继续预览失败：调度器不可用")
+    publishActivity()
+    return ok
+  }
+
+  /**
+   * 停止预览。**语义由 [previewCacheMode] 决定**（逐条对齐桌面
+   * `core/scheduler.py:stop(release_only=…)`）：
+   *
+   * - `hold`：等同 [pausePreview] —— 冻结（清 deadline + 优先级全 0 + 撤 auto_managed + pause）；
+   * - `convert`（默认）：只清 deadline + 还原锚点，**不 pause、不清优先级、不撤 auto_managed** ——
+   *   `begin()` 置下的 file-priority 继续生效（引擎本就在全文件落盘），是否转正由调用方决定。
+   */
   fun stopPreview() {
-    scheduler.stop()
-    previewFile = null
+    if (cacheMode == PREVIEW_CACHE_HOLD) {
+      log("停止预览（hold 档）：冻结暂停")
+      pausePreview()
+      return
+    }
+    log("停止预览（convert 档）：只清 deadline / 还原锚点，不 pause、不清优先级")
+    try {
+      scheduler.stop(releaseOnly = true)
+    } catch (e: Throwable) {
+      log("停止预览异常：" + (e.message ?: e.javaClass.simpleName))
+    }
+    publishActivity()
   }
 
   fun previewTick() {
@@ -532,8 +665,243 @@ class BtEngine(private val listener: Listener) {
 
   fun previewFileSize(): Long = previewFile?.size ?: 0L
 
+  /**
+   * 跳转（字节偏移，文件内相对）。
+   *
+   * 真正的动作在 [PreviewScheduler.seekToByte]：**必须先 `clearPieceDeadlines()`
+   * 再重建窗口**——残留的旧位置 ASAP 预约会继续以最高优先级抢带宽，把已缓存区域
+   * 拖卡（桌面 `scheduler.seek_to_byte` 的原注释）。暂停/释放状态下忽略跳转。
+   */
   fun previewSeek(byteOffset: Long) {
-    if (scheduler.active) scheduler.seekToByte(byteOffset)
+    if (!scheduler.active) {
+      log("跳转忽略：当前没有预览任务")
+      return
+    }
+    scheduler.seekToByte(byteOffset)
+    publishActivity()
+  }
+
+  // ---------------------------------------------------------------- 热更新（代理 / 限速 / 超时 / 缓存模式）
+
+  /**
+   * 热更新代理（无需重建会话）。映射走 [proxySettingsFor]（桌面 `core/config.py:lt_proxy_settings`
+   * 的移植）：未启用代理或主机为空 → `proxy_type=none`，**且** peer/tracker 两条连接开关
+   * **一起**回落 false（只重置 proxy_type 会让 tracker 继续走旧代理——历史缺陷）。
+   */
+  fun applyProxy(cfg: ProxyConfig) {
+    lastProxy = cfg
+    val s = proxySettingsFor(cfg)
+    log(
+      "应用代理：type=${s.proxyType} host=${s.hostname ?: "-"} port=${s.port ?: "-"} " +
+        "peer=${s.peerConnections} tracker=${s.trackerConnections} 会话运行中=${isRunning()}"
+    )
+    if (!isRunning()) {
+      listener.onStatus("代理设置已记录，将在会话启动时生效")
+      return
+    }
+    applyProxyNow(cfg)
+  }
+
+  private fun applyProxyNow(cfg: ProxyConfig) {
+    try {
+      val sp = SettingsPack()
+      applyProxySettings(sp, proxySettingsFor(cfg))
+      manager.applySettings(sp)
+      val s = proxySettingsFor(cfg)
+      val text =
+        if (s.proxyType == LtProxyType.NONE) "直连（已回退代理开关）"
+        else "${s.hostname}:${s.port}（peer=${s.peerConnections}）"
+      listener.onStatus("代理已更新：$text")
+    } catch (e: Throwable) {
+      log("应用代理失败：" + (e.message ?: e.javaClass.simpleName))
+      listener.onStatus("代理设置应用失败：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * 热更新下载限速（KB/s，0 = 不限）。libtorrent 单位是**字节/秒**，配置层用 KB/s
+   * （桌面 `session.apply_rate_limit` 同款换算：`kbps * 1024`，负数按 0 处理）。
+   */
+  fun applyRateLimit(kbps: Int) {
+    val v = maxOf(0, kbps)
+    lastRateLimitKbps = v
+    log("应用下载限速：$v KB/s（0 = 不限）会话运行中=${isRunning()}")
+    if (!isRunning()) {
+      listener.onStatus("限速设置已记录，将在会话启动时生效")
+      return
+    }
+    applyRateLimitNow(v)
+  }
+
+  private fun applyRateLimitNow(kbps: Int) {
+    try {
+      val sp = SettingsPack()
+      sp.downloadRateLimit(maxOf(0, kbps) * 1024) // libtorrent 单位：字节/秒
+      manager.applySettings(sp)
+      listener.onStatus(if (kbps <= 0) "已取消下载限速" else "下载限速 $kbps KB/s")
+    } catch (e: Throwable) {
+      log("应用限速失败：" + (e.message ?: e.javaClass.simpleName))
+      listener.onStatus("限速设置应用失败：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * 热更新元数据获取超时（秒）。桌面 `session.start(metadata_timeout=…)` 的 Android 落点：
+   * 超时判定为「资源无做种」。实际计时由本引擎在 [tick] 心跳里做
+   * （<=0 视为无效输入，忽略，与桌面 `if metadata_timeout:` 的真值判断一致）。
+   */
+  fun applyMetadataTimeout(seconds: Int) {
+    if (seconds <= 0) {
+      log("元数据超时设置忽略：$seconds（<=0）")
+      return
+    }
+    metadataTimeoutSeconds = seconds
+    log("元数据超时已设为 ${seconds}s")
+    listener.onStatus("元数据超时：${seconds}s")
+  }
+
+  fun metadataTimeoutSeconds(): Int = metadataTimeoutSeconds
+
+  /**
+   * 热更新预览缓存模式（值域 `convert` / `hold`，见 [normalizePreviewCacheMode]）。
+   * 值域之外**忽略**本次设置并记日志（不改变现状）。
+   */
+  fun setPreviewCacheMode(mode: String) {
+    val v = normalizePreviewCacheMode(mode)
+    if (v == null) {
+      log("预览缓存模式设置忽略：$mode（值域 convert/hold）")
+      return
+    }
+    cacheMode = v
+    log("预览缓存模式已设为 $v")
+    listener.onStatus("预览缓存模式：$v")
+  }
+
+  fun previewCacheMode(): String = cacheMode
+
+  // ---------------------------------------------------------------- 活动态（前台服务用）
+
+  /** 一次受守卫的 status 读取（句柄不可用/会话停止 → null）。 */
+  private fun statusReadingOrNull(): StatusReading? {
+    val h = currentHandle ?: return null
+    if (!isRunning() || !isHandleUsable(h)) return null
+    return when (val r = readHandleStatus(TorrentHandleProbe(h))) {
+      is HandleReadResult.Ok -> r.reading
+      else -> null
+    }
+  }
+
+  /** 当前阶段（[EngineActivity] 的 phase，见 EngineActivity.kt 的取值语义）。 */
+  private fun currentPhase(): String {
+    val s = scheduler
+    return when {
+      metaFetching -> PHASE_META
+      s.active && s.released -> {
+        // convert 档释放：文件按优先级继续缓存；下完（progress >= 1）即视为无任务
+        val p = statusReadingOrNull()?.progress
+        if (p != null && p < 1f) PHASE_DOWNLOAD else PHASE_IDLE
+      }
+      s.active && s.paused -> PHASE_PAUSED
+      s.active -> PHASE_PREVIEW
+      else -> PHASE_IDLE
+    }
+  }
+
+  /**
+   * 发布活动态（前台服务据此驻留/更新通知/持唤醒锁）。
+   *
+   * [note] 用于把一次性提示带进通知（如「前台服务超时」）。
+   */
+  private fun publishActivity(note: String = "") {
+    try {
+      val phase = currentPhase()
+      val reading = statusReadingOrNull()
+      val result = currentResult
+      val f = previewFile
+      val title =
+        when {
+          f != null -> f.name
+          result != null -> result.name
+          else -> currentInfoHash
+        }
+      val percent =
+        if (phase == PHASE_PREVIEW || phase == PHASE_PAUSED || phase == PHASE_DOWNLOAD) {
+          (scheduler.bufferProgress() * 100.0).toInt().coerceIn(0, 100)
+        } else {
+          0
+        }
+      EngineHub.publish(
+        EngineActivity(
+          phase = phase,
+          title = title,
+          percent = percent,
+          speedKbps = reading?.downloadRateKbps ?: 0,
+          peers = reading?.peers ?: 0,
+          note = note,
+        )
+      )
+    } catch (e: Throwable) {
+      log("活动态发布异常：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  // ---------------------------------------------------------------- EngineControl（前台服务动作）
+
+  /**
+   * 心跳（前台服务每秒调用一次，UI 轮询里也会间接走到）：
+   * 1. 推进预览窗口；2. 元数据超时判定；3. 刷新活动态快照。
+   */
+  override fun tick() {
+    try {
+      if (scheduler.active) scheduler.tick()
+    } catch (e: Throwable) {
+      log("心跳 tick 异常：" + (e.message ?: e.javaClass.simpleName))
+    }
+    checkMetadataTimeout()
+    publishActivity()
+  }
+
+  /** 解析阶段超时判定（[applyMetadataTimeout] 的落点）：超时判定为资源无做种。 */
+  private fun checkMetadataTimeout() {
+    if (!metaFetching || metaTimeoutFired) return
+    val start = metaFetchStartMs
+    if (start <= 0L) return
+    val limit = metadataTimeoutSeconds.toLong() * 1000L
+    if (System.currentTimeMillis() - start < limit) return
+    metaTimeoutFired = true
+    metaFetching = false
+    val msg = "资源无做种（${metadataTimeoutSeconds}s 内未获取到元数据）"
+    log("元数据超时：$msg")
+    listener.onMetadataError(msg)
+  }
+
+  override fun onPauseRequest() {
+    log("前台服务动作：暂停")
+    if (!pausePreview()) listener.onStatus("当前没有可暂停的预览任务")
+  }
+
+  override fun onResumeRequest() {
+    log("前台服务动作：继续")
+    if (!resumePreview()) listener.onStatus("继续失败：没有可恢复的预览任务或句柄已失效")
+  }
+
+  override fun onStopRequest() {
+    log("前台服务动作：停止")
+    stopPreview()
+    listener.onStatus("已停止当前任务（模式：$cacheMode）")
+  }
+
+  /**
+   * 前台服务超时（Android 15+ 对 `dataSync` 有 6h/24h 上限，见 DownloadService.onTimeout）：
+   * **优雅暂停任务**并把原因交给 UI/通知显示；服务随后自行退场。
+   */
+  override fun onTimeoutPause() {
+    log("前台服务超时：优雅暂停任务")
+    val ok = pausePreview()
+    listener.onStatus(
+      if (ok) "前台服务到达系统时限，下载已暂停（可在应用内继续）" else "前台服务到达系统时限，任务已转入暂停"
+    )
+    publishActivity(note = FGS_TIMEOUT_TEXT)
   }
 
   // ---------------------------------------------------------------- 流服务的可用性来源
@@ -588,7 +956,7 @@ class BtEngine(private val listener: Listener) {
 
     override fun statusReading(): StatusReading {
       val st = handle.status()
-      return StatusReading(st.numPeers(), st.numSeeds(), st.downloadRate() / 1024)
+      return StatusReading(st.numPeers(), st.numSeeds(), st.downloadRate() / 1024, st.progress())
     }
   }
 
@@ -635,5 +1003,6 @@ class BtEngine(private val listener: Listener) {
     const val MAX_METADATA_SIZE = 8 * 1024 * 1024
     const val SHA1_HEX_LEN = 40
     const val MAX_LOGGED_FILES = 8
+    const val FGS_TIMEOUT_TEXT = "前台服务已到系统时限，下载已暂停"
   }
 }
