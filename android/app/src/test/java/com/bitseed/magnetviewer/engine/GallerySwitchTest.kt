@@ -74,6 +74,10 @@ class GallerySwitchTest {
       object : PieceAvailability {
         override fun have(piece: Int): Boolean = true
       }
+
+    override fun setDownloadLimit(bytes: Int) {
+      calls += "setDownloadLimit($bytes)"
+    }
   }
 
   /** 图片夹具里的两张图（64KB 分块，索引 0/1）。 */

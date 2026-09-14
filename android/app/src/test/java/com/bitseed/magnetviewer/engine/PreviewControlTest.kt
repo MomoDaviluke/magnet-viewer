@@ -91,6 +91,10 @@ class PreviewControlTest {
         override fun have(piece: Int): Boolean = piece in have
       }
     }
+
+    override fun setDownloadLimit(bytes: Int) {
+      calls += "setDownloadLimit($bytes)"
+    }
   }
 
   private fun file() = TorrentFile(index = 0, path = "fixture/fixture.mp4", size = 80832L, offset = 0L, startPiece = 0, endPiece = 4)

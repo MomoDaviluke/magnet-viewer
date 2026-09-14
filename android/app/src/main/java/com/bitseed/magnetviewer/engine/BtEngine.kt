@@ -112,6 +112,8 @@ data class RestoreReport(
  */
 data class PollStatus(
   val line: String = "",
+  /** 当前 peer 数（开播门控超时时用它区分「源较慢」与「可能无做种」，见 previewGateTimeoutNote）。 */
+  val peers: Int = 0,
   /** 句柄已失效（isValid=false）：必须停止轮询。 */
   val handleInvalid: Boolean = false,
   /** 会话已停止：必须停止轮询。 */
@@ -416,6 +418,8 @@ class BtEngine(private val listener: Listener) : EngineControl {
   private fun reapplyHotSettings() {
     try {
       if (lastRateLimitKbps > 0) applyRateLimitNow(lastRateLimitKbps)
+      // 会话重启/新建号的任务：把当前限速补发一次（I-01）
+      reapplyRateLimitToTasks()
       lastProxy?.let { applyProxyNow(it) }
     } catch (e: Throwable) {
       log("重放热更新设置异常：" + (e.message ?: e.javaClass.simpleName))
@@ -583,6 +587,8 @@ class BtEngine(private val listener: Listener) : EngineControl {
         )
       registerHandleAliases(task, h)
       focusTaskImpl(task.infoHash)
+      // 新任务入表后补发当前限速（设置先于任务存在的情况，I-01）
+      reapplyRateLimitToTasks()
       // 超时判定起表：解析阶段从这一刻开始计时（applyMetadataTimeout 的落点）
       metaFetching = true
       metaTimeoutFired = false
@@ -2171,12 +2177,35 @@ class BtEngine(private val listener: Listener) : EngineControl {
     applyRateLimitNow(v)
   }
 
+  /**
+   * 把**当前限速**补发给注册表里的全部任务（新任务入表 / 会话重启后调用）。
+   *
+   * 逐任务限速存在 **torrent** 上（不是 handle），所以句柄换代（`reacquireHandle`）不受影响；
+   * 但「限速设置时任务还没建号」「会话重启」这两种情况需要补发。
+   */
+  private fun reapplyRateLimitToTasks(): Int {
+    // 快照先于加锁：锁内只取句柄引用，swig 调用一律在锁外（并发三律）
+    val handles = synchronized(taskLock) { taskMap.values.mapNotNull { it.handle } }
+    val applied = applyRateLimitToHandles(lastRateLimitKbps, handles.map { TorrentHandleOps(it) })
+    if (handles.isNotEmpty()) log("限速补发：$applied/${handles.size} 个任务（${lastRateLimitKbps} KB/s）")
+    return applied
+  }
+
   private fun applyRateLimitNow(kbps: Int) {
     try {
       val sp = SettingsPack()
-      sp.downloadRateLimit(maxOf(0, kbps) * 1024) // libtorrent 单位：字节/秒
+      sp.downloadRateLimit(rateLimitBytes(kbps)) // libtorrent 单位：字节/秒
       manager.applySettings(sp)
-      listener.onStatus(if (kbps <= 0) "已取消下载限速" else "下载限速 $kbps KB/s")
+      // **逐任务再下发一次**（I-01）：会话级限速只约束远端 peer，本机/局域网/回环对端
+      // 走 local_download_rate_limit（libtorrent4j 未暴露该常量），逐任务 setDownloadLimit
+      // 是「对已运行的会话立即生效」能触达的那条路。
+      val handles = synchronized(taskLock) { taskMap.values.mapNotNull { it.handle } }
+      val applied = applyRateLimitToHandles(kbps, handles.map { TorrentHandleOps(it) })
+      log("限速已下发：会话级 + 逐任务 $applied/${handles.size} 个句柄（$kbps KB/s）")
+      listener.onStatus(
+        if (kbps <= 0) "已取消下载限速"
+        else "下载限速 $kbps KB/s（已下发到 $applied 个运行中的任务）"
+      )
     } catch (e: Throwable) {
       log("应用限速失败：" + (e.message ?: e.javaClass.simpleName))
       listener.onStatus("限速设置应用失败：" + (e.message ?: e.javaClass.simpleName))
@@ -2435,7 +2464,10 @@ class BtEngine(private val listener: Listener) : EngineControl {
     return when (val r = readHandleStatus(TorrentHandleProbe(h))) {
       HandleReadResult.NoHandle -> PollStatus(line = "无任务")
       is HandleReadResult.Ok ->
-        PollStatus(line = "peer ${r.reading.peers} / seed ${r.reading.seeds} · ${r.reading.downloadRateKbps} KB/s")
+        PollStatus(
+          line = "peer ${r.reading.peers} / seed ${r.reading.seeds} · ${r.reading.downloadRateKbps} KB/s",
+          peers = r.reading.peers,
+        )
       is HandleReadResult.Invalid -> {
         log("轮询：句柄失效（isValid=false）→ 停止轮询并报错")
         currentHandle = null

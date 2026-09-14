@@ -63,6 +63,16 @@ interface PreviewHandleOps {
 
   /** `status(QUERY_PIECES)` 的快照；不可判定返回 null（调用方按不可用处理）。 */
   fun availability(): PieceAvailability?
+
+  /**
+   * `TorrentHandle.setDownloadLimit(bytes)`（**字节/秒**，0 = 不限）：逐任务限速。
+   *
+   * 为什么需要它（I-01 的实测结论）：libtorrent 的**会话级** `download_rate_limit`
+   * 只管远端 peer，本机/局域网/回环对端走 `local_download_rate_limit`（默认 0 = 不限），
+   * 而 libtorrent4j 2.1.0-39 的 `settings_pack.int_types` 里没有这个常量（javap 复核），
+   * 所以「限速对已运行的任务生效」只能靠逐任务这一条路。
+   */
+  fun setDownloadLimit(bytes: Int)
 }
 
 /**
@@ -175,6 +185,8 @@ class TorrentHandleOps(private val handle: TorrentHandle) : PreviewHandleOps {
   override fun clearPieceDeadlines() = guarded("clearPieceDeadlines") { it.clearPieceDeadlines() }
 
   override fun availability(): PieceAvailability? = snapshotOf(handle)
+
+  override fun setDownloadLimit(bytes: Int) = guarded("setDownloadLimit($bytes)") { it.setDownloadLimit(bytes) }
 
   private inline fun guarded(what: String, body: (TorrentHandle) -> Unit) {
     try {
