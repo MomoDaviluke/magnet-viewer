@@ -1,0 +1,83 @@
+# 安卓构建门禁（阶段 7 新增；桌面回归/发布仍在 ci.yml 与 release.yml，本文件不碰它们）
+#
+# 两个 job：
+#   build  —— JDK 21 + 官方 Android SDK → JVM 单测 + debug APK，并上传 APK 工件
+#   parity —— Python 3.13 + 桌面依赖 → 重新生成对拍夹具，与仓库内 parity.json 逐字节比对
+#             （Kotlin 侧与桌面 core/ 的语义漂移 = 红）
+#
+# 本机（Windows）按 android/ENV.md 用本地 gradle.bat 构建；CI 是 Linux，
+# ./gradlew 才是正路（wrapper 9.1.0 已入库）。
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 注：CI 不装 NDK —— AGP 找不到 llvm-strip 时只告警（.so 原样打包，只影响体积），
+      # 不会让构建红。想让 CI 产物也剥符号，把 "ndk;29.0.14206865" 加进
+      # android-actions/setup-android 的 packages 即可（约 800MB，看值不值）。
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run JVM unit tests + build debug APK
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload debug APK
+        if: always()
+        # 与 ci.yml 既有约定一致：工件上传失败只警告，不拖红回归/构建结论
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+
+  parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install desktop dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Parity fixtures match core/ (--check)
+        run: python android/tools/gen_parity_fixtures.py --check

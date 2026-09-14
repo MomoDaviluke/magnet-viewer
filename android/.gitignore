@@ -13,3 +13,9 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# --- 发布签名材料：一律不入库（阶段 7）---
+# 开发用 keystore 与真实口令只留在本机；示例见 app/keystore.properties.example
+*.jks
+*.keystore
+keystore.properties

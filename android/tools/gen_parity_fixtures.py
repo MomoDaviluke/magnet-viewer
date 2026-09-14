@@ -35,6 +35,7 @@ import argparse
 import dataclasses
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -392,9 +393,12 @@ def first_difference(gen: dict, disk_text: str) -> list:
         return [f"夹具文件不是合法 JSON：{exc}"]
     if not isinstance(disk, dict):
         return ["夹具文件顶层不是 JSON 对象"]
-    for key in ("generated_by", "source_sha"):
-        if disk.get(key) != gen.get(key):
-            return [f"顶层字段 {key} 不一致：期望 {gen.get(key)!r} / 实际 {disk.get(key)!r}"]
+    if disk.get("generated_by") != gen.get("generated_by"):
+        return [f"顶层字段 generated_by 不一致：期望 {gen.get('generated_by')!r} / 实际 {disk.get('generated_by')!r}"]
+    # 注意：source_sha **不参与判定**。它绑定的是生成夹具时的提交，只要 HEAD 前进（或 CI 浅克隆
+    # 拿不到同一个 HEAD）就会不同——但那不代表"行为漂移"。真正要比的是下面的 cases：
+    # 桌面 core/ 的行为一改，用例的 expect 就会变，那时才该红。
+    # 溯源信息在 --check 通过时单独打印（见 main），方便对照夹具与提交。
     gen_cases, disk_cases = gen["cases"], disk.get("cases")
     if not isinstance(disk_cases, dict):
         return ["顶层字段 cases 不是 JSON 对象"]
@@ -455,8 +459,14 @@ def main(argv=None) -> int:
         print(f"夹具文件不存在：{FIXTURE_PATH}（先跑一次生成模式）")
         return 1
     disk_text = FIXTURE_PATH.read_bytes().decode("utf-8")
-    if disk_text == text:
-        print("PARITY OK")
+    # source_sha 只是溯源信息（绑定生成时的提交），不参与判定：把它归一化后再做逐字节比较，
+    # 其余内容仍然要求逐字节一致（夹具是脚本生成的，格式差异本身也是漂移信号）。
+    sha_re = re.compile(r'"source_sha": "[0-9a-f]{40}"')
+    norm_disk = sha_re.sub('"source_sha": "<ignored>"', disk_text)
+    norm_gen = sha_re.sub('"source_sha": "<ignored>"', text)
+    if norm_disk == norm_gen:
+        disk_sha = (json.loads(disk_text).get("source_sha") or "?")[:12]
+        print(f"PARITY OK（source_sha={disk_sha}… 仅作溯源，不参与判定）")
         return 0
     print("PARITY MISMATCH")
     diffs = first_difference(payload, disk_text)
