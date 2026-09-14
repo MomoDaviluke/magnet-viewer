@@ -40,7 +40,7 @@ class EmptySourceDirCleanupTest {
     val r = cleanupEmptySourceDir(d)
     assertFalse("非空目录绝不删", r.removed)
     assertTrue("目录与文件都要在", d.exists() && f.exists())
-    assertTrue("note 要说明为何保留：${r.note}", r.note.contains("非空"))
+    assertTrue("note 要说明为何保留：${r.note}", r.note.contains("仍有 1 个文件"))
   }
 
   @Test
@@ -61,14 +61,36 @@ class EmptySourceDirCleanupTest {
   // ------------------------------------------------------------ 注入替身（删除失败的真实形态）
 
   @Test
+  fun onlyEmptySubdirs_isRemoved() {
+    // libtorrent 搬运后的真实形态：源目录里只剩空的子目录壳（.preview/<ih>/payload_big/）
+    val d = tmpDir("emptyshell")
+    val sub = File(d, "payload_big").also { it.mkdirs() }
+    assertTrue("前提：子目录壳是空的", sub.listFiles()?.isEmpty() == true)
+    val r = cleanupEmptySourceDir(d)
+    assertTrue("一个文件都没有（只剩空壳）→ 该删：${r.note}", r.removed)
+    assertFalse("递归删掉整个壳目录", d.exists())
+  }
+
+  @Test
+  fun fileInsideSubdir_isKept() {
+    val d = tmpDir("subfile")
+    val sub = File(d, "payload_big").also { it.mkdirs() }
+    File(sub, "big.mp4").writeBytes(ByteArray(32))
+    val r = cleanupEmptySourceDir(d)
+    assertFalse("子目录里还有文件 → 绝不能删（数据安全）", r.removed)
+    assertTrue(d.exists())
+    assertTrue("note 要说明为何保留：${r.note}", r.note.contains("仍有 1 个文件"))
+  }
+
+  @Test
   fun deleteFailure_isReported_notSwallowed() {
     val fake = File(System.getProperty("java.io.tmpdir") ?: ".", "mv-empty-src-fake-${System.nanoTime()}")
     val r =
       cleanupEmptySourceDir(
         fake,
-        listChildren = { emptyArray() },
-        dirExists = { true },
-        deleteDir = { false }, // 删除失败（被占用等）
+        countFiles = { 0L }, // 看起来是空的
+        dirExists = { true }, // 但删不掉
+        deleteDir = { false },
       )
     assertFalse("删除失败不许上报成功", r.removed)
     assertTrue("失败要如实写进 note：${r.note}", r.note.contains("失败"))
@@ -76,12 +98,12 @@ class EmptySourceDirCleanupTest {
 
   @Test
   fun unreadableDirectory_isKeptConservatively() {
-    // listFiles() 返回 null = 读不到内容：读不到就不能认定「空」，保守不删
+    // 读不到目录内容：不能认定「空」，保守不删
     val fake = File(System.getProperty("java.io.tmpdir") ?: ".", "mv-empty-src-unreadable-${System.nanoTime()}")
     val r =
       cleanupEmptySourceDir(
         fake,
-        listChildren = { null },
+        countFiles = { null },
         dirExists = { true },
         deleteDir = { true },
       )

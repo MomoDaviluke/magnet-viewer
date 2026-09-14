@@ -129,22 +129,56 @@ data class EmptyDirCleanup(
 )
 
 /**
+ * 递归数一个目录里的**文件**个数（目录壳不计；读不到返回 null）。
+ *
+ * 为什么按「文件数」而不是「entry 数」判空：libtorrent 搬运（`moveStorage`）把数据搬走后，
+ * 源目录里通常**只剩空的子目录壳**（实测：`.preview/<ih>/payload_big/` 空壳，`du -k` = 8），
+ * 按 entry 判空会永远判不了空 → 残留目录继续参与配额统计与「当前占用」（H-02 的原现象）。
+ */
+fun countFilesRecursively(dir: File): Long? {
+  var n = 0L
+  val stack = ArrayDeque<File>()
+  stack.addLast(dir)
+  while (stack.isNotEmpty()) {
+    val d = stack.removeLast()
+    val children =
+      try {
+        d.listFiles()
+      } catch (_: Throwable) {
+        return null
+      }
+        ?: return null
+    for (c in children) {
+      val isDir =
+        try {
+          c.isDirectory
+        } catch (_: Throwable) {
+          return null
+        }
+      if (isDir) stack.addLast(c) else n++
+    }
+  }
+  return n
+}
+
+/**
  * 转正（`storage_moved` 回执）之后清理**已空**的源目录（`.preview/<ih>`）。
  *
  * 规则（H-02）：
- * - 目录**已空** → 删掉它（它还会参与配额统计与「当前占用」，留着只是噪声）；
- * - 目录**非空** → **绝不删**（可能在搬、也可能是用户放进来的东西；宁可留残留）；
- * - 读不到目录内容（`listFiles()` 返回 null）→ 按「非空」保守处理；
+ * - 目录里**一个文件都没有**（含「只剩空子目录壳」的常见形态）→ 递归删掉它
+ *   （它还会参与配额统计与「当前占用」，留着只是噪声）；
+ * - 目录里有**任何文件** → **绝不删**（可能在搬、也可能是用户放进来的东西；宁可留残留）；
+ * - 读不到目录内容 → 按「非空」保守处理；
  * - 目录本来就不在 → 幂等成功（不算删除动作）；
  * - 删除失败 → [EmptyDirCleanup.removed] 保持 false 且 note 写明失败，**不假装成功**。
  *
- * 文件系统接触面（[listChildren] / [deleteDir] / [dirExists]）可注入：生产调用不传参数，
+ * 文件系统接触面（[countFiles] / [deleteDir] / [dirExists]）可注入：生产调用不传参数，
  * 单测可整套换成替身（删除失败/读不到这类真实形态不必真造）。
  */
 fun cleanupEmptySourceDir(
   dir: File?,
-  listChildren: (File) -> Array<File>? = { it.listFiles() },
-  deleteDir: (File) -> Boolean = { it.delete() },
+  countFiles: (File) -> Long? = ::countFilesRecursively,
+  deleteDir: (File) -> Boolean = { it.deleteRecursively() },
   dirExists: (File) -> Boolean = { it.exists() },
 ): EmptyDirCleanup {
   if (dir == null) return EmptyDirCleanup(note = "无源目录记录：跳过空目录清理")
@@ -156,17 +190,17 @@ fun cleanupEmptySourceDir(
       false
     }
   if (!exists) return EmptyDirCleanup(path = path, note = "源目录不存在（幂等）：$path")
-  val children =
+  val files =
     try {
-      listChildren(dir)
+      countFiles(dir)
     } catch (_: Throwable) {
       null
     }
-  if (children == null) {
+  if (files == null) {
     return EmptyDirCleanup(path = path, note = "源目录内容读不到（保守保留）：$path")
   }
-  if (children.isNotEmpty()) {
-    return EmptyDirCleanup(path = path, note = "源目录非空（保留，不删）：$path（${children.size} 项）")
+  if (files > 0L) {
+    return EmptyDirCleanup(path = path, note = "源目录仍有 $files 个文件（保留，不删）：$path")
   }
   val ok =
     try {
