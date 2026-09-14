@@ -130,6 +130,8 @@ fun scanPreviewDirs(previewRoot: File): List<PreviewDirEntry> {
 
 /** 一次配额执行的结果（全部是普通类型，UI/日志直接用）。 */
 data class QuotaResult(
+  /** **清理前** `.preview` 总占用（字节）——摘要里的「占用」用这个值，才是名副其实的占用。 */
+  val beforeBytes: Long = 0L,
   /** 清理后 `.preview` 总占用（字节）。 */
   val totalBytes: Long = 0L,
   /** 本次实际释放（字节）——**删除失败的不计入**。 */
@@ -140,9 +142,16 @@ data class QuotaResult(
   /** 保护名单取用失败（本轮保守不删）等说明。 */
   val notes: List<String> = emptyList(),
 ) {
-  /** 一句话总结（写日志/上 UI 都用它）。 */
+  /**
+   * 一句话总结（写日志/上 UI 都用它）。
+   *
+   * **口径（QA 实测踩过）**：这里曾经只打印清理后的 `totalBytes`，于是出现
+   * `预览缓存占用 0 MB，本次释放 30 MB` 这种自相矛盾的日志（占用与释放互相打架）。
+   * 现在「占用」= 清理**前**的实际占用，随后给出清理后的值与释放量——三个数字自洽。
+   */
   fun summary(): String =
-    "预览缓存占用 ${totalBytes / 1024 / 1024} MB，本次释放 ${freedBytes / 1024 / 1024} MB" +
+    "预览缓存占用 ${beforeBytes / 1024 / 1024} MB（清理前）→ ${totalBytes / 1024 / 1024} MB（清理后），" +
+      "本次释放 ${freedBytes / 1024 / 1024} MB" +
       "（删除 ${deleted.size} 个 / 保护 ${kept.size} 个 / 失败 ${failed.size} 个）"
 }
 
@@ -192,6 +201,18 @@ fun enforcePreviewLimit(
   deleteDir: (File) -> Boolean = { it.deleteRecursively() },
   scanDirs: (File) -> List<PreviewDirEntry> = ::scanPreviewDirs,
   dirExists: (File) -> Boolean = { it.exists() },
+  /**
+   * **启动恢复未完成**（B-01 兜底）：为真且保护名单为空且 `.preview` 下有目录时，
+   * 本轮**保守跳过删除**并在 notes 里写明原因。
+   *
+   * 存在意义：启动时「设置流先于任务恢复竞发」——那一刻 `activeTaskDirs()` 还是空集，
+   * 光看名单分不出「真的没有活跃任务」与「恢复还没跑完」。调用方用
+   * `MagnetViewModel` 的 restoreDone 标志喂进来（顺序层已挡一道，这里是兜底）。
+   *
+   * **不改变既有语义**：默认 false；keep 真为空且**不在恢复中**时照常按 LRU 删除
+   * （桌面 `_norm_keep` 的真值语义：空集 = 没有活跃任务，是正常态）。
+   */
+  pendingRestore: Boolean = false,
 ): QuotaResult {
   val notes = ArrayList<String>(4)
   fun note(msg: String) {
@@ -209,16 +230,21 @@ fun enforcePreviewLimit(
   if (keep == null) {
     // 名单故障：一个都不删（保守），但仍然如实报告占用
     note("保护名单取用失败：本轮跳过配额删除（保守）")
-    return QuotaResult(totalBytes = total, notes = notes)
+    return QuotaResult(beforeBytes = total, totalBytes = total, notes = notes)
+  }
+  if (pendingRestore && keep.isEmpty() && items.isNotEmpty()) {
+    // 启动恢复未完成：名单为空**不能**当成「没有活跃任务」，否则会删掉活跃任务的数据
+    note("启动恢复未完成（保护名单尚为空）：本轮跳过配额删除（保守），.preview 下有 ${items.size} 个目录")
+    return QuotaResult(beforeBytes = total, totalBytes = total, notes = notes)
   }
   if (limitMb <= 0) {
     note("缓存上限 <= 0（不限）：只统计不删除，当前占用 ${total / 1024 / 1024} MB")
-    return QuotaResult(totalBytes = total, notes = notes)
+    return QuotaResult(beforeBytes = total, totalBytes = total, notes = notes)
   }
   val limit = limitMb.toLong() * 1024L * 1024L
   if (total <= limit) {
     note("预览缓存占用 ${total / 1024 / 1024} MB <= 上限 ${limitMb} MB：无需清理")
-    return QuotaResult(totalBytes = total, notes = notes)
+    return QuotaResult(beforeBytes = total, totalBytes = total, notes = notes)
   }
   note("预览缓存超限：占用 ${total / 1024 / 1024} MB > 上限 ${limitMb} MB，按 LRU 清理")
 
@@ -267,6 +293,7 @@ fun enforcePreviewLimit(
     note("预览缓存超限，按 LRU 清理：${item.path}（释放 ${item.sizeBytes} 字节）")
   }
   return QuotaResult(
+    beforeBytes = total,
     totalBytes = total - freed,
     freedBytes = freed,
     deleted = deleted,
@@ -285,6 +312,9 @@ fun enforcePreviewLimit(
  *
  * 文件系统接触面与 [enforcePreviewLimit] 同款（[scanDirs] / [deleteDir] / [dirExists]，
  * 默认全是真实实现）——生产调用不用传，测试可整套换成内存替身。
+ *
+ * [pendingRestore] 与 [enforcePreviewLimit] 同义（启动恢复未完成 + 名单为空 → 保守跳过），
+ * 理由一样：那条窗口里「名单为空」分不清「真没任务」与「还没恢复完」。
  */
 fun purgePreviewDirs(
   previewRoot: File,
@@ -294,6 +324,7 @@ fun purgePreviewDirs(
   deleteDir: (File) -> Boolean = { it.deleteRecursively() },
   scanDirs: (File) -> List<PreviewDirEntry> = ::scanPreviewDirs,
   dirExists: (File) -> Boolean = { it.exists() },
+  pendingRestore: Boolean = false,
 ): QuotaResult {
   val notes = ArrayList<String>(4)
   fun note(msg: String) {
@@ -309,7 +340,11 @@ fun purgePreviewDirs(
   val keepSnap = if (keepProvider != null) callKeep(keepProvider) else normalizeKeep(keepDirs)
   if (keepSnap == null) {
     note("保护名单取用失败：跳过清理（保守）")
-    return QuotaResult(totalBytes = total, notes = notes)
+    return QuotaResult(beforeBytes = total, totalBytes = total, notes = notes)
+  }
+  if (pendingRestore && keepSnap.isEmpty() && items.isNotEmpty()) {
+    note("启动恢复未完成（保护名单尚为空）：跳过清理（保守），.preview 下有 ${items.size} 个目录")
+    return QuotaResult(beforeBytes = total, totalBytes = total, notes = notes)
   }
   var keep: Set<String> = keepSnap
   var freed = 0L
@@ -353,6 +388,7 @@ fun purgePreviewDirs(
     note("立即清理：删除 ${item.path}（释放 ${item.sizeBytes} 字节）")
   }
   return QuotaResult(
+    beforeBytes = total,
     totalBytes = total - freed,
     freedBytes = freed,
     deleted = deleted,

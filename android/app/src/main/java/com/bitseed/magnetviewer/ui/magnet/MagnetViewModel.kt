@@ -269,6 +269,16 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   /** 缓存根 `<filesDir>/magnet/cache`（首次 IO 时惰性解析）。 */
   @Volatile private var cacheRoot: File? = null
 
+  /**
+   * **启动恢复是否已完成**（B-01 的顺序守卫，本任务的核心修复之一）。
+   *
+   * false = 还没读完磁盘清单 / 还没把任务重新加回引擎。这段时间里
+   * `engine.activeTaskDirs()` 必然是空集，而「名单为空」与「恢复还没跑完」从名单上
+   * 分不出来 —— 所以恢复完成前**任何自动触发的配额都不执行删除**（见 [enforceCacheLimit]）。
+   * 恢复失败（引擎侧起不来）时**故意留在 false**：宁可不清理，也不删活跃数据。
+   */
+  @Volatile private var restoreDone = false
+
   /** 当前展示的任务 info_hash（清单展示/落盘都以它为准）。 */
   @Volatile private var currentInfoHash: String = ""
 
@@ -490,6 +500,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     viewModelScope.launch {
       val root = cacheRootOrNull()
       if (root == null) {
+        // 缓存根都不可用：磁盘上没有任务也没有可由配额管理的目录 → 恢复视为「已完成」
+        restoreDone = true
         _state.update { it.copy(restoreNote = "启动恢复跳过：缓存根不可用") }
         return@launch
       }
@@ -498,6 +510,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       val present = withContext(Dispatchers.IO) { ResumeStore.presentKeys(root, loaded.keys) }
       log("启动：读 .tasks.json → ${loaded.size} 个任务（${root.path}）；fastresume 命中 ${present.size}/${loaded.size}")
       if (loaded.isEmpty()) {
+        restoreDone = true // 磁盘上没有任务：此刻「保护名单为空」是真值（没有要保护的东西）
         _state.update { it.copy(persistedTaskCount = 0, restoreNote = "启动：磁盘上没有任务清单（首次启动）") }
         return@launch
       }
@@ -519,9 +532,13 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
             }
         }
       if (report == null) {
-        _state.update { it.copy(restoreNote = it.restoreNote + " · 引擎恢复未完成（详见日志）") }
+        // 引擎侧没恢复起来：**故意不置 restoreDone** —— 名单不可信，这一会话里任何
+        // 自动配额都不删东西（宁可留着占空间，也不删活跃数据）
+        restoreDone = false
+        _state.update { it.copy(restoreNote = it.restoreNote + " · 引擎恢复未完成（已跳过配额删除，详见日志）") }
         return@launch
       }
+      restoreDone = true
       log("启动恢复结果：" + report.summary())
       // 用真实状态校正内存清单（失败任务带错误文本）
       var next = tasks
@@ -564,7 +581,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
         log("启动恢复后任务列表同步异常（已忽略）：" + (e.message ?: e.javaClass.simpleName))
       }
       refreshCacheUsage(root)
-      enforceCacheLimit("启动恢复")
+      // 启动恢复尾巴的配额：此刻注册表刚建好、保护名单是权威的 → 允许真正执行删除
+      enforceCacheLimit("启动恢复", fromRestore = true)
     }
   }
 
@@ -962,8 +980,20 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
    *
    * 口径说明（照搬桌面注释）：配额判定走**目录实际字节**；界面「已下载」走
    * `handle.fileProgress()` 求和——两者不可互换。
+   *
+   * **[fromRestore] / [restoreDone]（B-01 的根因防线）**：启动时「设置流」会先于
+   * 「任务恢复」发射，那一刻 `engine.activeTaskDirs()` 还是空集，光看名单会把
+   * 「恢复还没跑完」误判成「没有活跃任务」→ 把活跃任务的 `.preview/<ih>` 整目录删光
+   * （QA-2026-09-14 的 Blocker B-01，实测丢掉 30.1 MB）。所以：
+   * 恢复完成前，**任何自动触发**（设置变更/解析后/…）都只记日志、不执行删除；
+   * 恢复尾巴那次调用传 [fromRestore] = true，此时注册表刚建好、名单是权威的。
    */
-  private fun enforceCacheLimit(reason: String) {
+  private fun enforceCacheLimit(reason: String, fromRestore: Boolean = false) {
+    if (!fromRestore && !restoreDone) {
+      log("启动恢复未完成，跳过配额删除（$reason）")
+      _state.update { it.copy(cacheNote = "启动恢复未完成，跳过配额删除（$reason）") }
+      return
+    }
     viewModelScope.launch {
       val root = cacheRootOrNull() ?: return@launch
       val limit = _state.value.settings.cacheLimitMb
@@ -975,6 +1005,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
               limit,
               keepProvider = { engine.activeTaskDirs() },
               warn = { w -> log("配额：$w") },
+              // 兜底（防御第二层）：恢复未完成且名单为空 → 配额内部也保守跳过删除
+              pendingRestore = !restoreDone,
             )
           }.getOrElse { e ->
             log("配额执行异常（已忽略）：" + (e.message ?: e.javaClass.simpleName))
@@ -1006,6 +1038,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
               File(root, PREVIEW_SUBDIR),
               keepProvider = { engine.activeTaskDirs() },
               warn = { w -> log("清理缓存：$w") },
+              // 同一条兜底：恢复未完成时「立即清理」也不删（宁可少清一次，不可删错）
+              pendingRestore = !restoreDone,
             )
           }.getOrElse { e ->
             log("清理缓存异常：" + (e.message ?: e.javaClass.simpleName))
