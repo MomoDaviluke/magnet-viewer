@@ -10,6 +10,7 @@ import com.bitseed.magnetviewer.core.model.humanSize
 import com.bitseed.magnetviewer.core.states.STATE_DELETED
 import com.bitseed.magnetviewer.core.states.STATE_DOWNLOADING
 import com.bitseed.magnetviewer.core.states.STATE_FAILED
+import com.bitseed.magnetviewer.core.states.STATE_META_FETCH
 import com.bitseed.magnetviewer.core.states.STATE_PAUSED
 import com.bitseed.magnetviewer.data.AppLog
 import com.bitseed.magnetviewer.data.AppSettings
@@ -33,6 +34,7 @@ import com.bitseed.magnetviewer.data.upsertTask
 import com.bitseed.magnetviewer.engine.BtEngine
 import com.bitseed.magnetviewer.engine.ImageDownloadState
 import com.bitseed.magnetviewer.engine.RestoreReport
+import com.bitseed.magnetviewer.engine.StallWatch
 import com.bitseed.magnetviewer.engine.PARSE_ONLY_NO_SELECTION_NOTE
 import com.bitseed.magnetviewer.engine.TaskSnapshot
 import com.bitseed.magnetviewer.engine.deriveImageState
@@ -155,6 +157,13 @@ data class MagnetUiState(
   /** 展开看文件清单的任务 info_hash（空 = 都收起）。 */
   val expandedTask: String = "",
   /**
+   * **下载停滞提示**（C-01 的人话出口）：下载中/元数据中且连续 20 秒零字节增长、peer=0 时
+   * 设成「已 N 秒无数据增长（peer 0），源可能已掉线，正在重试」；字节恢复增长自动置回 null。
+   *
+   * 屏幕侧按 `!= null` 显示一行提示即可（不需要自己计时）。
+   */
+  val stallNote: String? = null,
+  /**
    * **仅解析任务的提示**（J-01 的人话出口）：点「继续」时若该任务没有选中任何要下载的
    * 文件，就把它设成 [PARSE_ONLY_NO_SELECTION_NOTE]（屏幕侧按 `!= null` 显示一行提示）；
    * 正常任务/恢复正常时置回 null。行内的常驻提示见 `TaskRow.note`。
@@ -276,6 +285,9 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   private var server: StreamServer? = null
   private var currentFiles: List<TorrentFile> = emptyList()
   private var watchdog: Job? = null
+
+  /** 下载停滞看门狗（C-01）：每秒喂一次「已下载字节 / peer 数」，产出 `stallNote`。 */
+  private val stallWatch = StallWatch()
   private var pollJob: Job? = null
   private var settingsJob: Job? = null
 
@@ -769,7 +781,13 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     }
     val expanded = _state.value.expandedTask
     val rows = snaps.filter { isPersistableKey(it.infoHash) }.map { rowOf(it, expanded, next[it.infoHash]) }
-    _state.update { it.copy(taskRows = rows, persistedTaskCount = tasks.size) }
+    // C-01：停滞看门狗喂数（焦点任务；无焦点任务时复位）
+    val focusSnap = snaps.firstOrNull { it.infoHash == currentInfoHash }
+    val downloading = focusSnap != null && (focusSnap.state == STATE_DOWNLOADING || focusSnap.state == STATE_META_FETCH)
+    val stallNote =
+      if (focusSnap == null) stallWatch.sample(active = false, downloadedBytes = 0L, peers = 0)
+      else stallWatch.sample(downloading, focusSnap.downloadedBytes, focusSnap.peers)
+    _state.update { it.copy(taskRows = rows, persistedTaskCount = tasks.size, stallNote = stallNote) }
   }
 
   /** 能否作为持久化键（40/64 位 hex；临时键不落盘）。 */
