@@ -77,6 +77,63 @@ cd /c/Users/Administrator/Desktop/magnet-viewer
 
 灭屏测试的验收口径：**灭屏 60 秒内下载字节仍在增长**（两次采样对比）+ `adb shell dumpsys activity services com.bitseed.magnetviewer | grep -i foreground` 里 FGS 存活。
 
+## 图片夹具（画廊 / 按需下载测试）
+
+第 3 套夹具，**与其他两套互不影响**（独立目录、独立种子、独立磁力链、独立端口）：
+
+| 文件 | 内容 |
+|---|---|
+| `payload_img/photo_big.png` | 1920×1080 噪点 PNG（**3.8 MB**，64KB 分块 ≈ 61 块）——用来观察画廊里的**下载进度**逐格上涨 |
+| `payload_img/photo_mid.jpg` | 1280×720 JPEG（≈383 KB）——翻页用，几秒下完 |
+| `payload_img/photo_small.jpg` | 320×240 JPEG（≈8 KB）——秒开，验证「已下载直接出图」 |
+| `fixture_img.torrent` | 64KB 分块，68 块，3 个真实文件 + 3 个 pad |
+| `magnet_img.txt` | 图片夹具磁力链（**infohash 以文件内容为准**，重建会变） |
+
+为什么必须有一张 2MB 以上的图：小图一片分块就下完了，画廊的「未下载 → 占位 + 进度」这段
+状态根本来不及看见；大图才观察得到进度文本与「下载完成自动显示」的切换。
+
+**端口固定为 16920**（与另两套的 16881 分开）→ 三套夹具可以同时做种，不用来回杀进程。
+
+```bash
+cd /c/Users/Administrator/Desktop/magnet-viewer
+
+# 生成图片夹具（并刷新 fixture_img.torrent / magnet_img.txt）
+./.venv/Scripts/python android/tools/testrig/mkfixture.py
+
+# 做种（端口 16920；磁盘紧的话去掉 --limit-kbps）
+./.venv/Scripts/python android/tools/testrig/seed.py \
+    --torrent fixture_img.torrent --payload payload_img --port 16920 --limit-kbps 300
+
+# 模拟器侧端口可达（应输出 nc exit=0）
+"$ANDROID_HOME/platform-tools/adb.exe" shell 'nc -w 4 10.0.2.2 16920 </dev/null; echo nc exit=$?'
+
+# App 里粘贴 magnet_img.txt 的内容 → 解析 → 文件清单里点图片行（「图片 · 画廊」）→ 画廊
+```
+
+**当前图片夹具事实（2026-09-14 重建后，以 `magnet_img.txt` 为准）**
+
+- infohash(v1)：`16f1cc4744edcb71296d782103bd620848e7b868`
+- 磁力链：`magnet:?xt=urn:btih:16f1cc4744edcb71296d782103bd620848e7b868&dn=payload_img&x.pe=10.0.2.2:16920`
+- 种子：总 4,456,448 字节 / 68 块 / 块长 65536
+
+### 观察「下载进度」的小技巧
+
+本机回环传输很快（3.8MB 几秒就完），进度文本一闪而过。想稳定看到「下载中 xx%」：
+
+1. 做种端加 `--limit-kbps 300`（或更小）；
+2. 更可靠的是**在 App 设置页把「下载限速」调到 64 KB/s**（保存即生效，作用于 App 会话）——
+   3.8MB 的大图会以 ~60s 匀速下完，画廊里能稳定截到「下载中 75%」这类中间态；
+   看完记得把限速改回 0。
+
+### 已知限制（与另两套相同）
+
+- 做种端 ↔ 模拟器偶发「连上即掉线」：元数据可能几十秒才到，甚至超时。重试法见下文
+  「已知限制与坑」§1；**关键补充**：超时或失败后**重新粘贴磁力链不会重新加种**
+  （App 会复用任务列表里的那条，peer 提示已被消费掉），必须先「移除(保留数据/删数据)」
+  或 `pm clear` 再粘贴，否则会一直在等一个永远不会连上的 peer。
+- `adb shell input text` 打长磁力链会**偶发吞掉末尾字符**（实测丢过 `20`，变成
+  `x.pe=10.0.2.2:169`）→ 打完必须回读输入框内容比对，不一致就清空重打。
+
 ## 已知限制与坑（我实测踩过的，别重复浪费时间）
 
 1. **做种端 ↔ 模拟器的传输会偶发"连上即掉线"**：能拿到元数据（约 10KB 上传），但载荷传输停在十几 KB、做种端显示 `peers=0 rate=0`。表现随机，重试可恢复。

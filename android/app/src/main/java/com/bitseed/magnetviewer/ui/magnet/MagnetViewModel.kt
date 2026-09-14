@@ -31,10 +31,19 @@ import com.bitseed.magnetviewer.data.saveTasksQuietly
 import com.bitseed.magnetviewer.data.taskFromResult
 import com.bitseed.magnetviewer.data.upsertTask
 import com.bitseed.magnetviewer.engine.BtEngine
+import com.bitseed.magnetviewer.engine.ImageDownloadState
 import com.bitseed.magnetviewer.engine.RestoreReport
 import com.bitseed.magnetviewer.engine.TaskSnapshot
+import com.bitseed.magnetviewer.engine.deriveImageState
 import com.bitseed.magnetviewer.service.DownloadService
 import com.bitseed.magnetviewer.stream.StreamServer
+import com.bitseed.magnetviewer.ui.gallery.GalleryItem
+import com.bitseed.magnetviewer.ui.gallery.GalleryUiState
+import com.bitseed.magnetviewer.ui.gallery.applyZoom
+import com.bitseed.magnetviewer.ui.gallery.clampIndex
+import com.bitseed.magnetviewer.ui.gallery.galleryEntries
+import com.bitseed.magnetviewer.ui.gallery.stepIndex
+import com.bitseed.magnetviewer.ui.gallery.zoomPercent
 import java.io.File
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -58,6 +67,8 @@ data class MagnetFileItem(
   val path: String,
   val sizeText: String,
   val isVideo: Boolean,
+  /** 是否图片（图片行走「画廊」路径；见 [MagnetUiState.gallery]）。 */
+  val isImage: Boolean = false,
 )
 
 /**
@@ -134,6 +145,8 @@ data class MagnetUiState(
   val cacheUsageText: String = "",
   /** 最近一次缓存清理的结果文案。 */
   val cacheNote: String = "",
+  /** 图片画廊（打开时整屏替换主界面；见 [GalleryUiState]）。 */
+  val gallery: GalleryUiState = GalleryUiState(),
 )
 
 /**
@@ -174,7 +187,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
                 persistNote = st.persistNote,
                 files =
                   result.viewFiles.map { f ->
-                    MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo)
+                    MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo, f.isImage)
                   },
               )
             }
@@ -528,7 +541,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
             errorText = null,
             torrentName = engResult.name,
             totalSizeText = humanSize(engResult.totalSize),
-            files = engResult.viewFiles.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) },
+            files = engResult.viewFiles.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo, f.isImage) },
           )
         }
       }
@@ -575,7 +588,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
         infoHash = record.infoHash,
         totalSizeText = humanSize(record.totalSize),
         taskState = record.state,
-        files = viewFiles.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) },
+        files = viewFiles.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo, f.isImage) },
       )
     }
     log(
@@ -628,7 +641,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
         infoHash = ih,
         totalSizeText = humanSize(res?.totalSize ?: tasks[ih]?.totalSize ?: 0L),
         files =
-          currentFiles.filter { !it.isPad }.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) },
+          currentFiles.filter { !it.isPad }.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo, f.isImage) },
         taskState = tasks[ih]?.state ?: "",
       )
     }
@@ -744,7 +757,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     val files =
       if (expanded == s.infoHash) {
         val from = engine.taskResult(s.infoHash)?.viewFiles ?: record?.viewFiles ?: emptyList()
-        from.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) }
+        from.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo, f.isImage) }
       } else {
         emptyList()
       }
@@ -782,7 +795,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
           torrentName = res?.name ?: tasks[infoHash]?.name ?: infoHash,
           infoHash = infoHash,
           totalSizeText = humanSize(res?.totalSize ?: tasks[infoHash]?.totalSize ?: 0L),
-          files = currentFiles.filter { !it.isPad }.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo) },
+          files = currentFiles.filter { !it.isPad }.map { f -> MagnetFileItem(f.index, f.name, f.path, humanSize(f.size), f.isVideo, f.isImage) },
           taskState = tasks[infoHash]?.state ?: st.taskState,
           previewIndex = -1,
           previewTitle = "",
@@ -1328,6 +1341,229 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     }
   }
 
+  // ---------------------------------------------------------------- 图片画廊（对齐桌面 ui/gallery.py）
+
+  /**
+   * 点文件清单里的**图片行** → 打开画廊（缩略图网格）。
+   *
+   * 与视频预览的关系：引擎里只有**一个**预览目标（一个 scheduler），所以进画廊前若视频正在
+   * 预览，先把它停掉（convert 档语义：只清预约/还原锚点，不 pause 不清优先级——正是桌面
+   * 「预览目标切换」的同一套动作）。**打开网格本身不下载任何图片**（桌面 `set_result` 的
+   * 注释：解析完成不应自动下载首图）；只有「点开某张图 / 翻页到某张图」才切目标。
+   */
+  fun openGallery(fileIndex: Int) {
+    val entries = galleryEntries(currentFiles)
+    if (entries.isEmpty()) {
+      _state.update { it.copy(errorText = "该资源中没有图片文件（画廊支持 jpg/jpeg/png/gif/webp/bmp/svg）") }
+      return
+    }
+    if (_state.value.previewIndex >= 0) {
+      stopPreviewInternal(wantStopService = false)
+      _state.update {
+        it.copy(
+          previewIndex = -1,
+          previewTitle = "",
+          previewNote = "",
+          streamUrl = "",
+          bufferText = "",
+          bufferPercent = 0f,
+          previewPaused = false,
+        )
+      }
+      log("进画廊：已停掉视频预览（同一时刻只允许一个预览目标）")
+    }
+    val pos = entries.indexOfFirst { it.index == fileIndex }
+    _state.update {
+      it.copy(
+        gallery =
+          it.gallery.copy(
+            open = true,
+            position = -1,
+            scale = 1f,
+            items = emptyList(),
+            note = "共 ${entries.size} 张图片 · 点缩略图看大图；翻到未下载的图片会自动把预览目标切到它（按需下载）",
+          ),
+        errorText = null,
+      )
+    }
+    log("打开画廊：清单内图片 ${entries.size} 张（点开的那张在画廊第 ${pos + 1} 位）")
+    refreshGallerySoon()
+  }
+
+  /** 网格里点某张缩略图 → 进大图；**该图未下载则把预览目标切到它**（自动按需下载）。 */
+  fun galleryOpenImage(position: Int) {
+    val items = _state.value.gallery.items
+    if (items.isEmpty()) return
+    val p = clampIndex(position, items.size)
+    _state.update { it.copy(gallery = it.gallery.copy(position = p, scale = 1f)) }
+    ensureGalleryTarget(items[p])
+  }
+
+  /** 上一张 / 下一张（首末张不越界）；翻到未下载的图同样会自动切预览目标。 */
+  fun galleryStep(delta: Int) {
+    val st = _state.value.gallery
+    if (st.items.isEmpty()) return
+    val from = if (st.position < 0) 0 else st.position
+    val p = stepIndex(from, delta, st.items.size)
+    if (p == st.position) {
+      _state.update {
+        it.copy(gallery = it.gallery.copy(note = "已在${if (delta < 0) "第一张" else "最后一张"}（翻页不越界）"))
+      }
+      return
+    }
+    _state.update { it.copy(gallery = it.gallery.copy(position = p, scale = 1f)) }
+    ensureGalleryTarget(st.items[p])
+  }
+
+  /** 缩放步进（比例夹取在 `ui/gallery` 的纯函数里，桌面同款 1.15 / 0.87 与 0.2~5.0）。 */
+  fun galleryZoom(zoomIn: Boolean) {
+    _state.update {
+      val s = applyZoom(it.gallery.scale, zoomIn)
+      it.copy(gallery = it.gallery.copy(scale = s, note = "缩放 ${zoomPercent(s)}%（范围 20% ~ 500%）"))
+    }
+  }
+
+  fun galleryResetZoom() {
+    _state.update { it.copy(gallery = it.gallery.copy(scale = 1f, note = "缩放已重置为 100%")) }
+  }
+
+  fun galleryBackToGrid() {
+    _state.update { it.copy(gallery = it.gallery.copy(position = -1, scale = 1f, note = "已返回缩略图网格")) }
+  }
+
+  fun closeGallery() {
+    _state.update { it.copy(gallery = it.gallery.copy(open = false)) }
+    log("关闭画廊（预览目标保持不变：该文件继续按需缓存）")
+  }
+
+  /**
+   * 把「预览目标」切到画廊里这张图（**A 项的入口在引擎侧**：`switchPreviewTarget` 会先清旧预约
+   * 再重建窗口）。已在本地磁盘的图**不**切目标——桌面 `_show_index` 只在文件不存在时才 emit。
+   */
+  private fun ensureGalleryTarget(item: GalleryItem) {
+    if (item.state == ImageDownloadState.READY) {
+      _state.update {
+        it.copy(
+          gallery = it.gallery.copy(note = "已下载：${item.name}（直接解码本地图片，不重新下载）"),
+          statusText = "画廊：${item.name} 已在本地，直接显示",
+        )
+      }
+      return
+    }
+    viewModelScope.launch {
+      startServiceForTask()
+      val f = currentFiles.firstOrNull { it.index == item.index }
+      if (f == null) {
+        _state.update { it.copy(errorText = "画廊切换预览目标失败：清单里找不到 ${item.name}") }
+        return@launch
+      }
+      val ok = withContext(Dispatchers.IO) { runCatching { engine.switchPreviewTarget(f) }.getOrDefault(false) }
+      if (!ok) {
+        _state.update { it.copy(errorText = "画廊切换预览目标失败：句柄不可用（任务可能已被移除）") }
+        return@launch
+      }
+      log("画廊：预览目标已切到 ${item.name}（index=${item.index}，按需下载该文件）")
+      persistCurrentTask("画廊切换预览目标", STATE_DOWNLOADING)
+      _state.update {
+        it.copy(
+          gallery = it.gallery.copy(note = "预览目标已切到 ${item.name}（按需下载中，完成后自动显示）", targetIndex = item.index),
+          statusText = "画廊按需下载：${item.name}",
+          errorText = null,
+        )
+      }
+      refreshGallery()
+    }
+  }
+
+  private fun refreshGallerySoon() {
+    viewModelScope.launch {
+      try {
+        refreshGallery()
+      } catch (e: CancellationException) {
+        throw e
+      } catch (e: Throwable) {
+        log("画廊刷新异常（已忽略）：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
+  }
+
+  /**
+   * 刷新画廊每张图的状态（**下载状态派生的落点**）：引擎给「已下载字节 + 当前预览目标」，
+   * 磁盘给「本地文件是否已完整落盘」，两者一起喂给纯函数 [deriveImageState]。
+   *
+   * 轮询（每秒）与「切目标 / 点缩略图」都会调它——所以大图区在下载完成的那一刻会自动出图。
+   */
+  private suspend fun refreshGallery() {
+    val g = _state.value.gallery
+    if (!g.open) return
+    val entries = galleryEntries(currentFiles)
+    if (entries.isEmpty()) {
+      _state.update { it.copy(gallery = it.gallery.copy(items = emptyList(), targetIndex = -1)) }
+      return
+    }
+    val ih = currentInfoHash
+    val dir =
+      withContext(Dispatchers.IO) {
+        runCatching { engine.taskSaveDir(ih) }.getOrNull()
+          ?: tasks[ih]?.savePath?.takeIf { it.isNotEmpty() }?.let { File(it) }
+      }
+    val readings =
+      withContext(Dispatchers.IO) { runCatching { engine.fileReadings() }.getOrDefault(emptyList()) }
+        .associateBy { it.index }
+    val target = withContext(Dispatchers.IO) { runCatching { engine.previewFileIndex() }.getOrDefault(-1) }
+    val items =
+      withContext(Dispatchers.IO) {
+        entries.map { e ->
+          val got = readings[e.index]?.downloadedBytes ?: 0L
+          val disk = if (dir == null) null else File(dir, e.path.replace('/', File.separatorChar))
+          // **不能用「文件长度 ≥ 声明大小」判「已下载」**：libtorrent 打开文件时按全长**预分配**
+          // （稀疏文件），长度从下载的第一刻就等于全长——用它判会立刻误报 READY（实测踩过：
+          // 大图 0 字节时就被标成「已下载完成」，解码拿到空内容一直失败）。
+          // 判据回到桌面对齐口径：引擎读数达标（file_progress >= size）**且**磁盘上确实有该文件
+          // （桌面 `progress[idx] >= f.size and os.path.isfile(path)`）。
+          val onDisk = disk != null && e.size > 0L && disk.isFile && got >= e.size
+          val state = deriveImageState(got, e.size, onDisk)
+          GalleryItem(
+            index = e.index,
+            name = e.name,
+            path = e.path,
+            size = e.size,
+            sizeText = humanSize(e.size),
+            diskPath = disk?.path ?: "",
+            onDiskComplete = onDisk,
+            downloadedBytes = got,
+            state = state,
+            isTarget = e.index == target,
+          )
+        }
+      }
+    // 当前大图刚下载完成 → 提示「自动显示」（桌面 `_load_thumb` 里对当前行做的那一步）
+    val prev = if (g.position in g.items.indices) g.items[g.position] else null
+    val cur = if (g.position in items.indices) items[g.position] else null
+    val changed =
+      items.size != g.items.size ||
+        items.any { n ->
+          val o = g.items.firstOrNull { it.index == n.index }
+          o == null || o.state != n.state || o.downloadedBytes != n.downloadedBytes || o.diskPath != n.diskPath
+        }
+    if (changed) {
+      log(
+        "画廊刷新：根目录=${dir?.path ?: "-"}（读盘 ${items.count { it.onDiskComplete }}/${items.size} 张已完整）" +
+          items.joinToString("") { " | ${it.name}: ${it.state} ${it.downloadedBytes}/${it.size} disk=${it.diskPath.ifEmpty { "-" }}" }
+      )
+    }
+    val note =
+      if (cur != null && prev != null &&
+        cur.state == ImageDownloadState.READY && prev.state != ImageDownloadState.READY
+      ) {
+        log("画廊：${cur.name} 下载完成 → 大图自动显示")
+        "${cur.name} 已下载完成，大图自动显示"
+      } else {
+        g.note
+      }
+    _state.update { it.copy(gallery = it.gallery.copy(items = items, targetIndex = target, note = note)) }
+  }
+
   // ---------------------------------------------------------------- 跳转（seek 拖动条）
 
   /**
@@ -1383,6 +1619,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
             if (previewing) engine.previewTick()
             // 任务列表（多任务）：每秒从引擎拉一次快照（状态/已下载/优先级/落盘目录）
             syncFromEngine()
+            // 画廊（打开时）：每秒刷一次每张图的下载状态（下载完成 → 大图自动出图）
+            if (_state.value.gallery.open) refreshGallery()
             if (ticks % CACHE_USAGE_EVERY_TICKS == 1) refreshCacheUsage(cacheRootOrNull())
             val status = withContext(Dispatchers.IO) { engine.pollStatus() }
             val percent = withContext(Dispatchers.IO) { engine.bufferProgress() }

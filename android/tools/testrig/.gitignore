@@ -1,8 +1,10 @@
 # 派生数据不入库（用 mkfixture.py 现生成）
 payload/
 payload_big/
+payload_img/
 *.torrent
 magnet.txt
 magnet_big.txt
+magnet_img.txt
 seed.log
 leech*/

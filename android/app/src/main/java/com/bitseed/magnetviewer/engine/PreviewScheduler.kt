@@ -136,6 +136,45 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
   }
 
   /**
+   * **切换预览目标**（画廊翻页 / 点开另一张图时用）：清旧预约 → 重建窗口。
+   *
+   * 为什么要多这一步（桌面 `session.start_preview` 只是转发到 `scheduler.begin`）：换目标时
+   * 旧文件那批 ASAP deadline（尾部索引块 + 顺序窗口）**仍然挂在句柄上**，会按最高优先级
+   * 继续抢带宽，把新目标挤在后面——这正是桌面 `seek_to_byte` 里「必须先
+   * `clear_piece_deadlines()` 再重建窗口」的原注释所描述的现象。目标一旦不同，先把本调度器
+   * 名下所有预约清掉（旧的本地锚点/尾窗一并复位），再交给 [begin] 按新文件重建。
+   *
+   * **同一目标幂等**：与桌面 `main_window._on_gallery_file` 的
+   * `if f is None or f == self._preview_file: return` 同款——同文件重复切是空操作，
+   * 不重复下发优先级、不重建窗口。
+   *
+   * @return true = 目标已切换（或本来就是它）；false = 句柄不可用（什么都没做）
+   */
+  fun switchTarget(h: PreviewHandleOps, target: TorrentFile): Boolean {
+    val cur = file
+    if (cur != null && cur.index == target.index && cur.path == target.path) {
+      logcat("switch: 同一目标（${target.name}），复用现有预约（不重建窗口）")
+      return true
+    }
+    val guarded = usable(h, "switch.clear_old") ?: return false
+    if (cur != null) {
+      safe("switch.clear_old.deadlines") { guarded.clearPieceDeadlines() }
+      logcat("switch: 已清旧目标 ${cur.name} 的全部 deadline（旧预约不再抢带宽）")
+    }
+    // 旧锚点/尾窗先复位（begin 会按新文件重建；不复位则残留旧文件的窗口判定）
+    scheduledTo = -1
+    playFrom = -1
+    headN = 0
+    tailPieces = emptyList()
+    entryPieces = emptySet()
+    paused = false
+    released = false
+    begin(guarded, target)
+    logcat("switch: 预览目标已切到 ${target.name}（窗口已按新文件重建）")
+    return true
+  }
+
+  /**
    * 暂停预览（**hold 档语义**，逐条对齐桌面 `stop(release_only=False)` 的句柄动作）：
    * 清全部 deadline → 文件优先级全 0 → 撤 `AUTO_MANAGED`（否则队列管理会自动 resume）
    * → `pause()`。

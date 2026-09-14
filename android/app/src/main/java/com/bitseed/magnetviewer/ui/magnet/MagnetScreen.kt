@@ -60,6 +60,7 @@ import androidx.media3.ui.PlayerView
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
 import com.bitseed.magnetviewer.theme.LocalPal
 import com.bitseed.magnetviewer.theme.MagnetViewerTheme
+import com.bitseed.magnetviewer.ui.gallery.GalleryScreen
 import com.bitseed.magnetviewer.ui.settings.SettingsScreen
 
 /** 拖动条的可访问名（uiautomator 也能按它拿到坐标）。 */
@@ -104,7 +105,19 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
   }
 
   MagnetViewerTheme(themeMode = state.settings.uiTheme) {
-    if (state.settingsOpen) {
+    if (state.gallery.open) {
+      // 图片画廊：图片文件按需下载 → 缩略图网格 → 点开大图（缩放 / 翻页）
+      GalleryScreen(
+        state = state.gallery,
+        onClose = viewModel::closeGallery,
+        onOpenImage = viewModel::galleryOpenImage,
+        onStep = viewModel::galleryStep,
+        onZoom = viewModel::galleryZoom,
+        onResetZoom = viewModel::galleryResetZoom,
+        onBackToGrid = viewModel::galleryBackToGrid,
+        modifier = modifier,
+      )
+    } else if (state.settingsOpen) {
       SettingsScreen(
         initial = state.settings,
         note = state.settingsNote,
@@ -121,6 +134,7 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
         onInput = viewModel::onInputChange,
         onResolve = viewModel::resolve,
         onPreview = viewModel::preview,
+        onOpenGallery = viewModel::openGallery,
         onPausePreview = viewModel::pausePreview,
         onResumePreview = viewModel::resumePreview,
         onStopPreview = viewModel::stopPreview,
@@ -150,6 +164,7 @@ internal fun MagnetContent(
   onStopPreview: () -> Unit,
   onSeek: (Float) -> Unit,
   onOpenSettings: () -> Unit,
+  onOpenGallery: (Int) -> Unit = {},
   onFocusTask: (String) -> Unit = {},
   onToggleExpand: (String) -> Unit = {},
   onPauseTask: (String) -> Unit = {},
@@ -289,7 +304,8 @@ internal fun MagnetContent(
         item = item,
         selected = item.index == state.previewIndex,
         paused = state.previewPaused,
-        onClick = { onPreview(item.index) },
+        // 视频行 → 边下边播；图片行 → 进画廊（缩略图网格 → 大图）
+        onClick = { if (item.isImage) onOpenGallery(item.index) else onPreview(item.index) },
         onPause = onPausePreview,
         onResume = onResumePreview,
         onStop = onStopPreview,
@@ -443,7 +459,7 @@ private fun TaskRowView(
 }
 
 /**
- * 文件行：视频行可点开预览；**当前预览行**额外挂「暂停 / 继续」与「停止预览」。
+ * 文件行：视频行可点开预览；**图片行**可点进画廊；**当前预览行**额外挂「暂停 / 继续」与「停止预览」。
  * 选中态的文案区分两档缓存模式的停止语义（hold = 冻结；convert = 转正继续）。
  */
 @Composable
@@ -457,13 +473,14 @@ private fun FileRow(
   onStop: () -> Unit,
 ) {
   val pal = LocalPal.current
+  val clickable = item.isVideo || item.isImage
   Row(
     modifier =
       Modifier.fillMaxWidth()
         .clip(RoundedCornerShape(8.dp))
         .background(if (selected) pal.bgSelected else pal.panel)
         .border(1.dp, pal.border, RoundedCornerShape(8.dp))
-        .clickable(enabled = item.isVideo, onClick = onClick)
+        .clickable(enabled = clickable, onClick = onClick)
         .padding(horizontal = 12.dp, vertical = 10.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
@@ -480,6 +497,7 @@ private fun FileRow(
     }
     Spacer(Modifier.width(4.dp))
     when {
+      item.isImage -> Text("图片 · 画廊", fontSize = 13.sp, color = pal.accent, fontWeight = FontWeight.Medium)
       !item.isVideo -> Text("非视频", fontSize = 13.sp, color = pal.textDim)
       !selected -> Text("预览", fontSize = 13.sp, color = pal.accent, fontWeight = FontWeight.Medium)
       else -> {

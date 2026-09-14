@@ -1866,27 +1866,115 @@ class BtEngine(private val listener: Listener) : EngineControl {
     }
     return try {
       scheduler.begin(TorrentHandleOps(h), file)
-      previewFile = file
-      // 预览 = 真的在下载（该文件）：任务转成下载型并记住选中文件（转正/重启续传都靠它）
-      val t = taskOf(currentInfoHash)
-      if (t != null) {
-        synchronized(taskLock) {
-          t.download = true
-          t.selected = listOf(file.path)
-          t.state = STATE_DOWNLOADING
-          t.error = ""
-        }
-        requestResumeDataFor(t, "预览开始")
-      } else {
-        requestResumeData("预览开始")
-      }
+      markPreviewTarget(file)
       listener.onStatus("预览开始：${file.name}（只下这一个文件的分块）")
-      publishActivity()
       true
     } catch (e: Throwable) {
       log("预览启动失败：" + (e.message ?: e.javaClass.simpleName))
       listener.onStatus("预览启动失败：" + (e.message ?: e.javaClass.simpleName))
       false
+    }
+  }
+
+  /**
+   * **切换预览目标**（画廊翻页 / 点开下一张图时用；A 项的入口）。
+   *
+   * 与 [beginPreview] 的区别只有一条：换目标时**先清旧预约再重建窗口**
+   * （[PreviewScheduler.switchTarget]），同目标幂等。图片与视频共用这一条路径——
+   * `beginPreview` 本来就与文件类型无关（调度器只按分块窗口干活），所以图片走
+   * 「单文件优先 + 按需补拉」的现成路径，不需要第二套下载逻辑。
+   *
+   * @return false = 没有可用句柄/切换失败（调用方保留旧目标，不当作已切换）
+   */
+  fun switchPreviewTarget(file: TorrentFile): Boolean {
+    val h = currentHandle ?: return false
+    if (!isHandleUsable(h)) {
+      log("切换预览目标中止：句柄失效")
+      currentHandle = null
+      listener.onMetadataError(HANDLE_INVALID_TEXT)
+      return false
+    }
+    return try {
+      val ok = scheduler.switchTarget(TorrentHandleOps(h), file)
+      if (!ok) {
+        log("切换预览目标失败：调度器拒绝（句柄不可用）")
+        listener.onStatus("切换预览目标失败：句柄不可用")
+        return false
+      }
+      markPreviewTarget(file)
+      listener.onStatus("预览目标已切换：${file.name}（只下这一个文件的分块）")
+      true
+    } catch (e: Throwable) {
+      log("切换预览目标失败：" + (e.message ?: e.javaClass.simpleName))
+      listener.onStatus("切换预览目标失败：" + (e.message ?: e.javaClass.simpleName))
+      false
+    }
+  }
+
+  /**
+   * 预览目标的固定善后：记录当前文件 → 任务转下载型并记住选中文件（转正/重启续传都靠它）
+   * → 请求 fastresume → 发布活动态。[beginPreview] / [switchPreviewTarget] 共用。
+   */
+  private fun markPreviewTarget(file: TorrentFile) {
+    previewFile = file
+    val t = taskOf(currentInfoHash)
+    if (t != null) {
+      synchronized(taskLock) {
+        t.download = true
+        t.selected = listOf(file.path)
+        t.state = STATE_DOWNLOADING
+        t.error = ""
+      }
+      requestResumeDataFor(t, "预览开始")
+    } else {
+      requestResumeData("预览开始")
+    }
+    publishActivity()
+  }
+
+  /** 当前预览目标在清单里的文件下标（无预览任务 → -1）。 */
+  fun previewFileIndex(): Int = previewFile?.index ?: -1
+
+  /**
+   * **当前预览文件的下载读数**（A 项要的「该文件的下载进度」）。
+   *
+   * 口径 = 桌面 `status["file_progress"][f.index]`：只管**这一个文件**已下多少字节；
+   * 无预览任务 / 无句柄 / 会话已停 一律返回 null（UI 据此显示「未开始」而不是 0%）。
+   */
+  fun previewFileReading(): FileDownloadReading? {
+    val f = previewFile ?: return null
+    val h = currentHandle ?: return null
+    if (!isRunning() || !isHandleUsable(h)) return null
+    return try {
+      val fp = h.fileProgress()
+      val got = if (f.index in fp.indices) fp[f.index] else 0L
+      FileDownloadReading(f.index, f.name, f.size, got)
+    } catch (e: Throwable) {
+      log("预览文件读数异常：" + (e.message ?: e.javaClass.simpleName))
+      null
+    }
+  }
+
+  /** **当前预览文件是否下载完成**（A 项要的判定；桌面 `progress[idx] >= f.size`）。 */
+  fun previewFileComplete(): Boolean = previewFileReading()?.complete == true
+
+  /**
+   * 当前任务各文件的下载读数（键 = 文件下标；无句柄/无清单 → 空表）。
+   *
+   * 画廊网格按它给每张图算进度（未下载的显示占位 + 进度），不必为每张图单独问句柄。
+   */
+  fun fileReadings(): List<FileDownloadReading> {
+    val res = currentResult ?: return emptyList()
+    val h = currentHandle ?: return emptyList()
+    if (!isRunning() || !isHandleUsable(h)) return emptyList()
+    return try {
+      val fp = h.fileProgress()
+      res.files.map { f ->
+        FileDownloadReading(f.index, f.name, f.size, if (f.index in fp.indices) fp[f.index] else 0L)
+      }
+    } catch (e: Throwable) {
+      log("文件读数批量读取异常：" + (e.message ?: e.javaClass.simpleName))
+      emptyList()
     }
   }
 
