@@ -1,8 +1,8 @@
 package com.bitseed.magnetviewer.engine
 
-import android.util.Log
 import com.bitseed.magnetviewer.core.model.PieceMap
 import com.bitseed.magnetviewer.core.model.TorrentFile
+import com.bitseed.magnetviewer.data.AppLog
 import org.libtorrent4j.PieceIndexBitfield
 import org.libtorrent4j.Priority
 import org.libtorrent4j.TorrentFlags
@@ -204,10 +204,4 @@ class TorrentHandleOps(private val handle: TorrentHandle) : PreviewHandleOps {
 
 private const val TAG = "MagnetViewer"
 
-private fun logcat(message: String) {
-  try {
-    Log.i(TAG, message)
-  } catch (e: Throwable) {
-    // android.util.Log 在 JVM 单测里未 mock：绝不能因此崩溃
-  }
-}
+private fun logcat(message: String) = AppLog.log(message)

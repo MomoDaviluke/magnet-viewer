@@ -13,10 +13,10 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.bitseed.magnetviewer.MainActivity
 import com.bitseed.magnetviewer.R
+import com.bitseed.magnetviewer.data.AppLog
 import com.bitseed.magnetviewer.engine.EngineActivity
 import com.bitseed.magnetviewer.engine.EngineHub
 import com.bitseed.magnetviewer.engine.PHASE_META
@@ -286,13 +286,8 @@ class DownloadService : Service() {
     }
   }
 
-  private fun log(message: String) {
-    try {
-      Log.i(TAG, message)
-    } catch (e: Throwable) {
-      // ignore
-    }
-  }
+  /** 统一日志出口：走 [AppLog]（设置页「运行日志」的真开关，修 I-02）。 */
+  private fun log(message: String) = AppLog.log(message)
 
   companion object {
     private const val TAG = "MagnetViewer"
@@ -328,11 +323,11 @@ class DownloadService : Service() {
       try {
         val i = Intent(context, DownloadService::class.java).setAction(ACTION_START)
         context.startForegroundService(i)
-        Log.i(TAG, "DownloadService.start：已请求前台服务")
+        AppLog.log("DownloadService.start：已请求前台服务")
       } catch (e: Throwable) {
         // 后台启动前台服务会被系统拒绝（ForegroundServiceStartNotAllowedException）：
         // 不崩溃，只记日志（任务本身仍在应用进程里跑，只是不驻留）
-        Log.w(TAG, "DownloadService.start 失败（可能处于后台）：" + e.message)
+        AppLog.warn("DownloadService.start 失败（可能处于后台）：" + e.message)
       }
     }
 
@@ -342,14 +337,14 @@ class DownloadService : Service() {
      */
     fun stopIfIdle(context: Context) {
       if (EngineHub.activity.busy) {
-        Log.i(TAG, "DownloadService.stopIfIdle：仍有任务，继续驻留")
+        AppLog.log("DownloadService.stopIfIdle：仍有任务，继续驻留")
         return
       }
       try {
         context.stopService(Intent(context, DownloadService::class.java))
-        Log.i(TAG, "DownloadService.stopIfIdle：无任务，已退场")
+        AppLog.log("DownloadService.stopIfIdle：无任务，已退场")
       } catch (e: Throwable) {
-        Log.w(TAG, "DownloadService.stopIfIdle 失败：" + e.message)
+        AppLog.warn("DownloadService.stopIfIdle 失败：" + e.message)
       }
     }
   }

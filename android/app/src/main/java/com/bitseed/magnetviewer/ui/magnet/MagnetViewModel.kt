@@ -1,7 +1,6 @@
 package com.bitseed.magnetviewer.ui.magnet
 
 import android.content.Context
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
@@ -12,6 +11,7 @@ import com.bitseed.magnetviewer.core.states.STATE_DELETED
 import com.bitseed.magnetviewer.core.states.STATE_DOWNLOADING
 import com.bitseed.magnetviewer.core.states.STATE_FAILED
 import com.bitseed.magnetviewer.core.states.STATE_PAUSED
+import com.bitseed.magnetviewer.data.AppLog
 import com.bitseed.magnetviewer.data.AppSettings
 import com.bitseed.magnetviewer.data.MagnetStorage
 import com.bitseed.magnetviewer.data.PREVIEW_SUBDIR
@@ -262,13 +262,11 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       }
     )
 
-  private fun log(message: String) {
-    try {
-      Log.i(TAG, message)
-    } catch (e: Throwable) {
-      // android.util.Log 未 mock 时也不能崩
-    }
-  }
+  /**
+   * 统一日志出口：**走 [AppLog]**（设置页「运行日志」的真开关，修 I-02）。
+   * 开关值在 [applySettings] 里由设置流刷新。
+   */
+  private fun log(message: String) = AppLog.log(message)
 
   // 注意：这里不要引用 engine（engine 的构造回调闭包又引用 _state → 初始化递归，Kotlin 无法推断类型）。
   // MagnetUiState 的 cacheMode 默认值就是引擎默认档（convert）；真实值由设置流/轮询回填。
@@ -1141,6 +1139,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   /** 设置 → 引擎热更新接口（BT 引擎侧已有能力，这里只接线）。 */
   private suspend fun applySettings(s: AppSettings) {
     val v = s.sanitized()
+    // 「运行日志」开关的执行点（设置流每次发射都过这里）
+    AppLog.syncFromSettings(v)
     withContext(Dispatchers.IO) {
       runCatching { engine.applyProxy(v.toProxyConfig()) }
       runCatching { engine.applyRateLimit(v.downloadRateLimit) }

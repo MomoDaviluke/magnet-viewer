@@ -141,8 +141,10 @@ fun isDarkTheme(themeMode: String?, systemDark: Boolean): Boolean =
 /**
  * 一份设置快照。默认值 = 桌面 `core/config.py: DEFAULTS`（本 demo 只取安卓侧真正用到的那几个键）。
  *
- * `cacheLimitMb` / `loggingEnabled` 仅做**持久化与回读**：Android 侧没有对应的执行点
- * （桌面是 LRU 清缓存目录 + core.logutil 开关），不在本次接线范围内——如实记录在报告里。
+ * 执行点（每一项都有接线，见各字段注释）：
+ * - `cacheLimitMb` → `MagnetViewModel.enforceCacheLimit`（逐次设置变更 + 启动恢复后）；
+ * - `loggingEnabled` → `AppLog.syncFromSettings`（**三处日志出口的总开关**，修 I-02）；
+ * - 其余项 → `MagnetViewModel.applySettings`（代理/限速/超时/缓存模式热更新）。
  */
 data class AppSettings(
   val proxyType: String = PROXY_TYPE_NONE,

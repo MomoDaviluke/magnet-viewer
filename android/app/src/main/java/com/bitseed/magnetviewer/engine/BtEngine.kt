@@ -1,6 +1,5 @@
 package com.bitseed.magnetviewer.engine
 
-import android.util.Log
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_CONVERT
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
 import com.bitseed.magnetviewer.core.model.ParseResult
@@ -11,6 +10,7 @@ import com.bitseed.magnetviewer.core.normalizePreviewCacheMode
 import com.bitseed.magnetviewer.core.states.BOOTSTRAP_TRACKERS
 import com.bitseed.magnetviewer.core.states.METADATA_TIMEOUT_SECONDS
 import com.bitseed.magnetviewer.core.states.STATE_COMPLETED
+import com.bitseed.magnetviewer.data.AppLog
 import com.bitseed.magnetviewer.core.states.STATE_DELETED
 import com.bitseed.magnetviewer.core.states.STATE_DOWNLOADING
 import com.bitseed.magnetviewer.core.states.STATE_FAILED
@@ -297,14 +297,12 @@ class BtEngine(private val listener: Listener) : EngineControl {
     EngineHub.attach(this)
   }
 
-  /** 统一日志（tag = MagnetViewer）：下一次出问题能靠 `logcat | grep MagnetViewer` 定位。 */
-  private fun log(message: String) {
-    try {
-      Log.i(TAG, message)
-    } catch (e: Throwable) {
-      // 日志本身绝不能成为崩溃点（例如类被单测加载时 android.util.Log 未 mock）
-    }
-  }
+  /**
+   * 统一日志（tag = MagnetViewer）：下一次出问题能靠 `logcat | grep MagnetViewer` 定位。
+   *
+   * **走 [AppLog]**（设置页「运行日志」的真开关，修 I-02）：关闭后本引擎一行都不产出。
+   */
+  private fun log(message: String) = AppLog.log(message)
 
   private val alertListener =
     object : AlertListener {

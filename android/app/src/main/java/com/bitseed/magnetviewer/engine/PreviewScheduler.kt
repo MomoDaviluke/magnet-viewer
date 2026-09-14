@@ -1,7 +1,7 @@
 package com.bitseed.magnetviewer.engine
 
-import android.util.Log
 import com.bitseed.magnetviewer.core.model.TorrentFile
+import com.bitseed.magnetviewer.data.AppLog
 import com.bitseed.magnetviewer.core.model.contiguousBytes
 import com.bitseed.magnetviewer.core.sched.DEADLINE_STEP_MS
 import com.bitseed.magnetviewer.core.sched.ascendingPlan
@@ -75,13 +75,9 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
     return h
   }
 
-  /** 调度器日志：既回给宿主 UI，也打 logcat（tag=MagnetViewer）。 */
+  /** 调度器日志：既回给宿主 UI，也进 AppLog（同一开关：设置页「运行日志」关掉即静音）。 */
   private fun logcat(message: String) {
-    try {
-      Log.i(TAG, message)
-    } catch (e: Throwable) {
-      // android.util.Log 在 JVM 单测里未 mock：绝不能因此崩溃
-    }
+    AppLog.log(message)
     try {
       log(message)
     } catch (e: Throwable) {
