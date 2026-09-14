@@ -197,6 +197,8 @@ fun planRemoveTask(
 data class RemoveOutcome(
   val resumeDeleted: Boolean = false,
   val dataDeleted: Boolean = false,
+  /** 数据目录**被尝试删除但没删掉**（拒删 / 抛异常 / 假成功）、与 [dataDeleted] 互斥——如实报告用。 */
+  val dataDeleteFailed: Boolean = false,
   val rejected: Boolean = false,
   val note: String = "",
 )
@@ -206,25 +208,49 @@ data class RemoveOutcome(
  *
  * 顺序与桌面一致：先删 fastresume，再删数据目录（仅当 [RemovePlan.deleteData]）。
  * 目录不存在也算成功（幂等：不存在即达成）。
+ *
+ * **如实报告**：「删成功」一律以 [dirExists]**复核**为准，不看删除实现的返回值——
+ * `deleteRecursively()` 会吞掉删除失败（Windows 上文件被占用/防病毒时偶发），
+ * 假成功（返回 true 而目录仍在）与拒删、抛异常一视同仁：不计入 [RemoveOutcome.dataDeleted]，
+ * 改记 [RemoveOutcome.dataDeleteFailed] 并在 note 里写明数据仍在。
+ *
+ * @param deleteDir 目录删除实现（默认 [File.deleteRecursively]）。
+ * @param dirExists 目录存在性判定（默认 [File.exists]）。
+ *
+ * [deleteDir] / [dirExists] 是本函数与文件系统的**全部接触面**（移除只做目录级删除，
+ * 不列举目录内容），两者都带默认真实实现：生产调用（`BtEngine.removeTask` /
+ * `applyDeletion`）一个参数都不用传，测试却能整套换成内存虚拟树——于是「rmtree 偶发失败」
+ * 这种环境噪声不再能让断言随机翻红（见 `TaskOpsTest` 的虚拟树用例）。
  */
-fun applyRemoveTask(plan: RemovePlan, cacheRoot: File?): RemoveOutcome {
+fun applyRemoveTask(
+  plan: RemovePlan,
+  cacheRoot: File?,
+  deleteDir: (File) -> Boolean = { it.deleteRecursively() },
+  dirExists: (File) -> Boolean = { it.exists() },
+): RemoveOutcome {
   if (!plan.valid) return RemoveOutcome(rejected = plan.rejected, note = plan.error)
   val resumeDeleted =
     if (plan.removeResume && cacheRoot != null) ResumeStore.delete(cacheRoot, plan.infoHash) else false
   var dataDeleted = false
+  var dataDeleteFailed = false
   val dir = plan.dataDir
   if (plan.deleteData && dir != null) {
     dataDeleted =
       try {
-        if (!dir.exists()) true else dir.deleteRecursively() && !dir.exists()
+        if (!dirExists(dir)) true else deleteDir(dir) && !dirExists(dir)
       } catch (_: Throwable) {
         false
       }
+    dataDeleteFailed = !dataDeleted
   }
+  val note =
+    if (dataDeleteFailed) "删除数据目录未成功（数据仍在，已如实报告）：${dir?.path}"
+    else plan.note.ifEmpty { if (plan.deleteData) "已删除数据目录" else "数据目录保留" }
   return RemoveOutcome(
     resumeDeleted = resumeDeleted,
     dataDeleted = dataDeleted,
+    dataDeleteFailed = dataDeleteFailed,
     rejected = plan.rejected,
-    note = plan.note.ifEmpty { if (plan.deleteData) "已删除数据目录" else "数据目录保留" },
+    note = note,
   )
 }

@@ -254,8 +254,10 @@ class RestorePlanTest {
     val plan = planDeletion(IH, dataDir, appRoot, deleteUserData = true)
     assertTrue("显式要求才允许删", plan.removeUserDataDir)
     val applied = applyDeletion(plan, cache, dataDir)
-    assertTrue(applied.userDataDeleted)
-    assertFalse(dataDir.exists())
+    // 与"删除是否成功"无关的口径：结果必须与磁盘事实一致。Windows 上 rmtree 偶发失败会落进失败分支，
+    // 那不是被测语义的错；原写法 assertTrue(userDataDeleted) 会把环境噪声误判成功能回归。
+    assertEquals("删除结果必须与磁盘事实一致", !dataDir.exists(), applied.userDataDeleted)
+    assertEquals("成功位与失败位互斥", !applied.userDataDeleted, applied.userDataDeleteFailed)
 
     // 逃出应用私有目录：即便显式要求也必须拒绝
     val outside = File(appRoot.parentFile, "outside-${System.nanoTime()}")

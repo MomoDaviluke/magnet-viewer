@@ -213,6 +213,8 @@ fun planDeletion(
 data class DeletionResult(
   val resumeDeleted: Boolean = false,
   val userDataDeleted: Boolean = false,
+  /** 请求删除但**没删成功**（拒删 / 异常 / 嘴上说成功但目录还在）——与 [userDataDeleted] 互斥、如实上报。 */
+  val userDataDeleteFailed: Boolean = false,
 )
 
 /**
@@ -221,7 +223,13 @@ data class DeletionResult(
  * [userDataDir] 传进来只是为了让调用方拿到实际目录；真删与否完全由
  * `plan.removeUserDataDir` 决定（它是 `deleteUserData && 守卫通过` 的合取）。
  */
-fun applyDeletion(plan: DeletionPlan, cacheDir: File?, userDataDir: File?): DeletionResult {
+fun applyDeletion(
+  plan: DeletionPlan, cacheDir: File?, userDataDir: File?,
+  // 与 TaskOps.applyRemoveTask 同款接缝（默认 = 真实行为，生产调用点零改动）：测试可注入虚拟树，
+  // 从而断言语义而不依赖"真实 rmtree 一定成功"（Windows 上它偶发失败）。
+  deleteDir: (File) -> Boolean = { it.deleteRecursively() },
+  dirExists: (File) -> Boolean = { it.exists() },
+): DeletionResult {
   if (!plan.valid) return DeletionResult()
   val r =
     applyRemoveTask(
@@ -234,6 +242,9 @@ fun applyDeletion(plan: DeletionPlan, cacheDir: File?, userDataDir: File?): Dele
         removeResume = plan.removeResumeFile,
       ),
       cacheDir,
+      deleteDir = deleteDir,
+      dirExists = dirExists,
     )
-  return DeletionResult(resumeDeleted = r.resumeDeleted, userDataDeleted = r.dataDeleted)
+  return DeletionResult(resumeDeleted = r.resumeDeleted, userDataDeleted = r.dataDeleted,
+                        userDataDeleteFailed = r.dataDeleteFailed)
 }
