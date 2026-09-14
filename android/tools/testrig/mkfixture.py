@@ -29,7 +29,7 @@ MAGNET = ROOT / "magnet.txt"
 PAYLOAD_BIG = ROOT / "payload_big"
 TORRENT_BIG = ROOT / "fixture_big.torrent"
 MAGNET_BIG = ROOT / "magnet_big.txt"
-BIG_BYTES = 24 * 1024 * 1024
+BIG_MIN_BYTES = 8 * 1024 * 1024   # 大夹具至少这么大，否则限速下撑不到分钟级
 
 
 def ffmpeg() -> str:
@@ -81,14 +81,20 @@ def main() -> int:
     print(f"\ninfohash (v1): {ih}")
     print(f"磁力链（模拟器里直接粘贴）：\n{magnet}")
 
-    # ---- 大夹具：单独一个 payload 目录/种子/磁力链，避免污染上面的小夹具 ----
+    # ---- 大夹具：单独一个 payload 目录/种子/磁力链 ----
+    # 必须是**视频**：UI 只对视频扩展名开放预览，随机字节 .bin 根本点不开预览，
+    # 灭屏/后台保活测试就走不到"下载中"状态（下一版 UI 接通后会用到）。
     PAYLOAD_BIG.mkdir(parents=True, exist_ok=True)
-    big = PAYLOAD_BIG / "big.bin"
-    if not big.exists() or big.stat().st_size != BIG_BYTES:
-        import os
-        with open(big, "wb") as f:
-            f.write(os.urandom(BIG_BYTES))
-        print(f"\n生成大夹具：{big.name}（{BIG_BYTES} 字节）")
+    big = PAYLOAD_BIG / "big.mp4"
+    if not big.exists() or big.stat().st_size < BIG_MIN_BYTES:
+        cmd = [ffmpeg(), "-y", "-f", "lavfi",
+               # 合成测试图案压缩率极高（90s 720p 才 1MB），加噪点让码率落到 2~4 Mbps，
+               # 这样在 300KB/s 限速下才撑得到分钟级，灭屏测试才有可观测的进度增长。
+               "-i", "testsrc=size=1280x720:rate=30:duration=90,noise=alls=35:allf=t",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+               "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", str(big)]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"生成大夹具：{big.name}（{big.stat().st_size} 字节）")
     fs2 = lt.file_storage()
     lt.add_files(fs2, str(PAYLOAD_BIG))
     t2 = lt.create_torrent(fs2, piece_size=256 * 1024)

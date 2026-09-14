@@ -64,8 +64,8 @@ cd /c/Users/Administrator/Desktop/magnet-viewer
 
 小夹具 88KB 一眨眼就下完，测不出“灭屏后是否还在下载”。所以另配一份大夹具：
 
-- 内容：`payload_big/big.bin`（24 MiB 随机数据，256KB 分块）
-- 磁力链：`magnet_big.txt`（infohash `9003c8f6cb45c7a42c6e17dd8347b68bcc39df78`，同样带 `x.pe=10.0.2.2:16881`）
+- 内容：`payload_big/big.mp4`（**视频**，31MB 量级、256KB 分块、faststart）。必须是视频：UI 只对视频扩展名开放预览，随机字节 `.bin` 点不开预览，灭屏测试就走不到“下载中”。合成测试图案压缩率极高，所以编码时加了噪点把码率抬到 2~4 Mbps。
+- 磁力链：`magnet_big.txt`（infohash 每次重建会变，**以文件内容为准**，同样带 `x.pe=10.0.2.2:16881`）
 - 用做种端**上传限速**把传输拉长到分钟级：
 
 ```bash
