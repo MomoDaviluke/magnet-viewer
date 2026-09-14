@@ -48,6 +48,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.C
@@ -89,6 +92,17 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
     }
   }
 
+  // App 进后台 / Activity 被停止（含关屏、被系统回收前）→ 清单与 fastresume 落盘（尽力而为）
+  val lifecycleOwner = LocalLifecycleOwner.current
+  DisposableEffect(lifecycleOwner) {
+    val observer =
+      LifecycleEventObserver { _, event ->
+        if (event == Lifecycle.Event.ON_STOP) viewModel.onAppStop()
+      }
+    lifecycleOwner.lifecycle.addObserver(observer)
+    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+  }
+
   MagnetViewerTheme(themeMode = state.settings.uiTheme) {
     if (state.settingsOpen) {
       SettingsScreen(
@@ -109,6 +123,7 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
         onStopPreview = viewModel::stopPreview,
         onSeek = viewModel::previewSeek,
         onOpenSettings = viewModel::openSettings,
+        onRemoveTask = viewModel::removeCurrentTask,
         modifier = modifier,
       )
     }
@@ -126,6 +141,7 @@ internal fun MagnetContent(
   onStopPreview: () -> Unit,
   onSeek: (Float) -> Unit,
   onOpenSettings: () -> Unit,
+  onRemoveTask: (Boolean) -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val pal = LocalPal.current
@@ -169,16 +185,52 @@ internal fun MagnetContent(
       Text(it, fontSize = 13.sp, color = pal.danger)
     }
 
+    if (state.restoreNote.isNotEmpty()) {
+      Spacer(Modifier.height(8.dp))
+      Text(state.restoreNote, fontSize = 12.sp, color = pal.textMuted, maxLines = 4, overflow = TextOverflow.Ellipsis)
+    }
+    if (state.persistNote.isNotEmpty()) {
+      Spacer(Modifier.height(4.dp))
+      Text(state.persistNote, fontSize = 12.sp, color = pal.textDim, maxLines = 3, overflow = TextOverflow.Ellipsis)
+    }
+
     if (state.torrentName.isNotEmpty()) {
       Spacer(Modifier.height(12.dp))
       PanelCard {
-        Text(state.torrentName, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = pal.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Text(
+            state.torrentName,
+            modifier = Modifier.weight(1f),
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = pal.text,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+          if (state.taskState.isNotEmpty()) {
+            Text(state.taskState, fontSize = 12.sp, color = pal.textMuted)
+          }
+        }
         Spacer(Modifier.height(4.dp))
         Text(
           "总大小 ${state.totalSizeText} · ${state.files.size} 个文件${if (state.infoHash.isNotEmpty()) " · " + state.infoHash.take(16) + "…" else ""}",
           fontSize = 13.sp,
           color = pal.textMuted,
         )
+        Spacer(Modifier.height(4.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Text(
+            "清单来自磁盘清单文件 .tasks.json（重启/被杀后无需重新解析）",
+            modifier = Modifier.weight(1f),
+            fontSize = 12.sp,
+            color = pal.textDim,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+          TextButton(onClick = { onRemoveTask(false) }) {
+            Text("移除任务（保留数据）", fontSize = 12.sp, color = pal.danger)
+          }
+        }
       }
     }
 
