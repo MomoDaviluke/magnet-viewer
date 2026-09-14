@@ -143,15 +143,21 @@ data class TaskSnapshot(
   val selected: List<String> = emptyList(),
   val hasMetadata: Boolean = false,
   val seed: Boolean = false,
+  /** **选中文件字节**（百分比的分子/分母口径；见 [selectedBytes]）。0 = 没有选中文件。 */
+  val selectedBytes: Long = 0L,
 ) {
-  /** 进度 0..1（总大小未知时按 0；已完成按 1）。 */
+  /**
+   * 进度 0..1 = **已下载 / 选中字节**（不是 / 总大小）。
+   *
+   * 没有选中文件（仅解析任务 / 优先级全 0）时分母不成立 → 0.0，配合 [progressKnown]
+   * 让 UI 不显示百分比 —— 修掉 QA C-02 的「已下载 0 B（100%）」。
+   */
   val progress: Double
-    get() =
-      when {
-        state == STATE_COMPLETED -> 1.0
-        totalSize > 0 -> minOf(1.0, downloadedBytes.toDouble() / totalSize.toDouble())
-        else -> 0.0
-      }
+    get() = progressOf(downloadedBytes, selectedBytes) ?: 0.0
+
+  /** 百分比是否可知（选中字节 > 0）。false 时 UI 应显示「未选择文件」而不是 0%/100%。 */
+  val progressKnown: Boolean
+    get() = selectedBytes > 0L
 }
 
 /**
@@ -1488,14 +1494,18 @@ class BtEngine(private val listener: Listener) : EngineControl {
           log("任务已下载字节读取异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
         }
       }
+      // 百分比的**分母**（选中文件字节；J-01/C-02）：仅解析任务没有任何选中文件 → 0，
+      // 于是 progress 不可知、也不会被判完成（见 isTaskCompleted 的注释）
+      val selBytes = selectedBytes(t.result, t.selected, t.download)
       val state =
-        if (finished && t.state == STATE_DOWNLOADING) STATE_COMPLETED else t.state
+        if (isTaskCompleted(finished, t.download, selBytes) && t.state == STATE_DOWNLOADING) STATE_COMPLETED
+        else t.state
       if (state != t.state && state == STATE_COMPLETED) {
         synchronized(taskLock) {
           t.state = STATE_COMPLETED
           t.error = ""
         }
-        log("任务完成：${t.infoHash.take(12)}…（下载 $downloaded 字节）")
+        log("任务完成：${t.infoHash.take(12)}…（下载 $downloaded 字节 / 选中 $selBytes 字节）")
         listener.onTaskStateChanged(t.infoHash, STATE_COMPLETED)
       }
       out.add(
@@ -1515,6 +1525,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
           selected = t.selected,
           hasMetadata = t.result != null,
           seed = finished,
+          selectedBytes = selBytes,
         )
       )
     }
@@ -1567,28 +1578,33 @@ class BtEngine(private val listener: Listener) : EngineControl {
       return false
     }
     val hasMeta = t.result != null
-    val state = if (hasMeta) STATE_DOWNLOADING else STATE_META_FETCH
+    // **J-01**：仅解析任务（没有选中任何文件、文件优先级全 0）点「继续」不得进入
+    // DOWNLOADING —— 那会让下一拍快照直接把它判成 COMPLETED（libtorrent 对 want 0 的
+    // 种子 isFinished() 恒真），用户看到「已下载 0 B（100%）」。
+    val nextState = if (!hasMeta) STATE_META_FETCH else stateAfterResume(t.download, t.selected)
     synchronized(taskLock) {
       t.error = ""
-      t.state = state
+      t.state = nextState
       t.metaStartedMs = if (hasMeta) 0L else System.currentTimeMillis()
     }
-    if (hasMeta) {
-      if (t.download) activateTask(t) else {
-        // 「只解析」任务点继续 = 重新放开去拉元数据/保持只读（不下载本体）
-        try {
-          h.resume()
-        } catch (e: Throwable) {
-          log("继续只解析任务异常：" + (e.message ?: e.javaClass.simpleName))
-        }
-      }
-    } else {
+    if (!hasMeta) {
       try {
         h.resume()
         h.unsetFlags(TorrentFlags.AUTO_MANAGED)
       } catch (e: Throwable) {
         log("继续任务（等元数据）异常：" + (e.message ?: e.javaClass.simpleName))
       }
+    } else if (t.download) {
+      activateTask(t)
+    } else {
+      // 「只解析」任务点继续 = 重新放开去拉元数据/保持只读（不下载本体）
+      try {
+        h.resume()
+      } catch (e: Throwable) {
+        log("继续只解析任务异常：" + (e.message ?: e.javaClass.simpleName))
+      }
+      log("继续任务：仅解析任务（未选择要下载的文件）→ 保持 ${STATE_PAUSED}，不进入下载态")
+      listener.onStatus(PARSE_ONLY_NO_SELECTION_NOTE)
     }
     if (t.infoHash == currentInfoHash) {
       try {
@@ -1602,7 +1618,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
       }
     }
     requestResumeDataFor(t, "继续任务")
-    listener.onTaskStateChanged(t.infoHash, state)
+    listener.onTaskStateChanged(t.infoHash, nextState)
     publishActivity()
     return true
   }

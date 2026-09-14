@@ -33,8 +33,10 @@ import com.bitseed.magnetviewer.data.upsertTask
 import com.bitseed.magnetviewer.engine.BtEngine
 import com.bitseed.magnetviewer.engine.ImageDownloadState
 import com.bitseed.magnetviewer.engine.RestoreReport
+import com.bitseed.magnetviewer.engine.PARSE_ONLY_NO_SELECTION_NOTE
 import com.bitseed.magnetviewer.engine.TaskSnapshot
 import com.bitseed.magnetviewer.engine.deriveImageState
+import com.bitseed.magnetviewer.engine.stateAfterResume
 import com.bitseed.magnetviewer.service.DownloadService
 import com.bitseed.magnetviewer.stream.StreamServer
 import com.bitseed.magnetviewer.ui.gallery.GalleryItem
@@ -83,7 +85,18 @@ data class TaskRow(
   val state: String,
   val totalSizeText: String,
   val downloadedText: String,
+  /**
+   * 已下载百分比（0..100，口径 = **已下载 / 选中字节**）。
+   *
+   * 选中字节为 0（仅解析任务 / 优先级全 0）时百分比**不可知**：[percentText] 为空字符串
+   * 且本字段为 0 —— 屏幕侧应以 [percentText] 是否为空决定显不显示「（N%）」，
+   * 不要直接拼 `（$progressPercent%）`（那正是 QA C-02 的「已下载 0 B（100%）」）。
+   */
   val progressPercent: Int,
+  /** 百分比文本（`"42%"`）；**空 = 不显示百分比**（没有选中文件，分母不成立）。 */
+  val percentText: String,
+  /** 行内一句人话提示（如仅解析任务的「未选择要下载的文件」）；空 = 无提示。 */
+  val note: String,
   val priority: Int,
   /** 是否下载型任务（转正后 true）。 */
   val isDownload: Boolean,
@@ -141,6 +154,12 @@ data class MagnetUiState(
   val taskRows: List<TaskRow> = emptyList(),
   /** 展开看文件清单的任务 info_hash（空 = 都收起）。 */
   val expandedTask: String = "",
+  /**
+   * **仅解析任务的提示**（J-01 的人话出口）：点「继续」时若该任务没有选中任何要下载的
+   * 文件，就把它设成 [PARSE_ONLY_NO_SELECTION_NOTE]（屏幕侧按 `!= null` 显示一行提示）；
+   * 正常任务/恢复正常时置回 null。行内的常驻提示见 `TaskRow.note`。
+   */
+  val parseOnlyNote: String? = null,
   /** 缓存占用文案（**目录实际字节**口径；与「已下载」两回事）。 */
   val cacheUsageText: String = "",
   /** 最近一次缓存清理的结果文案。 */
@@ -779,13 +798,20 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       } else {
         emptyList()
       }
+    // 百分比口径（C-02）：只用「已下载 / 选中字节」；分母不成立时 percentText 为空
+    // （屏幕侧据此不显示百分比），不要再拿 totalSize 或「完成即 100%」凑数。
+    val percentText = if (s.progressKnown) "${(s.progress * 100.0).roundToInt().coerceIn(0, 100)}%" else ""
+    // 行内提示：仅解析（未选文件）任务的常驻说明
+    val note = if (!s.download && s.hasMetadata && s.selected.isEmpty()) PARSE_ONLY_NO_SELECTION_NOTE else ""
     return TaskRow(
       infoHash = s.infoHash,
       name = s.name,
       state = s.state,
       totalSizeText = humanSize(s.totalSize),
       downloadedText = humanSize(s.downloadedBytes),
-      progressPercent = (s.progress * 100.0).roundToInt().coerceIn(0, 100),
+      progressPercent = if (s.progressKnown) (s.progress * 100.0).roundToInt().coerceIn(0, 100) else 0,
+      percentText = percentText,
+      note = note,
       priority = s.priority,
       isDownload = s.download,
       savePath = s.savePath,
@@ -821,6 +847,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
           previewNote = "",
           errorText = null,
           statusText = "焦点任务：${res?.name ?: infoHash}",
+          // 换焦点任务 = 换上下文：仅解析提示不该跨任务残留（J-01）
+          parseOnlyNote = null,
         )
       }
       syncFromEngine()
@@ -849,9 +877,24 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   fun resumeTask(infoHash: String) {
     viewModelScope.launch {
       startServiceForTask()
+      val rec = tasks[infoHash]
       val ok = withContext(Dispatchers.IO) { runCatching { engine.resumeTask(infoHash) }.getOrDefault(false) }
-      markStateFor(infoHash, if (ok) STATE_DOWNLOADING else null, "继续任务", if (ok) "" else "继续失败：句柄不可用")
-      _state.update { it.copy(statusText = if (ok) "已继续任务（${infoHash.take(12)}…）" else "继续失败：句柄不可用") }
+      // J-01：仅解析任务（没有选中要下载的文件）点「继续」不进入下载态 ——
+      // 状态口径与引擎同一判据（stateAfterResume），并给一句人话提示。
+      val nextState = if (ok && rec != null) stateAfterResume(rec.download, rec.selected) else null
+      val parseOnly = nextState == STATE_PAUSED
+      markStateFor(infoHash, nextState, "继续任务", if (ok) "" else "继续失败：句柄不可用")
+      _state.update {
+        it.copy(
+          statusText =
+            when {
+              !ok -> "继续失败：句柄不可用"
+              parseOnly -> PARSE_ONLY_NO_SELECTION_NOTE
+              else -> "已继续任务（${infoHash.take(12)}…）"
+            },
+          parseOnlyNote = if (parseOnly) PARSE_ONLY_NO_SELECTION_NOTE else null,
+        )
+      }
       syncFromEngine()
     }
   }
@@ -877,6 +920,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
             streamUrl = "",
             previewNote = "",
             statusText = "已转正：数据目录 → downloads/${infoHash.take(12)}…（继续下载该文件）",
+            parseOnlyNote = null,
           )
         }
         // 预览流服务按旧根建的：关掉，下次预览按新目录重建
