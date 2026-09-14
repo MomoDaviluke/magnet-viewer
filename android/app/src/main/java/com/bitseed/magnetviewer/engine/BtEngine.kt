@@ -11,6 +11,7 @@ import com.bitseed.magnetviewer.core.states.BOOTSTRAP_TRACKERS
 import com.bitseed.magnetviewer.core.states.METADATA_TIMEOUT_SECONDS
 import com.bitseed.magnetviewer.core.states.STATE_COMPLETED
 import com.bitseed.magnetviewer.data.AppLog
+import com.bitseed.magnetviewer.data.cleanupEmptySourceDir
 import com.bitseed.magnetviewer.core.states.STATE_DELETED
 import com.bitseed.magnetviewer.core.states.STATE_DOWNLOADING
 import com.bitseed.magnetviewer.core.states.STATE_FAILED
@@ -265,6 +266,15 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /** 哈希别名 → 主键（混合种子自报 v2 截断哈希时用它把告警路由回正确任务）。 */
   private val taskAliases = HashMap<String, String>()
+
+  /**
+   * 转正在途：info_hash → **搬运前的**源目录（`.preview/<ih>`）。
+   *
+   * 为什么要有它：`promoteTask` 一发出 `moveStorage` 就把 `t.saveDir` 改成了目标目录，
+   * 等 `storage_moved` 告警回来时已经问不到「原来在哪」。H-02 要靠它把搬运后**已空**的
+   * 源目录清掉（非空则保留）。
+   */
+  private val pendingMoveSources = java.util.concurrent.ConcurrentHashMap<String, File>()
   private var taskSeq = 0
 
   /**
@@ -691,9 +701,15 @@ class BtEngine(private val listener: Listener) : EngineControl {
       }
       AlertType.STORAGE_MOVED -> {
         // 转正搬运完成：复核句柄的 save_path 是否已指向新目录（日志是验收证据的一部分）
-        val p = (a as? StorageMovedAlert)?.storagePath() ?: "?"
+        val moved = a as? StorageMovedAlert
+        val p = moved?.storagePath() ?: "?"
         log("转正搬运完成（storage_moved）：目录=$p")
-        listener.onStatus("转正搬运完成：$p")
+        // H-02：搬运后把**已空**的源目录清掉（非空保留）
+        val key = taskKeyOfAlertHandle(moved?.handle()).ifEmpty { currentInfoHash }
+        val src = pendingMoveSources.remove(key) ?: pendingMoveSources.remove(key.trim().lowercase())
+        val cleanup = cleanupEmptySourceDir(src)
+        if (cleanup.note.isNotEmpty()) log("转正空目录清理：${cleanup.note}")
+        listener.onStatus("转正搬运完成：$p" + if (cleanup.removed) "（已清理空的预览目录）" else "")
         publishActivity()
       }
       AlertType.STORAGE_MOVED_FAILED -> {
@@ -1713,6 +1729,8 @@ class BtEngine(private val listener: Listener) : EngineControl {
     try {
       if (!plan.alreadyPromoted) {
         h.pause()
+        // 记下源目录：搬运完成后要据此清理**已空**的 .preview/<ih>（H-02）
+        plan.fromDir?.let { pendingMoveSources[t.infoHash] = it }
         h.moveStorage(toDir.path)
         log("转正：moveStorage 已下发 ${plan.fromDir?.path} → ${toDir.path}（异步搬运，等 storage_moved 告警）")
       } else {

@@ -118,6 +118,74 @@ fun planPromote(infoHash: String, cacheDir: File, savePath: String = ""): Promot
 /** 转正后的任务状态（桌面 `_convert_to_download_locked`：直接进 DOWNLOADING）。 */
 const val PROMOTE_STATE: String = STATE_DOWNLOADING
 
+// ---------------------------------------------------------------- 转正后的空源目录清理（H-02）
+
+/** 空源目录清理的结果（诚实报告：删了就 removed=true，没删/删不掉都要在 note 里说清）。 */
+data class EmptyDirCleanup(
+  val path: String = "",
+  /** 是否真的把目录删掉了（以「目录是否还在」复核，不看删除实现的返回值）。 */
+  val removed: Boolean = false,
+  val note: String = "",
+)
+
+/**
+ * 转正（`storage_moved` 回执）之后清理**已空**的源目录（`.preview/<ih>`）。
+ *
+ * 规则（H-02）：
+ * - 目录**已空** → 删掉它（它还会参与配额统计与「当前占用」，留着只是噪声）；
+ * - 目录**非空** → **绝不删**（可能在搬、也可能是用户放进来的东西；宁可留残留）；
+ * - 读不到目录内容（`listFiles()` 返回 null）→ 按「非空」保守处理；
+ * - 目录本来就不在 → 幂等成功（不算删除动作）；
+ * - 删除失败 → [EmptyDirCleanup.removed] 保持 false 且 note 写明失败，**不假装成功**。
+ *
+ * 文件系统接触面（[listChildren] / [deleteDir] / [dirExists]）可注入：生产调用不传参数，
+ * 单测可整套换成替身（删除失败/读不到这类真实形态不必真造）。
+ */
+fun cleanupEmptySourceDir(
+  dir: File?,
+  listChildren: (File) -> Array<File>? = { it.listFiles() },
+  deleteDir: (File) -> Boolean = { it.delete() },
+  dirExists: (File) -> Boolean = { it.exists() },
+): EmptyDirCleanup {
+  if (dir == null) return EmptyDirCleanup(note = "无源目录记录：跳过空目录清理")
+  val path = dir.path
+  val exists =
+    try {
+      dirExists(dir)
+    } catch (_: Throwable) {
+      false
+    }
+  if (!exists) return EmptyDirCleanup(path = path, note = "源目录不存在（幂等）：$path")
+  val children =
+    try {
+      listChildren(dir)
+    } catch (_: Throwable) {
+      null
+    }
+  if (children == null) {
+    return EmptyDirCleanup(path = path, note = "源目录内容读不到（保守保留）：$path")
+  }
+  if (children.isNotEmpty()) {
+    return EmptyDirCleanup(path = path, note = "源目录非空（保留，不删）：$path（${children.size} 项）")
+  }
+  val ok =
+    try {
+      deleteDir(dir)
+    } catch (_: Throwable) {
+      false
+    }
+  val stillThere =
+    try {
+      dirExists(dir)
+    } catch (_: Throwable) {
+      true
+    }
+  return when {
+    ok && !stillThere -> EmptyDirCleanup(path = path, removed = true, note = "已删除搬运后的空预览目录：$path")
+    else -> EmptyDirCleanup(path = path, note = "空预览目录删除失败（保留，留待人工/下次）：$path")
+  }
+}
+
 // ---------------------------------------------------------------- 移除（remove，含删数据守卫）
 
 /**
