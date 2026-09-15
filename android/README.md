@@ -58,6 +58,26 @@ adb install -r android/app/build/outputs/apk/release/app-release.apk
 发布包约 **20.5 MiB**：R8 混淆 + 仅 `arm64-v8a`（现代手机都是这个）。签名为**开发用 keystore**
 （`android/app/keystore.properties`，不入库）——正式分发前请换成自己的凭据，见 `app/keystore.properties.example`。
 
+### 发布前门禁（**换正式凭据这一步是机器判定的**）
+
+`app/build.gradle.kts` 在找不到 `keystore.properties` 时**故意不注册签名配置**（干净 CI / 新机器上
+release 退化成未签名包，而不是让整个构建红）——对 CI 是对的，对交付是陷阱。所以发布前**必须**跑一次：
+
+```bash
+python android/tools/release_check.py              # 红了不许发；退出码 0/1/2
+python android/tools/release_check.py --self-test  # 只跑内置自检（不需要 SDK/APK）
+```
+
+四项检查：**R1** 恰好 1 个签名者且**证书 DN 不是开发凭据**（`MagnetViewer Dev`）→ 这就是「换凭据」
+这道工序的强制阀；**R2** `zipalign -c -P 16` 16KB 页对齐（2027-02-01 起 Play 强制，Android 15+ 的
+16KB 页设备也要求）；**R3** APK 内 `lib/` 只含 `arm64-v8a`；**R4** 打印 sha256 与字节数（与 `dist/`
+交付副本逐位对账）。
+
+本地只是冒烟、明知是开发签名时，显式加 `--allow-dev-cert` 放行（交付**不许**加）。
+退出码 2 = 环境缺 `apksigner`/`zipalign`（**跳过 ≠ 通过**，与桌面测试的退出码语义一致）。
+
+> ⚠️ 换签后**必须重跑一遍冒烟**：新证书 = 新的应用签名，旧包无法覆盖安装（签名不一致会被系统拒绝）。
+
 首次启动会请求通知权限（拒绝也能用，只是没有前台服务通知）。
 
 ## 使用步骤
