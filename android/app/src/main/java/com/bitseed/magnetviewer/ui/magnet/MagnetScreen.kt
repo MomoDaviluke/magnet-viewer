@@ -2,7 +2,9 @@ package com.bitseed.magnetviewer.ui.magnet
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -21,10 +23,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -32,12 +35,14 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -59,7 +64,12 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
 import com.bitseed.magnetviewer.theme.LocalPal
+import com.bitseed.magnetviewer.theme.LocalShapes
 import com.bitseed.magnetviewer.theme.MagnetViewerTheme
+import com.bitseed.magnetviewer.ui.components.DeleteConfirmSheet
+import com.bitseed.magnetviewer.ui.components.StallBanner
+import com.bitseed.magnetviewer.ui.components.TaskCard
+import com.bitseed.magnetviewer.ui.components.TaskCardLogic
 import com.bitseed.magnetviewer.ui.gallery.GalleryScreen
 import com.bitseed.magnetviewer.ui.settings.SettingsScreen
 
@@ -104,6 +114,10 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
     onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
   }
 
+  // A-01：系统返回键在子屏逐级退（画廊/设置 → 主屏；播放中先停预览）。内部自定义目标（见 Navigation.kt 注释）。
+  BackHandler(enabled = state.gallery.open) { viewModel.closeGallery() }
+  BackHandler(enabled = !state.gallery.open && state.settingsOpen) { viewModel.closeSettings() }
+
   MagnetViewerTheme(themeMode = state.settings.uiTheme) {
     if (state.gallery.open) {
       // 图片画廊：图片文件按需下载 → 缩略图网格 → 点开大图（缩放 / 翻页）
@@ -147,12 +161,14 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
         onPromoteTask = viewModel::promoteTask,
         onRemoveTask = viewModel::removeTask,
         onSetPriority = viewModel::setTaskPriority,
+        onRetryPreview = viewModel::retryPreview,
         modifier = modifier,
       )
     }
   }
 }
 
+/** 主屏（内部目标之一；其他子屏 = Gallery / Settings，BackHandler 逐级退）。 */
 @Composable
 internal fun MagnetContent(
   state: MagnetUiState,
@@ -172,296 +188,204 @@ internal fun MagnetContent(
   onPromoteTask: (String) -> Unit = {},
   onRemoveTask: (String, Boolean) -> Unit = { _, _ -> },
   onSetPriority: (String, Int) -> Unit = { _, _ -> },
+  onRetryPreview: () -> Unit = {},
   modifier: Modifier = Modifier,
 ) {
   val pal = LocalPal.current
-  // 单列可滚动布局：任务列表变高后，文件清单/预览不能再被顶出屏幕（实测踩过——
-  // 多任务列表把文件清单挤出可视区，预览点不到）。整屏一个 LazyColumn，文件行作为它的 items。
-  LazyColumn(
-    modifier = modifier.fillMaxSize().background(pal.bg).padding(16.dp),
-    verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-  ) {
-    item(key = "header") {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(modifier = Modifier.weight(1f)) {
-          Text("磁力链预览器", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
-          Spacer(Modifier.height(4.dp))
-          Text(
-            "DHT 取元数据 · 不下载本体 · 点视频边下边播 · 缓存模式 ${state.cacheMode}",
-            fontSize = 13.sp,
-            color = pal.textMuted,
-          )
-        }
-        TextButton(onClick = onOpenSettings) { Text("设置", fontSize = 14.sp, color = pal.accent) }
-      }
+  val shapes = LocalShapes.current
+  val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+  var pendingDelete by remember { mutableStateOf<Pair<String, String>?>(null) } // (infoHash, name)
+
+  // B-03：重复解析去重提示 → Snackbar（并聚焦到既有任务）
+  val snackbarHostState = remember { SnackbarHostState() }
+  LaunchedEffect(state.statusText) {
+    if (state.statusText.contains("复用既有任务") || state.statusText.contains("已在任务列表")) {
+      snackbarHostState.showSnackbar(state.statusText)
     }
-    item(key = "input") {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        OutlinedTextField(
-          value = state.input,
-          onValueChange = onInput,
-          modifier = Modifier.weight(1f),
-          singleLine = true,
-          enabled = !state.busy,
-          textStyle = TextStyle(fontSize = 14.sp, color = pal.text),
-          placeholder = { Text("粘贴磁力链接 magnet:?xt=urn:btih:…", fontSize = 13.sp, color = pal.textDim) },
-        )
-        Spacer(Modifier.width(8.dp))
-        Button(onClick = onResolve, enabled = !state.busy, shape = RoundedCornerShape(8.dp)) {
-          Text(if (state.busy) "解析中…" else "解析", fontSize = 14.sp)
-        }
-      }
-    }
-    if (state.statusText.isNotEmpty() || state.errorText != null ||
-      state.restoreNote.isNotEmpty() || state.persistNote.isNotEmpty()
+  }
+
+  Box(modifier = modifier.fillMaxSize()) {
+    LazyColumn(
+      modifier = Modifier.fillMaxSize().background(if (landscape) pal.bg else pal.surfaceSunken).padding(16.dp),
+      verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
     ) {
-      item(key = "status") {
-        Column(modifier = Modifier.fillMaxWidth()) {
-          if (state.statusText.isNotEmpty()) {
-            Text(state.statusText, fontSize = 13.sp, color = pal.textMuted, maxLines = 3, overflow = TextOverflow.Ellipsis)
-          }
-          state.errorText?.let { Text(it, fontSize = 13.sp, color = pal.danger) }
-          if (state.restoreNote.isNotEmpty()) {
-            Text(state.restoreNote, fontSize = 12.sp, color = pal.textMuted, maxLines = 4, overflow = TextOverflow.Ellipsis)
-          }
-          if (state.persistNote.isNotEmpty()) {
-            Text(state.persistNote, fontSize = 12.sp, color = pal.textDim, maxLines = 3, overflow = TextOverflow.Ellipsis)
-          }
-        }
-      }
-    }
-    // 多任务列表（每行：名称/状态/总大小/已下载/优先级）
-    if (state.taskRows.isNotEmpty()) {
-      item(key = "tasks") {
-        TaskListPanel(
-          rows = state.taskRows,
-          onFocus = onFocusTask,
-          onToggleExpand = onToggleExpand,
-          onPause = onPauseTask,
-          onResume = onResumeTask,
-          onPromote = onPromoteTask,
-          onRemove = onRemoveTask,
-          onPriority = onSetPriority,
-        )
-      }
-    }
-    if (state.torrentName.isNotEmpty()) {
-      item(key = "focus") {
-        PanelCard {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-              state.torrentName,
-              modifier = Modifier.weight(1f),
-              fontSize = 16.sp,
-              fontWeight = FontWeight.SemiBold,
-              color = pal.text,
-              maxLines = 2,
-              overflow = TextOverflow.Ellipsis,
-            )
-            if (state.taskState.isNotEmpty()) {
-              Text(state.taskState, fontSize = 12.sp, color = pal.textMuted)
+      // ---- 头部（L-01 横屏收起副标题，状态区改两行）----
+      item(key = "header") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Column(modifier = Modifier.weight(1f)) {
+            Text("磁力链预览器", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
+            if (!landscape) {
+              Spacer(Modifier.height(2.dp))
+              Text(
+                "DHT 取元数据 · 不下载本体 · 缓存模式 ${state.cacheMode}",
+                fontSize = 12.sp,
+                color = pal.textMuted,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
             }
           }
-          Spacer(Modifier.height(4.dp))
-          Text(
-            "总大小 ${state.totalSizeText} · ${state.files.size} 个文件${if (state.infoHash.isNotEmpty()) " · " + state.infoHash.take(16) + "…" else ""}",
-            fontSize = 13.sp,
-            color = pal.textMuted,
+          TextButton(onClick = onOpenSettings) { Text("设置", fontSize = 13.sp, color = pal.accent) }
+        }
+      }
+      // ---- 输入行（B-02 错误就地：输入框下方）----
+      item(key = "input") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          OutlinedTextField(
+            value = state.input,
+            onValueChange = onInput,
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            enabled = !state.busy,
+            textStyle = TextStyle(fontSize = 14.sp, color = pal.text),
+            placeholder = { Text("粘贴磁力链接 magnet:?xt=urn:btih:…", fontSize = 13.sp, color = pal.textDim) },
           )
+          Spacer(Modifier.width(8.dp))
+          Button(onClick = onResolve, enabled = !state.busy, shape = shapes.shapeButton) {
+            Text(if (state.busy) "解析中…" else "解析", fontSize = 14.sp)
+          }
+        }
+        // B-02：解析错误就地（输入框下方紧贴）
+        state.errorText?.let {
           Spacer(Modifier.height(4.dp))
-          Text(
-            "清单来自磁盘清单文件 .tasks.json（重启/被杀后无需重新解析）· 操作见上方任务列表",
-            fontSize = 12.sp,
-            color = pal.textDim,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+          Text(it, fontSize = 12.sp, color = pal.danger, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+      }
+      // ---- 状态主行（15sp；工程类一句人话收「详情」）----
+      if (state.statusText.isNotEmpty() || state.restoreNote.isNotEmpty() || state.persistNote.isNotEmpty()) {
+        item(key = "status") {
+          Column(modifier = Modifier.fillMaxWidth()) {
+            if (state.statusText.isNotEmpty()) {
+              Text(state.statusText, fontSize = 15.sp, color = pal.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+            // 工程信息只有一行 12sp dim（不堆）
+            if (state.restoreNote.isNotEmpty() || state.persistNote.isNotEmpty()) {
+              Text(
+                state.restoreNote.ifEmpty { state.persistNote },
+                fontSize = 12.sp,
+                color = pal.textDim,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+            }
+          }
+        }
+      }
+      // ---- 停滞提示（StallBanner；C-01）----
+      if (state.stallNote != null) {
+        item(key = "stall") { StallBanner(note = state.stallNote) }
+      }
+      // ---- 预览失败重试（D-01；previewFailed → retryPreview）----
+      if (state.previewFailed) {
+        item(key = "preview-failed") {
+          Column(modifier = Modifier.fillMaxWidth().clip(shapes.shapeCard).background(pal.dangerSoft).padding(12.dp)) {
+            Text(state.previewNote.ifEmpty { "预览失败" }, fontSize = 13.sp, color = pal.danger)
+            Spacer(Modifier.height(6.dp))
+            Button(onClick = onRetryPreview, shape = shapes.shapeButton) { Text("重试", fontSize = 13.sp) }
+          }
+        }
+      }
+      // ---- 任务列表（一任务一张卡）----
+      if (state.taskRows.isNotEmpty()) {
+        items(state.taskRows, key = { it.infoHash }) { row ->
+          TaskCard(
+            row = row,
+            onFocus = onFocusTask,
+            onPause = onPauseTask,
+            onResume = onResumeTask,
+            onPromote = onPromoteTask,
+            onRemove = { pendingDelete = it to row.name },
+            onPriority = onSetPriority,
+            onToggleDetail = onToggleExpand,
+            detailOpen = row.expanded,
+          )
+        }
+      } else if (!state.busy) {
+        item(key = "empty") { EmptyState() }
+      }
+      // ---- 焦点任务信息 / 播放卡 / 文件行 ----
+      if (state.torrentName.isNotEmpty()) {
+        item(key = "focus") {
+          PanelCard(shapes = shapes) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Text(
+                state.torrentName,
+                modifier = Modifier.weight(1f),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = pal.text,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+              )
+              if (state.taskState.isNotEmpty()) {
+                Text(state.taskState, fontSize = 12.sp, color = pal.textMuted)
+              }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+              "总大小 ${state.totalSizeText} · ${state.files.size} 个文件",
+              fontSize = 13.sp,
+              color = pal.textMuted,
+            )
+          }
+        }
+      }
+      if (state.previewIndex >= 0) {
+        item(key = "preview") {
+          // D-02：播放卡固定结构（状态文/控件同一行内排，不挤出）
+          PreviewPane(
+            streamUrl = state.streamUrl,
+            title = state.previewTitle,
+            note = state.previewNote,
+            bufferText = state.bufferText,
+            bufferPercent = state.bufferPercent,
+            paused = state.previewPaused,
+            cacheMode = state.cacheMode,
+            seekFraction = state.seekFraction,
+            seekSeq = state.seekSeq,
+            seekNote = state.seekNote,
+            onSeek = onSeek,
+            onPause = onPausePreview,
+            onResume = onResumePreview,
+            onStop = onStopPreview,
+          )
+        }
+      }
+      if (state.files.isNotEmpty()) {
+        items(state.files, key = { it.index }) { file ->
+          FileRow(
+            item = file,
+            selected = file.index == state.previewIndex,
+            paused = state.previewPaused,
+            onClick = { if (file.isImage) onOpenGallery(file.index) else onPreview(file.index) },
+            onPause = onPausePreview,
+            onResume = onResumePreview,
+            onStop = onStopPreview,
           )
         }
       }
     }
-    if (state.previewIndex >= 0) {
-      item(key = "preview") {
-        PreviewPane(
-          streamUrl = state.streamUrl,
-          title = state.previewTitle,
-          note = state.previewNote,
-          bufferText = state.bufferText,
-          bufferPercent = state.bufferPercent,
-          paused = state.previewPaused,
-          cacheMode = state.cacheMode,
-          seekFraction = state.seekFraction,
-          seekSeq = state.seekSeq,
-          seekNote = state.seekNote,
-          onSeek = onSeek,
-          onPause = onPausePreview,
-          onResume = onResumePreview,
-          onStop = onStopPreview,
-        )
-      }
-    }
-    items(state.files, key = { it.index }) { item ->
-      FileRow(
-        item = item,
-        selected = item.index == state.previewIndex,
-        paused = state.previewPaused,
-        // 视频行 → 边下边播；图片行 → 进画廊（缩略图网格 → 大图）
-        onClick = { if (item.isImage) onOpenGallery(item.index) else onPreview(item.index) },
-        onPause = onPausePreview,
-        onResume = onResumePreview,
-        onStop = onStopPreview,
-      )
-    }
-  }
-}
-
-/**
- * 任务列表（多任务）：一行一个 info_hash。
- *
- * 每行展示 **名称 / 状态 / 总大小 / 已下载 / 优先级**（与桌面 `taskops.tasks()` 快照同口径），
- * 行内可：切焦点（点行）· 展开文件清单 · 暂停/继续 · **转正** · 移除（保留数据 / 删数据）· 优先级 0..3。
- */
-@Composable
-private fun TaskListPanel(
-  rows: List<TaskRow>,
-  onFocus: (String) -> Unit,
-  onToggleExpand: (String) -> Unit,
-  onPause: (String) -> Unit,
-  onResume: (String) -> Unit,
-  onPromote: (String) -> Unit,
-  onRemove: (String, Boolean) -> Unit,
-  onPriority: (String, Int) -> Unit,
-) {
-  val pal = LocalPal.current
-  PanelCard {
-    Text("任务列表（${rows.size}）", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = pal.text)
-    Spacer(Modifier.height(2.dp))
-    Text(
-      "每行：名称 / 状态 / 总大小 / 已下载（fileProgress 求和）/ 优先级；点行切焦点（清单与预览跟随）",
-      fontSize = 12.sp,
-      color = pal.textMuted,
-      maxLines = 2,
-      overflow = TextOverflow.Ellipsis,
+    // ---- Snackbar 宿主（B-03：重复解析提示；底部悬浮）----
+    SnackbarHost(
+      hostState = snackbarHostState,
+      modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
     )
-    rows.forEach { row ->
-      Spacer(Modifier.height(8.dp))
-      TaskRowView(
-        row = row,
-        onFocus = onFocus,
-        onToggleExpand = onToggleExpand,
-        onPause = onPause,
-        onResume = onResume,
-        onPromote = onPromote,
-        onRemove = onRemove,
-        onPriority = onPriority,
-      )
-    }
   }
-}
-
-@Composable
-private fun TaskRowView(
-  row: TaskRow,
-  onFocus: (String) -> Unit,
-  onToggleExpand: (String) -> Unit,
-  onPause: (String) -> Unit,
-  onResume: (String) -> Unit,
-  onPromote: (String) -> Unit,
-  onRemove: (String, Boolean) -> Unit,
-  onPriority: (String, Int) -> Unit,
-) {
-  val pal = LocalPal.current
-  Column(
-    modifier =
-      Modifier.fillMaxWidth()
-        .clip(RoundedCornerShape(8.dp))
-        .background(if (row.focused) pal.bgSelected else pal.bgInput)
-        .border(1.dp, if (row.focused) pal.accent else pal.border, RoundedCornerShape(8.dp))
-        .clickable { onFocus(row.infoHash) }
-        .padding(horizontal = 10.dp, vertical = 8.dp)
-  ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Text(
-        (if (row.focused) "▶ " else "") + row.name,
-        modifier = Modifier.weight(1f),
-        fontSize = 14.sp,
-        fontWeight = FontWeight.Medium,
-        color = pal.text,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-      Text(row.state, fontSize = 12.sp, color = pal.textMuted)
-    }
-    Spacer(Modifier.height(2.dp))
-    Text(
-      "总大小 ${row.totalSizeText} · 已下载 ${row.downloadedText}（${row.progressPercent}%）" +
-        (if (row.rateText.isNotEmpty()) " · ${row.rateText}" else "") +
-        " · 优先级 P${row.priority}" +
-        (if (row.isDownload) " · 下载任务" else " · 仅解析"),
-      fontSize = 12.sp,
-      color = pal.textMuted,
-      maxLines = 2,
-      overflow = TextOverflow.Ellipsis,
+  // ---- 删除确认底部 Sheet（G-01）----
+  pendingDelete?.let { (hash, name) ->
+    DeleteConfirmSheet(
+      taskName = name,
+      onConfirm = { deleteData ->
+        if (deleteData != null) onRemoveTask(hash, deleteData)
+        pendingDelete = null
+        deleteData
+      },
+      onDismiss = { pendingDelete = null },
     )
-    if (row.error.isNotEmpty()) {
-      Text(row.error, fontSize = 12.sp, color = pal.danger, maxLines = 2, overflow = TextOverflow.Ellipsis)
-    }
-    // 优先级（0..3；影响下载队列与并发）
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Text("优先级", fontSize = 12.sp, color = pal.textDim)
-      for (p in 0..3) {
-        TextButton(onClick = { onPriority(row.infoHash, p) }) {
-          Text(
-            "P$p",
-            fontSize = 12.sp,
-            color = if (p == row.priority) pal.accent else pal.textMuted,
-            fontWeight = if (p == row.priority) FontWeight.SemiBold else FontWeight.Normal,
-          )
-        }
-      }
-    }
-    // 任务操作（逐条对齐桌面 taskops：转正 / 暂停继续 / 移除两档）
-    // 「已转正」只按**落盘目录**判定（downloads/<ih> 才叫转正过）——预览任务同样是下载型，
-    // 但它的数据还在 .preview/ 里（此时按钮该显示「转正」，点了才搬到 downloads/）。
-    val promoted = row.savePath.contains("/downloads/")
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      TextButton(onClick = { onPromote(row.infoHash) }) {
-        Text(if (promoted) "已转正" else "转正", fontSize = 13.sp, color = pal.accent)
-      }
-      TextButton(onClick = { onPause(row.infoHash) }) { Text("暂停", fontSize = 13.sp, color = pal.accent) }
-      TextButton(onClick = { onResume(row.infoHash) }) { Text("继续", fontSize = 13.sp, color = pal.accent) }
-      TextButton(onClick = { onRemove(row.infoHash, false) }) {
-        Text("移除(保留数据)", fontSize = 13.sp, color = pal.danger)
-      }
-      TextButton(onClick = { onRemove(row.infoHash, true) }) {
-        Text("移除(删数据)", fontSize = 13.sp, color = pal.danger)
-      }
-      TextButton(onClick = { onToggleExpand(row.infoHash) }) {
-        Text(if (row.expanded) "收起文件" else "展开文件", fontSize = 13.sp, color = pal.accent)
-      }
-    }
-    if (row.expanded) {
-      Text(
-        "文件清单（${row.files.size} 个，已过滤 .pad）",
-        fontSize = 12.sp,
-        color = pal.textDim,
-      )
-      row.files.forEach { f ->
-        Text(
-          "${f.name} · ${f.sizeText}" + (if (f.isVideo) " · 视频" else ""),
-          fontSize = 12.sp,
-          color = pal.text,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-    }
   }
 }
 
-/**
- * 文件行：视频行可点开预览；**图片行**可点进画廊；**当前预览行**额外挂「暂停 / 继续」与「停止预览」。
- * 选中态的文案区分两档缓存模式的停止语义（hold = 冻结；convert = 转正继续）。
- */
+/** 文件行（不变；视频行 → 预览；图片行 → 画廊）。 */
 @Composable
 private fun FileRow(
   item: MagnetFileItem,
@@ -477,15 +401,15 @@ private fun FileRow(
   Row(
     modifier =
       Modifier.fillMaxWidth()
-        .clip(RoundedCornerShape(8.dp))
+        .clip(RoundedCornerShape4)
         .background(if (selected) pal.bgSelected else pal.panel)
-        .border(1.dp, pal.border, RoundedCornerShape(8.dp))
+        .border(1.dp, pal.border, RoundedCornerShape4)
         .clickable(enabled = clickable, onClick = onClick)
         .padding(horizontal = 12.dp, vertical = 10.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     Column(modifier = Modifier.weight(1f)) {
-      Text(item.name, fontSize = 14.sp, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      Text(item.name, fontSize = 15.sp, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
       Spacer(Modifier.height(2.dp))
       Text(
         if (item.path != item.name) "${item.sizeText} · ${item.path}" else item.sizeText,
@@ -516,6 +440,9 @@ private fun FileRow(
   }
 }
 
+/** 文件行/PanelCard 共用的小圆角（4 = 行内元素）。 */
+private val RoundedCornerShape4 = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+
 @Composable
 private fun PreviewPane(
   streamUrl: String,
@@ -534,11 +461,12 @@ private fun PreviewPane(
   onStop: () -> Unit,
 ) {
   val pal = LocalPal.current
-  PanelCard {
-    Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+  val shapes = LocalShapes.current
+  PanelCard(shapes = shapes) {
+    Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
     Spacer(Modifier.height(8.dp))
     Box(
-      modifier = Modifier.fillMaxWidth().height(200.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black),
+      modifier = Modifier.fillMaxWidth().height(200.dp).clip(shapes.shapeCard).background(Color.Black),
       contentAlignment = Alignment.Center,
     ) {
       if (streamUrl.isNotEmpty()) {
@@ -557,6 +485,7 @@ private fun PreviewPane(
       Text(seekNote, fontSize = 12.sp, color = pal.textMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
       Spacer(Modifier.height(4.dp))
     }
+    // D-02：状态文与控件同一排（字数短、禁止溢出卡）
     Row(verticalAlignment = Alignment.CenterVertically) {
       Text(
         if (bufferText.isNotEmpty()) bufferText else note,
@@ -581,10 +510,7 @@ private fun PreviewPane(
   }
 }
 
-/**
- * 跳转条（0..1 = 文件比例）。**只在拖动结束时**回调 [onSeek]
- * （避免拖动过程中每一帧都去重建分块窗口）。
- */
+/** 跳转条（0..1 = 文件比例）。**只在拖动结束时**回调 [onSeek]（D-03 与提示共用同一取整 [TaskCardLogic.percentOf]）。 */
 @Composable
 private fun SeekBar(fraction: Float, onSeek: (Float) -> Unit) {
   val pal = LocalPal.current
@@ -599,7 +525,7 @@ private fun SeekBar(fraction: Float, onSeek: (Float) -> Unit) {
       modifier = Modifier.fillMaxWidth().semantics { contentDescription = SEEK_SLIDER_DESC },
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Text("跳转 ${(local * 100).toInt()}%", fontSize = 12.sp, color = pal.textMuted, modifier = Modifier.weight(1f))
+      Text("跳转 ${TaskCardLogic.percentOf(local)}%", fontSize = 12.sp, color = pal.textMuted, modifier = Modifier.weight(1f))
       Text("拖动结束生效（按字节位置）", fontSize = 12.sp, color = pal.textDim)
     }
   }
@@ -616,7 +542,6 @@ private fun VideoPlayer(url: String, seekFraction: Float, seekSeq: Int) {
     player.prepare()
     player.playWhenReady = true
   }
-  // 拖动条落点 → 播放器跟着跳（时长已知时；未知就只靠引擎侧重排窗口）
   LaunchedEffect(seekSeq) {
     if (seekSeq > 0) {
       val duration = player.duration
@@ -639,7 +564,7 @@ private fun VideoPlayer(url: String, seekFraction: Float, seekSeq: Int) {
 private fun ThinProgress(percent: Float) {
   val pal = LocalPal.current
   Box(
-    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(pal.border)
+    modifier = Modifier.fillMaxWidth().height(6.dp).clip(androidx.compose.foundation.shape.CircleShape).background(pal.border)
   ) {
     Box(
       modifier =
@@ -651,16 +576,15 @@ private fun ThinProgress(percent: Float) {
 }
 
 @Composable
-private fun PanelCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+private fun PanelCard(shapes: com.bitseed.magnetviewer.theme.UiShapes, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
   val pal = LocalPal.current
   Column(
     modifier =
       modifier
         .fillMaxWidth()
-        .clip(RoundedCornerShape(10.dp))
+        .clip(shapes.shapeCard)
         .background(pal.panel)
-        .border(1.dp, pal.border, RoundedCornerShape(10.dp))
-        .padding(12.dp),
+        .padding(16.dp),
     content = content,
   )
 }

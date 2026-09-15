@@ -27,4 +27,16 @@ object Pal {
   val warn = Color(0xFF9A6700) // 警告 / 限速
   val danger = Color(0xFFC0392B) // 失败
   val altRow = Color(0xFFF3F5F8) // 交替行
+
+  // ---- 方案 B（卡片重构）新增 5 个色值（`.hermes/android-qa/polish/README.md` §3）----
+  /** 页底色（层 : 页底 < 卡 #FFFFFF < 卡内 inset [altRow]）：`Pal.bg` 与白卡只差 4% 明度，再深一档才立得住。 */
+  val surfaceSunken = Color(0xFFEDEFF3)
+  /** tonal（浅色下 8% 主色底）按钮的**按下档**：bgSelected 作默认底时，需要更深一档给 pressed。 */
+  val tonalPressed = Color(0xFFD8E4FA)
+  /** 危险容器底（错误条 / 删除类选项底）：Pal 只有饱和红 `danger`，缺 errorContainer 语义。 */
+  val dangerSoft = Color(0xFFFBEAE8)
+  /** 危险按下档（删除类按钮 pressed）。 */
+  val dangerPressed = Color(0xFFA32C1F)
+  /** 成功容器底（已完成 / 播放中芯片底）：[ok] 是深绿文字色，不能当底。 */
+  val okSoft = Color(0xFFE9F4EE)
 }

@@ -3,10 +3,14 @@ package com.bitseed.magnetviewer.theme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.unit.dp
 import com.bitseed.magnetviewer.data.THEME_LIGHT
 import com.bitseed.magnetviewer.data.isDarkTheme
 
@@ -37,6 +41,12 @@ data class Palette(
   val warn: androidx.compose.ui.graphics.Color,
   val danger: androidx.compose.ui.graphics.Color,
   val altRow: androidx.compose.ui.graphics.Color,
+  // 方案 B 新增（与 [Pal] 同名）
+  val surfaceSunken: androidx.compose.ui.graphics.Color,
+  val tonalPressed: androidx.compose.ui.graphics.Color,
+  val dangerSoft: androidx.compose.ui.graphics.Color,
+  val dangerPressed: androidx.compose.ui.graphics.Color,
+  val okSoft: androidx.compose.ui.graphics.Color,
 ) {
   companion object {
     /** 浅色：桌面 LIGHT 字典原值（不新造）。 */
@@ -60,6 +70,11 @@ data class Palette(
         warn = Pal.warn,
         danger = Pal.danger,
         altRow = Pal.altRow,
+        surfaceSunken = Pal.surfaceSunken,
+        tonalPressed = Pal.tonalPressed,
+        dangerSoft = Pal.dangerSoft,
+        dangerPressed = Pal.dangerPressed,
+        okSoft = Pal.okSoft,
       )
 
     /** 深色：同一批色值换角色（窗口底=Pal.text、面板=Pal.textMuted、文字=Pal.bg…）。 */
@@ -83,12 +98,30 @@ data class Palette(
         warn = Pal.warn,
         danger = Pal.danger,
         altRow = Pal.textMuted,
+        surfaceSunken = Pal.text,
+        tonalPressed = Pal.accentPressed,
+        dangerSoft = Pal.dangerPressed,
+        dangerPressed = Pal.danger,
+        okSoft = Pal.ok,
       )
   }
 }
 
 /** 当前生效的色板：浅色 [Palette.Light] / 深色 [Palette.Dark]（由 [MagnetViewerTheme] 提供）。 */
 val LocalPal = staticCompositionLocalOf { Palette.Light }
+
+/**
+ * **圆角三档**（方案 B §4「圆角」：卡 16 / 按钮 12 / 芯片全圆；底部 Sheet 顶部 24 属覆盖层，
+ * 组件里直接写 24）。统一从 [LocalShapes] 取，屏幕不得再散落 `RoundedCornerShape(x)`。
+ */
+data class UiShapes(
+  val shapeCard: Shape = RoundedCornerShape(16.dp),
+  val shapeButton: Shape = RoundedCornerShape(12.dp),
+  val shapeChip: Shape = CircleShape,
+)
+
+/** 圆角三档提供者（Light/Dark 共用同一套形状）。 */
+val LocalShapes = staticCompositionLocalOf { UiShapes() }
 
 /** 浅色主题的 Material 配色（色值全部来自 [Pal]）。 */
 private val LightColors =
@@ -140,7 +173,7 @@ private val DarkColors =
 @Composable
 fun MagnetViewerTheme(themeMode: String = THEME_LIGHT, content: @Composable () -> Unit) {
   val dark = isDarkTheme(themeMode, isSystemInDarkTheme())
-  CompositionLocalProvider(LocalPal provides if (dark) Palette.Dark else Palette.Light) {
+  CompositionLocalProvider(LocalPal provides if (dark) Palette.Dark else Palette.Light, LocalShapes provides UiShapes()) {
     MaterialTheme(colorScheme = if (dark) DarkColors else LightColors, typography = Typography, content = content)
   }
 }

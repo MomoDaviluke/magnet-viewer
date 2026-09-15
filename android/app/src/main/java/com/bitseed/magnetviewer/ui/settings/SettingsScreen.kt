@@ -54,6 +54,7 @@ import com.bitseed.magnetviewer.data.THEME_SYSTEM_LABEL
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_CONVERT
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
 import com.bitseed.magnetviewer.theme.LocalPal
+import com.bitseed.magnetviewer.theme.LocalShapes
 
 /**
  * 设置页（磁力链预览器的全部可调项）。
@@ -146,19 +147,17 @@ fun SettingsScreen(
         overflow = TextOverflow.Ellipsis,
       )
       Spacer(Modifier.height(6.dp))
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Button(onClick = onClearCache, shape = RoundedCornerShape(8.dp)) {
-          Text("立即清理缓存", fontSize = 13.sp)
-        }
-        Spacer(Modifier.width(10.dp))
-        Text(
-          cacheNote.ifEmpty { "清理 <缓存根>/.preview 下的非保护目录（活跃任务目录保留）" },
-          modifier = Modifier.weight(1f),
-          fontSize = 12.sp,
-          color = pal.textMuted,
-          maxLines = 3,
-          overflow = TextOverflow.Ellipsis,
-        )
+      // I-04：说明文**独占整行**（不与按钮同行挤压断词）
+      Text(
+        cacheNote.ifEmpty { "清理 <缓存根>/.preview 下的非保护目录（活跃任务目录保留）" },
+        fontSize = 12.sp,
+        color = pal.textMuted,
+        maxLines = 3,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Spacer(Modifier.height(6.dp))
+      Button(onClick = onClearCache, shape = LocalShapes.current.shapeButton) {
+        Text("立即清理缓存", fontSize = 13.sp)
       }
       Spacer(Modifier.height(8.dp))
       Text("关闭预览时（stopPreview 语义由它决定）", fontSize = 12.sp, color = pal.textMuted)
@@ -182,7 +181,7 @@ fun SettingsScreen(
         onSelect = { draft = draft.copy(uiTheme = it) },
       )
       Spacer(Modifier.height(8.dp))
-      SwitchRow("运行日志", "（关闭后不再产运行日志）", draft.loggingEnabled) { draft = draft.copy(loggingEnabled = it) }
+      SwitchRow("运行日志", "（关闭后不再产生运行日志）", draft.loggingEnabled) { draft = draft.copy(loggingEnabled = it) }
     }
 
     Spacer(Modifier.height(14.dp))
