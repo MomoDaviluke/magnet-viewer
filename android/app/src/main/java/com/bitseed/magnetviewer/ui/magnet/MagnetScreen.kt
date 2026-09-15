@@ -115,8 +115,14 @@ fun MagnetScreen(modifier: Modifier = Modifier) {
   }
 
   // A-01：系统返回键在子屏逐级退（画廊/设置 → 主屏；播放中先停预览）。内部自定义目标（见 Navigation.kt 注释）。
+  // 顺序即优先级：画廊 → 设置 → 播放中（停预览）→ 交给系统（退回桌面）。
+  // 注意**播放中这条**：主屏按返回默认会把 Activity 退到桌面，而预览（分片调度 + 本地流）照旧跑，
+  // 从用户视角就是「明明按了返回，视频/下载还在动」——按 A-01 的约定，先停预览、留在主屏。
   BackHandler(enabled = state.gallery.open) { viewModel.closeGallery() }
   BackHandler(enabled = !state.gallery.open && state.settingsOpen) { viewModel.closeSettings() }
+  BackHandler(enabled = !state.gallery.open && !state.settingsOpen && state.previewIndex >= 0) {
+    viewModel.stopPreview()
+  }
 
   MagnetViewerTheme(themeMode = state.settings.uiTheme) {
     if (state.gallery.open) {
