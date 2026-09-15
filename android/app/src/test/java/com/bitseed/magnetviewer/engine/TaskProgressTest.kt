@@ -30,6 +30,13 @@ import org.junit.Test
  *    （[selectedBytes] / [progressOf] / [TaskSnapshot.progress] / [TaskSnapshot.progressKnown]）；
  * 3. **「继续」不把仅解析任务送进下载态**（[stateAfterResume]），并给一句人话提示
  *    （[PARSE_ONLY_NO_SELECTION_NOTE]，VM 暴露为 `TaskRow.note` / `MagnetUiState.parseOnlyNote`）。
+ *
+ * 复审追加（2026-09-15，「假完成」）：上面第 1 条只挡住了「没有选中文件」，**没挡住「选中了但没下完」**。
+ * 真磁力链实测 `（下载 1511277003 字节 / 选中 3591733632 字节）` 被判 COMPLETED ——
+ * 根因是 libtorrent 的 `isFinished()` 是**「wanted 集合」口径**，而预览暂停 / hold 档停止会把
+ * 全部文件优先级置 0（wanted = 0）→ **虚真**；此时任务仍是 DOWNLOADING、字节一个没多。
+ * 因此完成判定改为同时要求 **「选中文件已落字节 ≥ 选中字节」**（[pickedDoneBytes]）：
+ * 分子分母同源（都只算选中集合、逐文件按 size 夹取），不再给虚真留缝。
  */
 class TaskProgressTest {
 
@@ -97,14 +104,45 @@ class TaskProgressTest {
     assertEquals(0.0, progressOf(0L, 100L)!!, 1e-9)
   }
 
-  // ------------------------------------------------------------ 完成判定（J-01 核心）
+  // ------------------------------------------------------------ 选中文件的已下载字节（选定集合口径）
+
+  @Test
+  fun pickedDoneBytes_parseOnlyTask_isZero() {
+    val r = result(file(0, "payload/a.mp4", 100_000L))
+    assertEquals(0L, pickedDoneBytes(r, emptyList(), download = false, fileProgress = longArrayOf(100_000L)))
+  }
+
+  @Test
+  fun pickedDoneBytes_emptySelection_sumsAllNonPadFiles_cappedPerFile() {
+    val r = result(file(0, "payload/a.mp4", 100_000L), file(1, "payload/b.mp4", 57_900L), file(2, "payload/p", 16_384L, pad = true))
+    // 逐文件按 size 夹取：既排除 pad（index 2 的读数一律不计），也不让「共享分块导致读数 > size」膨胀
+    assertEquals(157_900L, pickedDoneBytes(r, emptyList(), download = true, fileProgress = longArrayOf(100_000L, 60_000L, 16_384L)))
+    assertEquals(100_000L, pickedDoneBytes(r, emptyList(), download = true, fileProgress = longArrayOf(120_000L, 0L, 16_384L)))
+  }
+
+  @Test
+  fun pickedDoneBytes_selectedSubset_countsOnlyThoseFiles() {
+    val r = result(file(0, "payload/a.mp4", 100_000L), file(1, "payload/b.mp4", 57_900L))
+    assertEquals(57_900L, pickedDoneBytes(r, listOf("payload/b.mp4"), download = true, fileProgress = longArrayOf(100_000L, 57_900L)))
+  }
+
+  @Test
+  fun pickedDoneBytes_missingOrShortReadings_areConservativeNotCrash() {
+    val r = result(file(0, "payload/a.mp4", 100_000L), file(1, "payload/b.mp4", 57_900L))
+    assertEquals("读数为 null → 保守 0（宁可晚判完成，不可早判）", 0L, pickedDoneBytes(r, emptyList(), download = true, fileProgress = null))
+    assertEquals("读数数组比文件数短 → 缺的按 0", 100_000L, pickedDoneBytes(r, emptyList(), download = true, fileProgress = longArrayOf(100_000L)))
+    assertEquals("负数读数按 0", 0L, pickedDoneBytes(r, emptyList(), download = true, fileProgress = longArrayOf(-5L, -1L)))
+    assertEquals(0L, pickedDoneBytes(null, emptyList(), download = true, fileProgress = longArrayOf(1L)))
+  }
+
+  // ------------------------------------------------------------ 完成判定（J-01 + 假完成 核心）
 
   @Test
   fun isTaskCompleted_parseOnlyTask_isNeverCompleted() {
     // libtorrent 对「want 0」的种子报 isFinished()=true（vacuous），但这不是完成
     assertFalse(
       "仅解析任务没有选中文件 → 不许判成完成（QA J-01 的根因）",
-      isTaskCompleted(libtorrentFinished = true, download = false, selectedBytes = 0L),
+      isTaskCompleted(libtorrentFinished = true, download = false, selectedBytes = 0L, doneBytes = 0L),
     )
   }
 
@@ -112,14 +150,41 @@ class TaskProgressTest {
   fun isTaskCompleted_downloadTaskWithoutSelection_isNotCompleted() {
     assertFalse(
       "下载型任务但选中字节为 0（优先级全 0）同样不算完成",
-      isTaskCompleted(libtorrentFinished = true, download = true, selectedBytes = 0L),
+      isTaskCompleted(libtorrentFinished = true, download = true, selectedBytes = 0L, doneBytes = 0L),
     )
   }
 
   @Test
   fun isTaskCompleted_realDownload_completes() {
-    assertTrue(isTaskCompleted(libtorrentFinished = true, download = true, selectedBytes = 157_900L))
-    assertFalse("没下完就不算完成", isTaskCompleted(libtorrentFinished = false, download = true, selectedBytes = 157_900L))
+    assertTrue(isTaskCompleted(libtorrentFinished = true, download = true, selectedBytes = 157_900L, doneBytes = 157_900L))
+    assertTrue("共享分块/pad 可能让读数略超 → 仍算完成", isTaskCompleted(libtorrentFinished = true, download = true, selectedBytes = 157_900L, doneBytes = 160_000L))
+    assertFalse("没下完就不算完成", isTaskCompleted(libtorrentFinished = false, download = true, selectedBytes = 157_900L, doneBytes = 157_900L))
+  }
+
+  @Test
+  fun isTaskCompleted_partialDownload_isNotCompleted_theRealMagnetCase() {
+    // RELEASE-TEST-2026-09-15 §6.2 实测原文：
+    //   任务完成：5806ff5dc7f9…（下载 1511277003 字节 / 选中 3591733632 字节）
+    // → 已下载 1.51 GB 远小于选中 3.59 GB，却被判 COMPLETED。
+    assertFalse(
+      "已下载 < 选中 → 绝不许判完成（哪怕 libtorrent 说 finished）",
+      isTaskCompleted(
+        libtorrentFinished = true,
+        download = true,
+        selectedBytes = 3_591_733_632L,
+        doneBytes = 1_511_277_003L,
+      ),
+    )
+  }
+
+  @Test
+  fun isTaskCompleted_previewHoldResetsWanted_isNotCompleted() {
+    // 根因复刻：预览「暂停 / hold 档停止」把**全部文件优先级置 IGNORE**（wanted = 0），
+    // libtorrent 的 finished 变成 vacuous true；此时任务仍在下载态、一个字节都没多下。
+    assertFalse(
+      "预览暂停把 wanted 归零 → libtorrent 虚真 finished，但字节没到 → 不许判完成",
+      isTaskCompleted(libtorrentFinished = true, download = true, selectedBytes = 157_900L, doneBytes = 0L),
+    )
   }
 
   // ------------------------------------------------------------ 「继续」的状态语义

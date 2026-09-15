@@ -1515,6 +1515,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
       var rate = 0
       var peers = 0
       var finished = false
+      var progress: LongArray? = null
       val h = t.handle
       if (h != null && running && isHandleUsable(h)) {
         try {
@@ -1527,7 +1528,8 @@ class BtEngine(private val listener: Listener) : EngineControl {
         }
         try {
           // **已下载字节**（显示口径）= fileProgress 求和；与磁盘占用（配额口径）不可互换
-          downloaded = downloadedBytes(h.fileProgress())
+          progress = h.fileProgress()
+          downloaded = downloadedBytes(progress)
         } catch (e: Throwable) {
           log("任务已下载字节读取异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
         }
@@ -1535,16 +1537,26 @@ class BtEngine(private val listener: Listener) : EngineControl {
       // 百分比的**分母**（选中文件字节；J-01/C-02）：仅解析任务没有任何选中文件 → 0，
       // 于是 progress 不可知、也不会被判完成（见 isTaskCompleted 的注释）
       val selBytes = selectedBytes(t.result, t.selected, t.download)
+      // 完成判定的**分子**（2026-09-15 复审补）：只算「选中集合」里已落盘的字节，与分母同源。
+      // 关键：`finished` 是 libtorrent 的「wanted 集合」口径，预览暂停 / hold 档停止会把文件
+      // 优先级全置 0 → wanted = 0 → `isFinished()` 虚真。必须再要求「选中文件真的都到了」。
+      val doneBytes = pickedDoneBytes(t.result, t.selected, t.download, progress)
       val state =
-        if (isTaskCompleted(finished, t.download, selBytes) && t.state == STATE_DOWNLOADING) STATE_COMPLETED
+        if (isTaskCompleted(finished, t.download, selBytes, doneBytes) && t.state == STATE_DOWNLOADING) STATE_COMPLETED
         else t.state
       if (state != t.state && state == STATE_COMPLETED) {
         synchronized(taskLock) {
           t.state = STATE_COMPLETED
           t.error = ""
         }
-        log("任务完成：${t.infoHash.take(12)}…（下载 $downloaded 字节 / 选中 $selBytes 字节）")
+        log("任务完成：${t.infoHash.take(12)}…（下载 $downloaded 字节 / 选中 $selBytes 字节 / 选中已落 $doneBytes 字节）")
         listener.onTaskStateChanged(t.infoHash, STATE_COMPLETED)
+      } else if (finished && !isTaskCompleted(finished, t.download, selBytes, doneBytes) && t.state == STATE_DOWNLOADING) {
+        // 虚真 finished 的留痕（原来这类情况会直接误判完成，现在只记一行日志）
+        log(
+          "完成判定否决（wanted 虚真？）：${t.infoHash.take(12)}…" +
+            "（libtorrent finished=true / download=${t.download} / 选中 $selBytes / 选中已落 $doneBytes）",
+        )
       }
       out.add(
         TaskSnapshot(
