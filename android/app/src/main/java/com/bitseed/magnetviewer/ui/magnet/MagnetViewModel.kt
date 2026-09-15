@@ -161,6 +161,14 @@ data class MagnetUiState(
   val persistedTaskCount: Int = 0,
   /** 启动恢复的一句话（日志与 UI 共用；恢复路径要看得清）。 */
   val restoreNote: String = "",
+  /**
+   * [restoreNote] 是否只是**信息型**启动提示（A-02）：
+   * true = 只在「还没有任务」时展示（有任务上屏即让位，不再长期驻留状态区）；
+   * false = 告警型（`缓存根不可用` / `引擎恢复未完成（已跳过配额删除）`），无条件常驻。
+   *
+   * 判据实现见 [shouldShowStartupNote]（纯函数，单测 `MagnetStatusLogicTest`）。
+   */
+  val startupInfoOnly: Boolean = false,
   /** 当前展示的任务在磁盘清单里的状态（PAUSED / DOWNLOADING / FAILED …）。 */
   val taskState: String = "",
   /** 最近一次落盘的结果文案（证明清单真的写到磁盘了）。 */
@@ -556,7 +564,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       if (root == null) {
         // 缓存根都不可用：磁盘上没有任务也没有可由配额管理的目录 → 恢复视为「已完成」
         restoreDone = true
-        _state.update { it.copy(restoreNote = "启动恢复跳过：缓存根不可用") }
+        // A-02：告警型 → 无条件常驻（解释「为什么这一会话什么都不做」）
+        _state.update { it.copy(restoreNote = "启动恢复跳过：缓存根不可用", startupInfoOnly = false) }
         return@launch
       }
       val loaded = withContext(Dispatchers.IO) { loadTasks(root) { w -> log("清单读取告警：" + w) } }
@@ -565,7 +574,14 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       log("启动：读 .tasks.json → ${loaded.size} 个任务（${root.path}）；fastresume 命中 ${present.size}/${loaded.size}")
       if (loaded.isEmpty()) {
         restoreDone = true // 磁盘上没有任务：此刻「保护名单为空」是真值（没有要保护的东西）
-        _state.update { it.copy(persistedTaskCount = 0, restoreNote = "启动：磁盘上没有任务清单（首次启动）") }
+        // A-02：信息型 → 只在空态展示（解析成功有任务后自动让位，不再长期驻留状态区）
+        _state.update {
+          it.copy(
+            persistedTaskCount = 0,
+            restoreNote = "启动：磁盘上没有任务清单（首次启动）",
+            startupInfoOnly = true,
+          )
+        }
         return@launch
       }
       val first = loaded.values.first()
@@ -574,6 +590,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
         it.copy(
           persistedTaskCount = loaded.size,
           restoreNote = "启动：读到 ${loaded.size} 个任务，fastresume 命中 ${present.size}（清单来自磁盘）",
+          startupInfoOnly = true, // A-02：信息型
         )
       }
       // 引擎侧重建（native）：失败只记日志，清单已经在屏上
@@ -589,7 +606,13 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
         // 引擎侧没恢复起来：**故意不置 restoreDone** —— 名单不可信，这一会话里任何
         // 自动配额都不删东西（宁可留着占空间，也不删活跃数据）
         restoreDone = false
-        _state.update { it.copy(restoreNote = it.restoreNote + " · 引擎恢复未完成（已跳过配额删除，详见日志）") }
+        // A-02：这条尾缀是**告警**（解释了为什么不清理）→ 整条转为常驻
+        _state.update {
+          it.copy(
+            restoreNote = it.restoreNote + " · 引擎恢复未完成（已跳过配额删除，详见日志）",
+            startupInfoOnly = false,
+          )
+        }
         return@launch
       }
       restoreDone = true
@@ -620,6 +643,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
         it.copy(
           busy = false,
           restoreNote = compactRestoreNote(report),
+          startupInfoOnly = true, // A-02：信息型（恢复了几个任务）
           taskState = shown?.state ?: it.taskState,
           persistedTaskCount = tasks.size,
         )

@@ -258,16 +258,20 @@ internal fun MagnetContent(
         }
       }
       // ---- 状态主行（15sp；工程类一句人话收「详情」）----
-      if (state.statusText.isNotEmpty() || state.restoreNote.isNotEmpty() || state.persistNote.isNotEmpty()) {
+      // A-02：信息型启动提示只在空态展示（有任务上屏即让位）；告警型无条件常驻。
+      val startupNote =
+        if (shouldShowStartupNote(state.startupInfoOnly, state.taskRows.size)) state.restoreNote else ""
+      if (state.statusText.isNotEmpty() || startupNote.isNotEmpty() || state.persistNote.isNotEmpty()) {
         item(key = "status") {
           Column(modifier = Modifier.fillMaxWidth()) {
             if (state.statusText.isNotEmpty()) {
               Text(state.statusText, fontSize = 15.sp, color = pal.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             // 工程信息只有一行 12sp dim（不堆）
-            if (state.restoreNote.isNotEmpty() || state.persistNote.isNotEmpty()) {
+            val engNote = startupNote.ifEmpty { state.persistNote }
+            if (engNote.isNotEmpty()) {
               Text(
-                state.restoreNote.ifEmpty { state.persistNote },
+                engNote,
                 fontSize = 12.sp,
                 color = pal.textDim,
                 maxLines = 2,
