@@ -131,16 +131,21 @@ fun GalleryScreen(
     Row(verticalAlignment = Alignment.CenterVertically) {
       Column(modifier = Modifier.weight(1f)) {
         Text("图片画廊", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
-        Spacer(Modifier.height(2.dp))
-        Text(
-          "共 ${items.size} 张图片 · " +
-            if (position < 0) "点缩略图看大图（翻到未下载的图片会自动按需下载）"
-            else "大图查看（可缩放 / 上一张 / 下一张）",
-          fontSize = 12.sp,
-          color = pal.textMuted,
-          maxLines = 2,
-          overflow = TextOverflow.Ellipsis,
-        )
+        // E-01（说明只留一条）：VM 的 [state.note] 已经带「共 N 张图片 · 点缩略图看大图…」，
+        // 它非空时这行就**让位**（否则同屏出现两条几乎一样的说明，就是 QA E-01 的原现象）；
+        // note 为空（还没建立状态）时才用本地这句兜底。
+        if (state.note.isEmpty()) {
+          Spacer(Modifier.height(2.dp))
+          Text(
+            "共 ${items.size} 张图片 · " +
+              if (position < 0) "点缩略图看大图（翻到未下载的图片会自动按需下载）"
+              else "大图查看（可缩放 / 上一张 / 下一张）",
+            fontSize = 12.sp,
+            color = pal.textMuted,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
       }
       TextButton(onClick = onClose) { Text("返回文件清单", fontSize = 13.sp, color = pal.accent) }
     }
