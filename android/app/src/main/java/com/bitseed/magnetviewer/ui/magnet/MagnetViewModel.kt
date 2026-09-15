@@ -835,7 +835,7 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
     val downloading = focusSnap != null && (focusSnap.state == STATE_DOWNLOADING || focusSnap.state == STATE_META_FETCH)
     val stallNote =
       if (focusSnap == null) stallWatch.sample(active = false, downloadedBytes = 0L, peers = 0)
-      else stallWatch.sample(downloading, focusSnap.downloadedBytes, focusSnap.peers)
+      else stallWatch.sample(downloading, focusSnap.downloadedBytes, focusSnap.peers, focusSnap.infoHash)
     if (stallNote != _state.value.stallNote) {
       // 变化时留痕（排查「下载卡住」时先看这条；恢复增长也会打一条 note=null）
       log("下载停滞提示：" + (stallNote ?: "已恢复（字节继续增长）"))
@@ -1047,6 +1047,8 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
           previewTitle = "",
           streamUrl = "",
           previewNote = "",
+          // N-1（设备实测）：任务都移除了，「预览失败 / 重试」不能残留到空态（那时点「重试」无目标）
+          previewFailed = false,
           statusText =
             if (deleteData) "已移除任务并删除数据目录" else "已移除任务（数据保留${if (dir != null) "：" + dir.path else ""}）",
           persistedTaskCount = tasks.size,

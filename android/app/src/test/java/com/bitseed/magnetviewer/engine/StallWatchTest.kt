@@ -85,4 +85,50 @@ class StallWatchTest {
     val note = w.sample(active = true, downloadedBytes = 0L, peers = 0)!!
     assertTrue("文案要口语化且不带工程术语：$note", note.startsWith("已 ") && note.contains("无数据增长"))
   }
+
+  // ---------------------------------------------------------------- 设备实测新增（N-2）
+
+  /**
+   * **N-2 回归**：停滐计时必须跟着「看的是哪个任务」走。
+   *
+   * 设备实测（`.hermes/android-qa/DEVICE-VERIFY-2026-09-15.md` §5，2026-09-15）：
+   * 移除旧任务、**重新解析一个新任务**之后，新任务刚 `added`（state=META_FETCH、0 字节）
+   * 状态区就已经写着 `已 155 秒无数据增长（peer 0）…` —— 计时是从**上一个任务**最后一次字节增长算起的，
+   * 对新任务完全是错误信息（用户会以为新任务也挂了 155 秒）。
+   *
+   * 判据：**采样对象（infoHash）一变，计时立刻复位**，新对象从 0 起表。
+   */
+  @Test
+  fun subjectChange_resetsTheTimer_forTheNewTask() {
+    val w = watch(thresholdSeconds = 20)
+    // 旧任务：连续 25 秒零增长（peer 0）→ 报「已 25 秒」
+    w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "aaa")
+    advance(25)
+    val old = w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "aaa")
+    assertTrue("旧任务该报停滞：$old", old != null && old.contains("25 秒"))
+
+    // 换成新任务（同一时钟、字节同样为 0）：不得沿用旧起点
+    assertNull(
+      "换了采样对象必须立刻复位计时（否则新任务一上来就显示「已 155 秒」）",
+      w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "bbb"),
+    )
+    advance(19)
+    assertNull("新任务自己还差 1 秒到阈值", w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "bbb"))
+    advance(1)
+    val fresh = w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "bbb")
+    assertTrue("新任务按自己的起点计时满 20 秒才提示：$fresh", fresh != null && fresh.contains("20 秒"))
+  }
+
+  @Test
+  fun sameSubject_keepsCountingAcrossSamples() {
+    val w = watch(thresholdSeconds = 20)
+    w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "aaa")
+    advance(12)
+    assertNull(w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "aaa"))
+    advance(8)
+    assertTrue(
+      "同一对象不因多次采样而重置（累计 20 秒）",
+      w.sample(active = true, downloadedBytes = 0L, peers = 0, subject = "aaa") != null,
+    )
+  }
 }
