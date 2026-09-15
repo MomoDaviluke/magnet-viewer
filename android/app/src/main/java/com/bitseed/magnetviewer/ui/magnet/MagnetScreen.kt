@@ -19,10 +19,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -38,6 +40,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -201,6 +204,21 @@ internal fun MagnetContent(
   val shapes = LocalShapes.current
   val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
   var pendingDelete by remember { mutableStateOf<Pair<String, String>?>(null) } // (infoHash, name)
+  val listState = rememberLazyListState()
+
+  // D-02（设备实测 2026-09-15）：播放卡是页面的第 6 块内容，竖屏下它的控件行（暂停/停止预览）
+  // 会落在首屏之外（实测 y≈2309-2358，屏高 2400），**必须先滚动才能操作**。
+  // 光收视频高度不够（只上移 84px，仍被手势条压住），所以这里补「打开预览即把播放卡滚进视野」：
+  // 播放卡之后只有文件行，故它的索引 = 总 item 数 − 1 − 文件行数（各类 `item(key=…)` 各占 1 项）。
+  LaunchedEffect(state.previewIndex) {
+    if (state.previewIndex < 0) return@LaunchedEffect
+    withFrameNanos { } // 等一帧，让 layoutInfo 拿到本次组成的 item 总数
+    val total = listState.layoutInfo.totalItemsCount
+    if (total > 0) {
+      val previewItem = (total - 1 - state.files.size).coerceAtLeast(0)
+      listState.animateScrollToItem(previewItem)
+    }
+  }
 
   // B-03：重复解析去重提示 → Snackbar（并聚焦到既有任务）
   val snackbarHostState = remember { SnackbarHostState() }
@@ -212,7 +230,16 @@ internal fun MagnetContent(
 
   Box(modifier = modifier.fillMaxSize()) {
     LazyColumn(
-      modifier = Modifier.fillMaxSize().background(if (landscape) pal.bg else pal.surfaceSunken).padding(16.dp),
+      // D-02（设备实测 2026-09-15）：targetSdk 36 默认 edge-to-edge，而这里只写了 16dp padding
+      // → 列表底部**伸到导航条/手势条下面**，播放卡的「暂停 / 停止预览」正好落在那一带
+      // （实测 y≈2309-2358，屏高 2400），点不到、必须滚动。加 [navigationBarsPadding] 把可用区
+      // 收回到系统栏之上，内容才能**完整**滚进视野（QA 建议的「底部留白」）。
+      state = listState,
+      modifier =
+        Modifier.fillMaxSize()
+          .background(if (landscape) pal.bg else pal.surfaceSunken)
+          .navigationBarsPadding()
+          .padding(16.dp),
       verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
     ) {
       // ---- 头部（L-01 横屏收起副标题，状态区改两行）----
@@ -476,6 +503,8 @@ private fun PreviewPane(
     Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
     Spacer(Modifier.height(8.dp))
     Box(
+      // 视频区保持 200dp（D-02 不改视觉尺寸：可达性由「打开预览自动滚到播放卡」解决，
+      // 见本文件 MagnetScreen 里的 LaunchedEffect(state.previewIndex)）。
       modifier = Modifier.fillMaxWidth().height(200.dp).clip(shapes.shapeCard).background(Color.Black),
       contentAlignment = Alignment.Center,
     ) {
