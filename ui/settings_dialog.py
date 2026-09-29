@@ -278,6 +278,34 @@ class SettingsDialog(QDialog):
         self.timeout.setValue(int(self.cfg.get("metadata_timeout")))
         self.timeout.setSuffix(" 秒")
         _add_row(grid, 6, "磁力链元数据超时", self.timeout)
+
+        # 入站能力（诊断 D-2026-09-18：下载慢 + 做种报错）
+        self.port_mapping = QCheckBox(
+            "启用端口映射（UPnP/NAT-PMP，做种与入站连接必需）")
+        self.port_mapping.setChecked(bool(self.cfg.get("port_mapping")))
+        self.port_mapping.setToolTip(
+            "不开启时：① 连不上同为 NAT 后的 peer，可连 peer 会越来越少；\n"
+            "② 做种时无人能连入，客户端会报「做种失败 / 无连接」。\n"
+            "保存设置后立即生效，无需重启。")
+        _add_span(grid, 7, self.port_mapping)
+
+        self.listen_edit = QLineEdit(str(self.cfg.get("listen_interface")))
+        self.listen_edit.setPlaceholderText("留空 = 自动（0.0.0.0 全网卡）")
+        self.listen_edit.setToolTip(
+            "多网卡 / VPN 环境可显式填写出口网卡 IP（例如 192.168.1.10），\n"
+            "避免 libtorrent 从 VPN 或虚拟网卡绕行出境。\n"
+            "该值在会话启动时固定，修改后需重启程序生效。")
+        _add_row(grid, 8, "出口网卡 IP", self.listen_edit)
+
+        self.extra_trackers = QCheckBox(
+            "无 tracker 的磁力链追加 HTTP/HTTPS 兜底 tracker")
+        self.extra_trackers.setChecked(bool(self.cfg.get("extra_trackers")))
+        self.extra_trackers.setToolTip(
+            "磁力链不带 tr= 参数时，peer 发现只能靠 DHT（UDP）。\n"
+            "若网络对 UDP 有限制（DHT 节点连不上、长时间 0 速度），\n"
+            "勾选可额外走 TCP 80/443 的 tracker 作为第二条通道。\n"
+            "下次添加任务时生效。")
+        _add_span(grid, 9, self.extra_trackers)
         box.setLayout(grid)
         return box
 
@@ -445,12 +473,16 @@ class SettingsDialog(QDialog):
             return
         if self._on_clear_cache is not None:
             self._on_clear_cache()   # 停预览等准备工作（针对当前会话目录）
+        # plan/11 R-7：传**回调本身**而不是先取快照——清理期间活任务可能
+        # 新增/转正，cache_guard 会在每删一个顶层条目前重取名单逐条复核。
+        # 名单源自身失败时的兜底语义由名单源决定（main 的 _live_cache_dirs
+        # 是 fail-open 空集，见 D0/旁路纪律注释）。
+        keep = self._keep_dirs_get if self._keep_dirs_get is not None else ()
         try:
-            keep = set(self._keep_dirs_get() or ()) if (
-                self._keep_dirs_get is not None) else set()
-        except Exception:
-            keep = set()             # 名单故障退回基线，绝不阻断清理
-        removed = clear_cache_contents(target, keep_dirs=keep)
+            removed = clear_cache_contents(target, keep_dirs=keep)
+        except Exception as e:
+            QMessageBox.warning(self, "清理失败", f"清理缓存时出错：{e}")
+            return
         os.makedirs(target, exist_ok=True)
         QMessageBox.information(self, "清理完成",
                                 f"缓存已清理{'（' + str(removed) + ' 项）' if removed else ''}")
@@ -480,6 +512,9 @@ class SettingsDialog(QDialog):
         self.cfg.set("proxy_pass", self.proxy_pass.text())
         self.cfg.set("proxy_peer", self.proxy_peer.isChecked())
         self.cfg.set("metadata_timeout", self.timeout.value())
+        self.cfg.set("port_mapping", self.port_mapping.isChecked())
+        self.cfg.set("listen_interface", self.listen_edit.text().strip())
+        self.cfg.set("extra_trackers", self.extra_trackers.isChecked())
         self.cfg.set("cache_dir", cache_path)
         self.cfg.set("clear_cache_on_exit", self.clear_on_exit.isChecked())
         self.cfg.set("default_concurrency", self.concurrency.value())

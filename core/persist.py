@@ -20,6 +20,7 @@ from typing import Any, Callable
 import libtorrent as lt
 
 from .logutil import log_exception, log_warning
+from .metacache import load_torrent_info, params_from_ti
 from .models import safe_rel_path
 from .parser import is_torrent_path
 from .resume import resume_path, write_resume
@@ -160,10 +161,43 @@ class TaskPersistence:
     # ---------- 任务清单 ----------
 
     def persist_tasks(self) -> None:
-        """原子写 .tasks.json（失败仅告警，不阻断任务操作）。"""
+        """原子写 .tasks.json（失败仅告警，不阻断任务操作）。
+
+        **编号：plan/11 R-2（数据不一致）——必须传快照，不能传真字典引用。**
+
+        历史缺陷：``d.tasks_get()`` 返回的是活字典（``SessionManager._tasks``
+        本身），直接交给 ``save_tasks`` 序列化时，若另一线程正好插入/删除键，
+        ``json.dumps`` 迭代会抛 ``RuntimeError: dictionary changed size during
+        iteration``——而本方法的 ``except`` 把它吞成一行告警 ⇒ **该次落盘静默
+        丢失**（用户看到的是「任务列表时对时不对」）。即便不抛，取到的也可能是
+        撕裂组合（``state`` 与 ``error`` 不是同一次写入的状态）。
+        与 ``drain_resume_alerts`` 的锁内 ``dict()`` 快照同款。
+
+        浅拷贝**为什么够**（2026-09-17 复审修正：初版理由写的是「任务值只在
+        ``upsert_task`` 里整体替换、不原地改」——**那是错的**。生产代码里存在
+        多处原地改任务字典：``core/taskops.py:365,384-385,409-410``、
+        ``core/resolver.py:326-327,374-375,394-403``、``core/session.py:576-577,
+        647-648``）。
+
+        真正的依据是**这些原地更新全部在同一把 ``reg.lock`` 内完成**，而本方法
+        的快照拷贝也在同一把锁内 ⇒ 二者互斥，浅拷贝即得到一致视图。
+        唯一需要额外确认的是嵌套容器：``files`` / ``selected`` 列表全仓只在构造
+        时整体替换、**无原地 append**（``core/resolver.py:397-398``；
+        ``taskstore._dump_task`` 也是构建新列表），故不必深拷贝。
+
+        ⇒ **前提条件**：若将来新增「不持 ``reg.lock`` 原地改任务值」的路径，
+        本方法的保证随之失效（届时要么把新路径纳入锁内，要么改深拷贝）。
+
+        锁序（重要）：本方法只取 ``d.lock``（= ``registry.lock``，**不可重入**），
+        且持锁时间只覆盖快照拷贝；``save_tasks`` 的 ``fsync`` 在锁外。
+        **调用方不得持锁调用本方法**——否则自锁死。见 `core/session.py::shutdown`
+        与 plan/11 R-6b。
+        """
         d = self.deps
         try:
-            save_tasks(d.cache_dir, d.tasks_get())
+            with d.lock:
+                snap = {k: dict(v) for k, v in d.tasks_get().items()}
+            save_tasks(d.cache_dir, snap)
         except Exception as e:
             log_warning("fetcher.persist_tasks", f"{e}")
 
@@ -177,12 +211,21 @@ class TaskPersistence:
         return read_resume(self.deps.cache_dir, ih)
 
     def request_resume(self, rec) -> None:
-        """请求写 fastresume（异步：save_resume_data_alert 落盘）。"""
+        """请求写 fastresume（异步：save_resume_data_alert 落盘）。
+
+        性能专项 P-1b：标志位加 ``save_info_dict``。旧实现只带
+        ``flush_disk_cache``，落盘的 resume data **不含 info 段** —— 重启恢复
+        时 ``lt.read_resume_data`` 拿不到 torrent_info，任务被迫退回
+        META_FETCH 重新向网络索取一次元数据（冷门资源 = 数十秒到超时）。
+        带上 info 段后恢复即可直接进入 DOWNLOADING。
+        """
         if rec is None or rec.handle is None or not rec.download \
                 or rec.result is None:
             return
         try:
-            rec.handle.save_resume_data(lt.save_resume_flags_t.flush_disk_cache)
+            rec.handle.save_resume_data(
+                lt.save_resume_flags_t.flush_disk_cache
+                | lt.save_resume_flags_t.save_info_dict)
         except Exception as e:
             log_warning("fetcher.request_resume", f"{e}")
 
@@ -241,9 +284,12 @@ class TaskPersistence:
                     except Exception:
                         pass
             time.sleep(0.2)   # 等待 flush 完成/告警到达后重试
-        # 超时兜底：只告警，绝不阻断退出（下次启动按损坏/缺失重建）
-        pending = [k[:12] for k in pending_resume_keys(
-            d.cache_dir, d.torrents_get())]
+        # 超时兜底：只告警，绝不阻断退出（下次启动按损坏/缺失重建）。
+        # 审计 2026-09-29（P3）：锁外迭代活 torrents 字典破坏了本模块自己定的
+        # 「锁内取快照」纪律（273 行同款先例）——先取快照再迭代。
+        with d.lock:
+            torrents_snapshot = dict(d.torrents_get())
+        pending = [k[:12] for k in pending_resume_keys(d.cache_dir, torrents_snapshot)]
         if pending:
             log_warning("fetcher.drain_resume.timeout",
                         f"fastresume 未在 {timeout}s 内全部落盘：{pending}")
@@ -279,6 +325,7 @@ class TaskPersistence:
         t["save_path"] = save_path
         source = t.get("source") or ""
         rd = self.read_resume(ih)
+        has_rd = rd is not None          # 续传数据是否存在（下面 rd 会被转成 atp）
         if rd is not None:
             # B3 语义：fastresume 损坏（bencode 解析失败/结构非法）静默降级
             # 为全新加入（丢弃 resume data 从头校验），绝不阻断启动、不误判
@@ -295,7 +342,13 @@ class TaskPersistence:
                 if rd:
                     atp = rd                       # 官方装载：含 info-hash + pieces
                     atp.save_path = save_path
-                    atp.url = source
+                    # 性能专项 P-1b 连带修复：续传数据自带 info 段时**不再回灌
+                    # 磁力链 url**。磁力链的 btih 只有 v1，混合 v1+v2 种子的
+                    # ti 带两个 info-hash，libtorrent 解析 url 后判定不等即抛
+                    # ``mismatching info-hash``（2.1.1 实测）——带上 info 段后
+                    # 这条分支才第一次被走到，等于把旧隐患暴露了出来。
+                    if getattr(atp, "ti", None) is None:
+                        atp.url = source
                 else:
                     atp = p
                     atp.save_path = save_path
@@ -317,6 +370,19 @@ class TaskPersistence:
             t["error"] = f"重启恢复失败：{e}"
             self.persist_tasks()
             return False
+        # 性能专项 P-1c：resume data 里没有 info 段（升级前写的老文件）或
+        # 根本没有 fastresume 时，回退查元数据缓存 —— 命中即免掉一次
+        # 「重启 = 全体任务重新索取元数据」的雪崩。
+        #
+        # **只在没有续传数据可丢时才整体换成 ti 构造的 params**：续传数据里的
+        # 分块位图必须保住（否则要重做一遍文件校验），而混合 v1+v2 种子的续传
+        # 数据钉着两个 info-hash，往里塞只带 v1 的 ti 会撞
+        # ``mismatching info-hash``（本环境 2.1.1 实测）。那条路维持基线——
+        # 且 save_info_dict 生效后续传数据本就自带 info 段，不再需要兜底。
+        if getattr(atp, "ti", None) is None and not has_rd:
+            ti = load_torrent_info(self.deps.cache_dir, ih)
+            if ti is not None:
+                atp = params_from_ti(ti, save_path)
         ses = d.ses_get()
         try:
             handle = ses.add_torrent(atp)

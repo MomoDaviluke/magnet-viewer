@@ -204,10 +204,16 @@ def section_piece_map(ck):
                  "PieceMap 透传 f1 的 offset/分块区间/大小")
         ck.check(bool(pm.have(2)) is True and bool(pm.have(1)) is False,
                  "have 回调 = 句柄 have_piece（已下 piece2 可读）")
-        # P2-1：have 判定走一次性位图快照——查询不得触发 have_piece 绑定调用
-        ck.check(h.have_calls == 0 and h.status_calls >= 1,
-                 f"P2-1 位图路径：have_piece {h.have_calls} 次（应 0）、"
-                 f"status {h.status_calls} 次（快照一次）")
+        # plan/09 口径变化（原 P2-1）：piece_map_for_path **不再物化位图**，
+        # 改为挂一个惰性增量视图（PieceMap.view）→ 流服务的区间判定走快路径，
+        # 成本与种子规模无关。因此 status() 调用应为 0，have_piece 只在
+        # 真正被问到该块时才发生（上面 have(2)/have(1) 已产生 2 次）。
+        ck.check(h.status_calls == 0,
+                 f"不再物化位图：status() 调用 {h.status_calls} 次（判据 0）")
+        ck.check(h.have_calls == 2,
+                 f"have 回调按需绑定：{h.have_calls} 次（= 上面两次 have 查询）")
+        ck.check(getattr(pm, "view", None) is not None,
+                 "PieceMap 挂上增量视图（流服务据此走规模无关快路径）")
         ck.check(bool(pm.have(9999)) is False and bool(pm.have(-5)) is False,
                  "位图越界索引 → False（不可判定按不可用，绝不误判可读）")
         ck.check(pv.piece_map_for_path(os.path.join(cache, "x")) is None,

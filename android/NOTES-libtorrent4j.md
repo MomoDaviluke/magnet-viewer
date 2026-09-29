@@ -683,6 +683,56 @@ LibreTorrent 的代理映射原文（`core/model/session/TorrentSessionImpl.java
    - UPnP/NAT-PMP/alert_mask/代理 没有专用 setter，用 `setBoolean/setInteger/setString(settings_pack.*.swigValue(), v)`；
    - 加急优先级在 libtorrent4j 里是 `Priority.TOP_PRIORITY`（7），不是 4（4 = DEFAULT）。
 
+## 8. 性能专项新增核对（2026-09-16，`javap` 直读 2.1.0-39 jar）
+
+移植桌面版「元数据缓存 / 吞吐调参」时新查证的符号，以及**查证为「不存在」**的项。
+
+### 8.1 元数据缓存可用（`data/MetaCache.kt` + `BtEngine`）
+
+| 用途 | 真实符号 | 备注 |
+|---|---|---|
+| 取 info 段原始字节 | `torrent_info.get_info_section()` → `org.libtorrent4j.swig.byte_span` | **已是编码好的 bencode**，可直接塞进 `.torrent` 的 `info` 位置（不能当普通 bytes 再编码一次，否则 libtorrent 报 `missing or invalid 'info' section`） |
+| 读 `byte_span` | `size()` / `at(long)` / `first(long)` / `last(long)` / `subspan(...)` | **没有 `data()`** → 只能逐字节读（单次元数据到达才调一次，可忽略） |
+| 字节 → 元数据 | `static TorrentInfo TorrentInfo.bdecode(byte[])` | 反解失败抛异常；损坏条目要在调用方删除（自愈） |
+| 注入 | `AddTorrentParams.setTorrentInfo(TorrentInfo)` + `setInfoHashes(InfoHash)` | **必须一起设**：混合 v1+v2 种子 ti 带两个 info-hash，只设 ti 会撞 `mismatching info-hash`（桌面 Python 绑定 2.1.1 实测同坑） |
+| 其它 | `AddTorrentParams()` 无参构造存在；`static byte[] AddTorrentParams.writeResumeDataBuf(atp)` / `Entry writeResumeData(atp)` | 无参构造让「只带 ti 的全新 params」可行 |
+
+### 8.2 查证为「不存在」的符号（不要再找，换个做法）
+
+- **`session.load_state` 未绑定**：`org.libtorrent4j.swig.session` 里没有 `load_state`，
+  `SessionManager` 只有 `byte[] saveState()`，也没有 `session_state_flags_t`。
+  → **桌面版 P-4（DHT 路由表持久化）在安卓端不可移植**：存得下、读不回，等于没做。
+  等 libtorrent4j 后续版本补绑定再接。
+- **`settings_pack.int_types` 里没有 `cache_size`**：`SettingsPack` 也无 `cacheSize()`。
+  → 桌面的磁盘写缓存调参（4096 ≈ 64MB）安卓端缺席，靠 `file_pool_size` + `aio_threads`
+  默认值兜底（`EngineTuning` 的文档注释已记录这处平台差异）。
+- `TorrentInfo.trackers()` / `announce()` 都没有 → 元数据缓存**不带 tracker**
+  （inject 时 atp 的 tracker 本就已设好，写进 .torrent 也不会被多读一次）。
+- **更正（2026-09-18，javap 实证）**：`torrent_handle` 的 tracker 相关方法**是绑定的**，
+  此前笔记漏记。可用清单：
+  ```
+  public java.util.List<AnnounceEntry> trackers();
+  public void addTracker(AnnounceEntry);
+  public void replaceTrackers(java.util.List<AnnounceEntry>);
+  public void scrapeTracker();
+  public AnnounceEntry(java.lang.String);
+  ```
+  → 所以「给**已在跑**的任务追加兜底 tracker」是做得到的（`TrackerPush.kt` 走的就是
+  `trackers()` 去重 + `addTracker` 追加）。**注意别用 `replaceTrackers`**：它整体替换，
+  会把磁力链自带的 `tr=` 一起抹掉，属于净损失；只做加法才不会误伤用户原有 tracker。
+  （`TorrentInfo.trackers()` 仍然没有 —— 上面那条「元数据缓存不带 tracker」依旧成立，
+  两者是不同类的方法，别混淆。）
+
+### 8.3 可用（已用于 `EngineTuning`）
+
+`settings_pack.int_types`：`connection_speed` / `unchoke_slots_limit` /
+`num_optimistic_unchoke_slots` / `file_pool_size` / `tick_interval` /
+`auto_manage_interval` / `max_peerlist_size` / `connections_limit`（最后一项另有专用
+setter `SettingsPack.connectionsLimit()`，故走专用 setter）；
+`settings_pack.bool_types`：`prioritize_partial_pieces` / `dht_aggressive_lookups`。
+
+---
+
 ## 附：本报告的 5 问查证计数
 
 - **5 个问题均已给出带【文件路径 + 原始片段/数值 + 来源链接】的结论：已查证 5 / 未查证 0。**

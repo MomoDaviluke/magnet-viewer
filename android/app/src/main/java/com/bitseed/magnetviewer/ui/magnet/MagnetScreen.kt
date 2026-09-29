@@ -49,7 +49,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,7 +62,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.bitseed.magnetviewer.core.PREVIEW_CACHE_HOLD
 import com.bitseed.magnetviewer.theme.LocalPal
@@ -75,9 +76,26 @@ import com.bitseed.magnetviewer.ui.components.TaskCard
 import com.bitseed.magnetviewer.ui.components.TaskCardLogic
 import com.bitseed.magnetviewer.ui.gallery.GalleryScreen
 import com.bitseed.magnetviewer.ui.settings.SettingsScreen
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.res.stringResource
+import com.bitseed.magnetviewer.R
 
 /** 拖动条的可访问名（uiautomator 也能按它拿到坐标）。 */
 private const val SEEK_SLIDER_DESC = "预览跳转条"
+
+/**
+ * 空态「示例磁力链」的演示输入（审计 2026-09-29：EmptyState 原先没接线，按钮点击无反应）。
+ * 取 Ubuntu 24.04.4 官方发布种子（releases.ubuntu.com 的 .torrent 直接算 info-hash），
+ * 公网长期有官方/社区做种，解析成功率高。
+ */
+private const val SAMPLE_MAGNET =
+  "magnet:?xt=urn:btih:01c137287d6f0ed05a56742dae794f632c79ff3d" +
+    "&dn=ubuntu-24.04.4-desktop-amd64.iso"
 
 /**
  * 主界面：磁力链输入 → 文件清单（过滤 .pad）→ 点视频边下边播（本地流 + Media3）。
@@ -239,26 +257,28 @@ internal fun MagnetContent(
         Modifier.fillMaxSize()
           .background(if (landscape) pal.bg else pal.surfaceSunken)
           .navigationBarsPadding()
-          .padding(16.dp),
+          .padding(18.dp),
       verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
     ) {
       // ---- 头部（L-01 横屏收起副标题，状态区改两行）----
       item(key = "header") {
         Row(verticalAlignment = Alignment.CenterVertically) {
           Column(modifier = Modifier.weight(1f)) {
-            Text("磁力链预览器", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
+            Text(stringResource(R.string.app_title), style = MaterialTheme.typography.titleMedium, color = pal.text)
             if (!landscape) {
               Spacer(Modifier.height(2.dp))
               Text(
                 "DHT 取元数据 · 不下载本体 · 缓存模式 ${state.cacheMode}",
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelMedium,
                 color = pal.textMuted,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
               )
             }
           }
-          TextButton(onClick = onOpenSettings) { Text("设置", fontSize = 13.sp, color = pal.accent) }
+          TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = onOpenSettings) { Text(stringResource(R.string.settings), style = MaterialTheme.typography.bodySmall, color = pal.accent) }
         }
       }
       // ---- 输入行（B-02 错误就地：输入框下方）----
@@ -270,18 +290,23 @@ internal fun MagnetContent(
             modifier = Modifier.weight(1f),
             singleLine = true,
             enabled = !state.busy,
-            textStyle = TextStyle(fontSize = 14.sp, color = pal.text),
-            placeholder = { Text("粘贴磁力链接 magnet:?xt=urn:btih:…", fontSize = 13.sp, color = pal.textDim) },
+            // 审计 2026-09-29（§4.5）：磁力链是 URI——键盘给 Uri 布局、回车键
+            // 直接触发解析；错误态标红输入框（原先只有框下红字，框本身无反馈）。
+            isError = state.errorText != null,
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = pal.text),
+            placeholder = { Text(stringResource(R.string.input_placeholder), style = MaterialTheme.typography.bodySmall, color = pal.textDim) },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onResolve() }),
           )
           Spacer(Modifier.width(8.dp))
           Button(onClick = onResolve, enabled = !state.busy, shape = shapes.shapeButton) {
-            Text(if (state.busy) "解析中…" else "解析", fontSize = 14.sp)
+            Text(if (state.busy) stringResource(R.string.resolving) else stringResource(R.string.resolve), style = MaterialTheme.typography.bodyLarge)
           }
         }
         // B-02：解析错误就地（输入框下方紧贴）
         state.errorText?.let {
           Spacer(Modifier.height(4.dp))
-          Text(it, fontSize = 12.sp, color = pal.danger, maxLines = 2, overflow = TextOverflow.Ellipsis)
+          Text(it, style = MaterialTheme.typography.labelMedium, color = pal.danger, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
       }
       // ---- 状态主行（15sp；工程类一句人话收「详情」）----
@@ -292,14 +317,14 @@ internal fun MagnetContent(
         item(key = "status") {
           Column(modifier = Modifier.fillMaxWidth()) {
             if (state.statusText.isNotEmpty()) {
-              Text(state.statusText, fontSize = 15.sp, color = pal.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+              Text(state.statusText, style = MaterialTheme.typography.bodyLarge, color = pal.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             // 工程信息只有一行 12sp dim（不堆）
             val engNote = startupNote.ifEmpty { state.persistNote }
             if (engNote.isNotEmpty()) {
               Text(
                 engNote,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelMedium,
                 color = pal.textDim,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -316,9 +341,9 @@ internal fun MagnetContent(
       if (state.previewFailed) {
         item(key = "preview-failed") {
           Column(modifier = Modifier.fillMaxWidth().clip(shapes.shapeCard).background(pal.dangerSoft).padding(12.dp)) {
-            Text(state.previewNote.ifEmpty { "预览失败" }, fontSize = 13.sp, color = pal.danger)
-            Spacer(Modifier.height(6.dp))
-            Button(onClick = onRetryPreview, shape = shapes.shapeButton) { Text("重试", fontSize = 13.sp) }
+            Text(state.previewNote.ifEmpty { "预览失败" }, style = MaterialTheme.typography.bodySmall, color = pal.danger)
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = onRetryPreview, shape = shapes.shapeButton) { Text(stringResource(R.string.retry), style = MaterialTheme.typography.bodySmall) }
           }
         }
       }
@@ -338,7 +363,11 @@ internal fun MagnetContent(
           )
         }
       } else if (!state.busy) {
-        item(key = "empty") { EmptyState() }
+        item(key = "empty") {
+          // 审计 2026-09-29（P1）：原先是 EmptyState()——onSample 落默认空 lambda，
+          // 「示例磁力链」按钮点击无任何反应。现在填入示例并直接触发解析。
+          EmptyState(onSample = { onInput(SAMPLE_MAGNET); onResolve() })
+        }
       }
       // ---- 焦点任务信息 / 播放卡 / 文件行 ----
       if (state.torrentName.isNotEmpty()) {
@@ -348,20 +377,19 @@ internal fun MagnetContent(
               Text(
                 state.torrentName,
                 modifier = Modifier.weight(1f),
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
                 color = pal.text,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
               )
               if (state.taskState.isNotEmpty()) {
-                Text(state.taskState, fontSize = 12.sp, color = pal.textMuted)
+                Text(state.taskState, style = MaterialTheme.typography.labelMedium, color = pal.textMuted)
               }
             }
             Spacer(Modifier.height(4.dp))
             Text(
               "总大小 ${state.totalSizeText} · ${state.files.size} 个文件",
-              fontSize = 13.sp,
+              style = MaterialTheme.typography.bodySmall,
               color = pal.textMuted,
             )
           }
@@ -405,7 +433,7 @@ internal fun MagnetContent(
     // ---- Snackbar 宿主（B-03：重复解析提示；底部悬浮）----
     SnackbarHost(
       hostState = snackbarHostState,
-      modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+      modifier = Modifier.align(Alignment.BottomCenter).padding(18.dp),
     )
   }
   // ---- 删除确认底部 Sheet（G-01）----
@@ -442,15 +470,15 @@ private fun FileRow(
         .background(if (selected) pal.bgSelected else pal.panel)
         .border(1.dp, pal.border, RoundedCornerShape4)
         .clickable(enabled = clickable, onClick = onClick)
-        .padding(horizontal = 12.dp, vertical = 10.dp),
+        .padding(horizontal = 12.dp, vertical = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     Column(modifier = Modifier.weight(1f)) {
-      Text(item.name, fontSize = 15.sp, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      Text(item.name, style = MaterialTheme.typography.bodyLarge, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
       Spacer(Modifier.height(2.dp))
       Text(
         if (item.path != item.name) "${item.sizeText} · ${item.path}" else item.sizeText,
-        fontSize = 13.sp,
+        style = MaterialTheme.typography.bodySmall,
         color = pal.textMuted,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
@@ -458,20 +486,24 @@ private fun FileRow(
     }
     Spacer(Modifier.width(4.dp))
     when {
-      item.isImage -> Text("图片 · 画廊", fontSize = 13.sp, color = pal.accent, fontWeight = FontWeight.Medium)
-      !item.isVideo -> Text("非视频", fontSize = 13.sp, color = pal.textDim)
-      !selected -> Text("预览", fontSize = 13.sp, color = pal.accent, fontWeight = FontWeight.Medium)
+      item.isImage -> Text(stringResource(R.string.action_image_gallery), style = MaterialTheme.typography.bodySmall, color = pal.accent, fontWeight = FontWeight.Medium)
+      !item.isVideo -> Text(stringResource(R.string.action_not_video), style = MaterialTheme.typography.bodySmall, color = pal.textDim)
+      !selected -> Text(stringResource(R.string.action_preview), style = MaterialTheme.typography.bodySmall, color = pal.accent, fontWeight = FontWeight.Medium)
       else -> {
         Text(
           if (paused) "暂停中" else "预览中",
-          fontSize = 12.sp,
+          style = MaterialTheme.typography.labelMedium,
           color = if (paused) pal.warn else pal.ok,
           fontWeight = FontWeight.Medium,
         )
-        TextButton(onClick = if (paused) onResume else onPause) {
-          Text(if (paused) "继续" else "暂停", fontSize = 13.sp, color = pal.accent)
+        TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = if (paused) onResume else onPause) {
+          Text(if (paused) "继续" else "暂停", style = MaterialTheme.typography.bodySmall, color = pal.accent)
         }
-        TextButton(onClick = onStop) { Text("停止预览", fontSize = 13.sp, color = pal.danger) }
+        TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = onStop) { Text(stringResource(R.string.stop_preview), style = MaterialTheme.typography.bodySmall, color = pal.danger) }
       }
     }
   }
@@ -500,7 +532,7 @@ private fun PreviewPane(
   val pal = LocalPal.current
   val shapes = LocalShapes.current
   PanelCard(shapes = shapes) {
-    Text(title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Text(title, style = MaterialTheme.typography.labelLarge, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
     Spacer(Modifier.height(8.dp))
     Box(
       // 视频区保持 200dp（D-02 不改视觉尺寸：可达性由「打开预览自动滚到播放卡」解决，
@@ -511,17 +543,17 @@ private fun PreviewPane(
       if (streamUrl.isNotEmpty()) {
         VideoPlayer(url = streamUrl, seekFraction = seekFraction, seekSeq = seekSeq)
       } else {
-        Text(note.ifEmpty { "正在准备索引块…" }, fontSize = 13.sp, color = Color(0xFFD0D4DA))
+        Text(note.ifEmpty { "正在准备索引块…" }, style = MaterialTheme.typography.bodySmall, color = pal.videoPlaceholder)
       }
     }
     Spacer(Modifier.height(8.dp))
     if (bufferPercent > 0f || bufferText.isNotEmpty()) {
       ThinProgress(percent = bufferPercent)
-      Spacer(Modifier.height(6.dp))
+      Spacer(Modifier.height(8.dp))
     }
     SeekBar(fraction = seekFraction, onSeek = onSeek)
     if (seekNote.isNotEmpty()) {
-      Text(seekNote, fontSize = 12.sp, color = pal.textMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+      Text(seekNote, style = MaterialTheme.typography.labelMedium, color = pal.textMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
       Spacer(Modifier.height(4.dp))
     }
     // D-02：状态文与控件同一排（字数短、禁止溢出卡）
@@ -529,21 +561,25 @@ private fun PreviewPane(
       Text(
         if (bufferText.isNotEmpty()) bufferText else note,
         modifier = Modifier.weight(1f),
-        fontSize = 13.sp,
+        style = MaterialTheme.typography.bodySmall,
         color = pal.textMuted,
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
       )
-      TextButton(onClick = if (paused) onResume else onPause) {
-        Text(if (paused) "继续" else "暂停", fontSize = 13.sp, color = pal.accent)
+      TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = if (paused) onResume else onPause) {
+        Text(if (paused) "继续" else "暂停", style = MaterialTheme.typography.bodySmall, color = pal.accent)
       }
-      TextButton(onClick = onStop) { Text("停止预览", fontSize = 13.sp, color = pal.accent) }
+      TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = onStop) { Text(stringResource(R.string.stop_preview), style = MaterialTheme.typography.bodySmall, color = pal.accent) }
     }
     Spacer(Modifier.height(4.dp))
     Text(
       if (cacheMode == PREVIEW_CACHE_HOLD) "停止语义：hold（冻结暂停，缓冲保留）"
       else "停止语义：convert（转正继续缓存，不暂停）",
-      fontSize = 12.sp,
+      style = MaterialTheme.typography.labelMedium,
       color = pal.textDim,
     )
   }
@@ -564,17 +600,40 @@ private fun SeekBar(fraction: Float, onSeek: (Float) -> Unit) {
       modifier = Modifier.fillMaxWidth().semantics { contentDescription = SEEK_SLIDER_DESC },
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Text("跳转 ${TaskCardLogic.percentOf(local)}%", fontSize = 12.sp, color = pal.textMuted, modifier = Modifier.weight(1f))
-      Text("拖动结束生效（按字节位置）", fontSize = 12.sp, color = pal.textDim)
+      Text("跳转 ${TaskCardLogic.percentOf(local)}%", style = MaterialTheme.typography.labelMedium, color = pal.textMuted, modifier = Modifier.weight(1f))
+      Text(stringResource(R.string.seek_finish_note), style = MaterialTheme.typography.labelMedium, color = pal.textDim)
     }
   }
 }
+
+/**
+ * Media3/ExoPlayer 播放本地流（http://127.0.0.1:port/…?t=token）。
+ *
+ * **Data source 超时必须显式设定（2026-09-18 修）**：本地流服务在区间未就绪时
+ * 会「点播 + 等待」（上限见 `StreamServer.DEFAULT_WAIT_TIMEOUT_MS`），而
+ * `DefaultHttpDataSource` 的默认读超时约 8s —— 比服务端等待上限**短**。
+ * 于是只要等待超过 8s，播放器先判失败、服务端才回响应：表现为「seek 后必然
+ * 播放失败」，且报错是播放器侧的，与服务端日志对不上，极难排查。
+ * 这里把读超时设到服务端等待上限**之上**，并让连接超时保持较短
+ * （回环连接不需要等）。改超时必须同步检查这条单调链：
+ * `停滞(~0.5s) < progressiveMin 观测 < 服务端等待(20s) < 读超时(25s)`。
+ * 该链由 `MagnetStatusLogicTest.streamTimeoutBudget_isMonotonic` 看守。
+ */
+internal const val STREAM_CONNECT_TIMEOUT_MS = 5_000
+internal const val STREAM_READ_TIMEOUT_MS = 25_000
 
 /** Media3/ExoPlayer 播放本地流（http://127.0.0.1:port/…?t=token）。 */
 @Composable
 private fun VideoPlayer(url: String, seekFraction: Float, seekSeq: Int) {
   val context = LocalContext.current
-  val player = remember { ExoPlayer.Builder(context).build() }
+  val player = remember {
+    val http = DefaultHttpDataSource.Factory()
+      .setConnectTimeoutMs(STREAM_CONNECT_TIMEOUT_MS)
+      .setReadTimeoutMs(STREAM_READ_TIMEOUT_MS)
+    ExoPlayer.Builder(context)
+      .setMediaSourceFactory(DefaultMediaSourceFactory(http))
+      .build()
+  }
   DisposableEffect(player) { onDispose { player.release() } }
   LaunchedEffect(url) {
     player.setMediaItem(MediaItem.fromUri(url))
@@ -603,7 +662,7 @@ private fun VideoPlayer(url: String, seekFraction: Float, seekSeq: Int) {
 private fun ThinProgress(percent: Float) {
   val pal = LocalPal.current
   Box(
-    modifier = Modifier.fillMaxWidth().height(6.dp).clip(androidx.compose.foundation.shape.CircleShape).background(pal.border)
+    modifier = Modifier.fillMaxWidth().height(8.dp).clip(androidx.compose.foundation.shape.CircleShape).background(pal.border)
   ) {
     Box(
       modifier =
@@ -623,7 +682,7 @@ private fun PanelCard(shapes: com.bitseed.magnetviewer.theme.UiShapes, modifier:
         .fillMaxWidth()
         .clip(shapes.shapeCard)
         .background(pal.panel)
-        .padding(16.dp),
+        .padding(18.dp),
     content = content,
   )
 }

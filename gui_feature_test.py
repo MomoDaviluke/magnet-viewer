@@ -620,6 +620,37 @@ def main() -> int:
         w._refresh_status()
         check(bool(_streamed) and w._pending_video is None,
               "数据+索引齐 → 放行开播（门控与文案解耦）")
+
+        # C3（2026-09-18）：等到上限必须**停止空转** + 给出可归因结论，
+        # 而不是无限停在「等待数据/索引块就绪」（旧实现就是这样）。
+        _orig_since = w._pending_video_since
+        _orig_show_error = w.preview.video.show_error
+        _errs = []
+        w.preview.video.show_error = lambda m: _errs.append(m)
+        try:
+            w._pending_video = (_gp, "http://x/big")
+            w._pending_video_since = time.monotonic() - (
+                MainWindow.GATE_WAIT_TIMEOUT_MS / 1000.0 + 1.0)
+            w.session.status = lambda: dict(
+                _base, contiguous=0, tail_entry_ready=False, buffer=0.0,
+                download_rate=0, file_progress=[], state="DOWNLOADING")
+            w._refresh_status()
+            check(w._pending_video is None and bool(_errs)
+                  and "等待开播数据超时" in _errs[-1],
+                  f"门控等待超时 → 停止空转 + 上屏可归因结论（errs={len(_errs)}）")
+            # 兜底：**直接赋值** `_pending_video`（不设时间戳）不得被当成
+            # 「已等很久」——否则超时判据会立刻触发、把正常的等待期打断。
+            w._pending_video = (_gp, "http://x/big")
+            w._pending_video_since = 0.0
+            _errs.clear()
+            _stages.clear()
+            w._refresh_status()
+            check(w._pending_video is not None and not _errs
+                  and _stages[-1:] == [WAIT_DATA],
+                  "无时间戳的待播状态按「刚开始等」处理（不误报超时）")
+        finally:
+            w.preview.video.show_error = _orig_show_error
+            w._pending_video_since = _orig_since
     finally:
         w.preview.video.set_waiting_stage = _orig_stage
         w.preview.video.set_stream = _orig_setstream

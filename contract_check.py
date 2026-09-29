@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from core import (cache_guard, cache_quota, models, parser, persist,
+                      pieceview,
                       preview, registry, resolver, scheduler, session,
                       states, stream_server, taskops)
     from core import fetcher as fetcher_mod
@@ -155,7 +156,27 @@ def main() -> int:
         # P2-1 位图 have 工厂（流服务/scheduler/preview 三条热路径共用）
         "have_from_bitmap": [("pieces", False)],
         "range_available": [("pm", False), ("start", False), ("end_excl", False)],
+        # plan/09 方案 D：增量派发层（挂视图时走规模无关快路径，否则等价纯函数）
+        "contiguous_bytes_of": [("pm", False), ("limit", True)],
+        "ready_until_of": [("pm", False), ("start", False), ("end_excl", False)],
+        "range_available_of": [("pm", False), ("start", False),
+                               ("end_excl", False)],
+        "bytes_up_to_piece": [("piece", False), ("piece_length", False),
+                              ("offset", False), ("limit", False)],
         "disk_root": [("cache_dir", False), ("save_subdir", True)],
+    })
+    # plan/09 方案 D：块可用性视图（惰性 have + 增量连续前缀 + 一次性基线）。
+    # 冻结的是「三条查询 + 基线与失效入口」的方法面——实现可优化，
+    # 语义由 pieceview_test 的对拍护栏（与位图路径逐值一致）守住。
+    sig_check("PieceView", pieceview.PieceView, {
+        "have": [("p", False)],
+        "contiguous_from": [("start", False), ("limit", True)],
+        "range_ready_pieces": [("p0", False), ("p1", False), ("_lock", True)],
+        "buffered_runs": [("sa", False), ("sb", False)],
+        "rebuild_baseline": [("force", True)],
+        "invalidate": [],
+        "matches": [("handle", False)],
+        "stats": [],
     })
     sig_check("parser", parser, {
         "parse_torrent_file": [("path", False)],
@@ -213,11 +234,22 @@ def main() -> int:
         # 阶段 B：stop 新增可选参数 release_only（convert 档只清锚点不
         # 冻结）。可选参数不破坏既有调用面——默认 False 行为与基线逐字一致。
         "stop": [("release_only", True)],
-        "contiguous_progress": [],
-        "tail_ready": [],
+        # 2026-09-17 等待超时专项：三个门控派生量新增**可选** have 参数
+        # （一次性位图快照回调），并新增 gate_snapshot()。可选参数不破坏既有
+        # 调用面——不传时各自取快照，行为与基线逐字一致；传参只为把一轮 UI
+        # 轮询里的 4 次 status()/位图物化折叠为 1 次（论证见 scheduler
+        # .gate_snapshot docstring 与 diag_wait_timeout.py D1/D1-s）。
+        "contiguous_progress": [("have", True)],
+        "tail_ready": [("have", True)],
         # plan/07 阶段 2：门控改用的新方法（tail_ready 保留不删，仍供
         # tick() 判断是否继续补拉整尾窗）。
-        "tail_entry_ready": [],
+        "tail_entry_ready": [("have", True)],
+        "gate_snapshot": [("have", True)],
+        # 2026-09-17：播放失败重试路径新增的无条件重刷入口（见其 docstring：
+        # 与 tick() 的差别就是没有「窗口充裕即返回」的防抖）。
+        "rearm": [],
+        # plan/09 方案 D：注入/读取增量可用性视图（注入前/替身句柄下走位图路径）
+        "attach_view": [("view", False)],
         "buffer_progress": [],
     })
     sig_check("stream_server", stream_server, {
@@ -369,7 +401,9 @@ def main() -> int:
         "alert_category_mask": [],
         "build_session_settings": [("listen_port", False),
                                    ("active_downloads", False),
-                                   ("proxy", True)],
+                                   ("proxy", True),
+                                   ("port_mapping", True),
+                                   ("listen_interface", True)],
     })
     sig_check("session.SessionCore", session.SessionCore, {
         "start": [("proxy", True), ("metadata_timeout", True)],

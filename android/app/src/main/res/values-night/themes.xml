@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  深色启动主题（审计 2026-09-29 §4.5）：values/themes.xml 固定 Material.Light
+  导致深色系统用户冷启动白屏一帧（窗口底色先于 Compose 渲染）。本文件在
+  系统深色模式下被自动选用，把窗口底直接给深色；进 Compose 后由
+  MagnetViewerTheme 按 settings.uiTheme 接管。
+-->
+<resources>
+    <style name="Theme.MagnetViewer" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#1F2328</item>
+    </style>
+</resources>

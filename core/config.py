@@ -33,6 +33,18 @@ DEFAULTS: dict = {
     "logging_enabled": True,       # 运行日志开关（core.logutil；关闭后全部记录降为空操作）
     "ui_theme": "light",           # 界面主题：light（默认浅色）| dark | system（跟随系统）
                                    # 保存设置即热切换（ui.theme.apply_theme），无需重启
+    # 入站能力（诊断 D-2026-09-18：下载慢 + 做种报错）
+    "port_mapping": False,         # UPnP/NAT-PMP 端口映射。默认关闭（只收不做种，
+                                   # 减暴露面）；需做种或需要入站连接时开启——无
+                                   # 入站端口会连不上同为 NAT 后的 peer，且做种时
+                                   # 无人能连入而报错。保存设置即热生效。
+    "listen_interface": "",        # 出口网卡 IP（多网卡/VPN 环境显式绑定，防
+                                   # libtorrent 从虚拟网卡绕行出境）。空 = 0.0.0.0
+                                   # 全网卡监听；该值在会话启动时固定，需重启生效。
+    "extra_trackers": False,       # 追加 HTTP/HTTPS 兜底 tracker（UDP 受阻网络的
+                                   # 第二条 peer 发现通道）。默认关闭：无 tr= 的
+                                   # 磁力链仅注入既有 5 条 udp tracker。
+                                   # 下次添加任务时生效。
 }
 
 _TYPES: dict = {
@@ -45,6 +57,8 @@ _TYPES: dict = {
     "download_rate_limit": int,
     "cache_limit_mb": int,
     "logging_enabled": bool,
+    "port_mapping": bool,
+    "extra_trackers": bool,
 }
 
 # libtorrent settings_pack::proxy_type_t 的整型值（2.1.x 仍是稳定枚举）

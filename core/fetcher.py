@@ -24,7 +24,8 @@ import threading
 
 import libtorrent as lt
 
-from .cache_guard import ensure_cache_dir
+from . import proxycheck
+from .cache_guard import ensure_cache_dir, sweep_tmp_files
 from .cache_mode import PREVIEW_CACHE_CONVERT
 from .logutil import log_exception, log_warning
 from .models import ParseResult, TorrentFile
@@ -38,7 +39,7 @@ from .persist import safe_task_save_path as persist_safe_task_save_path
 from .persist import save_subdir_of as persist_save_subdir_of
 from .persist import task_dir as persist_task_dir
 from .scheduler import PreviewScheduler
-from .session import SessionCore, SessionDeps
+from .session import DHT_STATE_FILE, SessionCore, SessionDeps
 # 再导出：历史写法 from core.fetcher import TaskRecord / METADATA_TIMEOUT /
 # *_SUBDIR 仍须可用（persist_test/session_test/registry_test 在用）；本体已
 # 下沉 core.registry（R-2：TaskRecord 是注册表行结构，寄居 fetcher 是历史债）。
@@ -67,11 +68,27 @@ class SessionManager:
     def __init__(self, cache_dir: str, listen_port: int = 6881,
                  download_dir: str | None = None,
                  active_downloads: int = 3,
-                 cache_mode_get=None):
+                 cache_mode_get=None,
+                 port_mapping_get=None,
+                 listen_interface_get=None,
+                 extra_trackers_get=None):
         """cache_mode_get: 可选回调 -> str，预览缓存模式（preview_cache_mode）
         的取值来源（UI 注入 AppConfig.get；core 层不 import Qt）。None/异常
-        兜底为 convert（与 DEFAULTS 一致）。"""
+        兜底为 convert（与 DEFAULTS 一致）。
+
+        port_mapping_get / listen_interface_get: 可选回调 -> bool / str，
+        入站能力配置的取值来源（同样由 UI 注入）。None/异常分别兜底
+        False / ""，即「只收不做种 + 全网卡监听」的既有行为。二者在会话
+        启动时固定；port_mapping 另可运行时经 apply_port_mapping 热更新。
+
+        extra_trackers_get: 可选回调 -> bool，无 tr= 磁力链是否追加
+        HTTP/HTTPS 兜底 tracker（UDP 出站受阻网络的第二条发现通道）。
+        None/异常兜底 False，即仅注入既有 5 条 udp tracker。
+        """
         self._cache_mode_get = cache_mode_get
+        self._port_mapping_get = port_mapping_get
+        self._listen_interface_get = listen_interface_get
+        self._extra_trackers_get = extra_trackers_get
         self.cache_dir = os.path.abspath(cache_dir)
         self.listen_port = listen_port
         # 下载根目录（决策 D4：允许任意位置，默认 cache_dir/downloads）
@@ -155,7 +172,16 @@ class SessionManager:
             on_download_finished=self._on_download_finished,
             emit_error=self._emit_error,
             clear_resolving=self._clear_resolving,
-            clear_runtime_state=self._clear_runtime_state))
+            clear_runtime_state=self._clear_runtime_state,
+            # 入站能力（D-2026-09-18）：port_mapping 开 UPnP/NAT-PMP（做种与
+            # 连 NAT 后 peer 的前提），listen_interface 显式绑定出口网卡。
+            # 二者读一次固定；回调缺失/异常一律回落既有行为。
+            port_mapping=self._cfg_port_mapping(),
+            listen_interface=self._cfg_listen_interface(),
+            # 代理自检（D-2026-09-18 加固）：注真实探测函数——只有生产侧走
+            # 网络探测，测试替身不传该字段即保持「不探测、不额外报错」。
+            proxy_probe=proxycheck.probe,
+            dht_state_path=os.path.join(self.cache_dir, DHT_STATE_FILE)))
 
         # 任务 CRUD（阶段 4 抽出）：允许直接持 registry/persist 引用（无环
         # 下游）；_ses/scheduler 仍走回调（会被重绑/置空）。persist 的
@@ -163,7 +189,8 @@ class SessionManager:
         self._taskops = TaskOps(reg=self._registry, persist=self._persist,
                                 ses_get=lambda: self._ses,
                                 scheduler_get=lambda: self.scheduler,
-                                download_dir=self._download_dir)
+                                download_dir=self._download_dir,
+                                on_meta_ready=self._on_metadata_received)
 
         # 解析编排（阶段 5 抽出）：resolve 两入口 / 换代 / connect_peer /
         # 两条 alert 处理链。emit_* 经本类委托回调（构造顺序无关）。
@@ -174,7 +201,8 @@ class SessionManager:
             persist_tasks=self._persist_tasks,
             request_resume=self._request_resume,
             emit_metadata=self._emit_metadata,
-            emit_error=self._emit_error)
+            emit_error=self._emit_error,
+            extra_trackers_get=self._extra_trackers_get)
 
         # 预览桥（阶段 5 抽出）：磁盘路径反查 / PieceMap / 点播补拉 / 状态快照
         self._preview = PreviewCore(reg=self._registry,
@@ -265,6 +293,17 @@ class SessionManager:
         实现见 core.session.SessionCore.start：会话配置构造 / 端口冲突回退 /
         任务清单恢复 / 告警线程拉起。
         """
+        # plan/11 R-14：启动时清扫崩溃遗留的 ``*.tmp`` 孤儿（唯一临时名引入
+        # 后，崩溃残留不再被覆盖、会累积）。启动时刻无任何并发写者，是最安全
+        # 的清扫点；**绝不**放到写路径上（与 plan/08 D3-b 的结论冲突）。
+        # 失败只告警：清扫是旁路设施，绝不阻断启动。
+        try:
+            stale = sweep_tmp_files(self.cache_dir)
+            if stale:
+                log_warning("fetcher.sweep_tmp",
+                            f"清扫崩溃遗留临时文件 {stale} 个")
+        except Exception as e:
+            log_warning("fetcher.sweep_tmp", f"{e}")
         self._sess.start(proxy, metadata_timeout)
 
     @property
@@ -295,6 +334,43 @@ class SessionManager:
         实现见 core.session。
         """
         self._sess.apply_rate_limit(kbps)
+
+    # ---- 入站能力（诊断 D-2026-09-18）----
+
+    def _cfg_port_mapping(self) -> bool:
+        """端口映射开关取值（供 __init__ 构造 SessionDeps）。
+
+        回调缺失 / 抛异常一律兜底 False，保持「只收不做种」的既有默认。
+        """
+        if not self._port_mapping_get:
+            return False
+        try:
+            return bool(self._port_mapping_get())
+        except Exception as e:
+            log_warning("fetcher.port_mapping", f"读取端口映射配置失败：{e}")
+            return False
+
+    def _cfg_listen_interface(self) -> str:
+        """出口网卡 IP 取值（供 __init__ 构造 SessionDeps）。
+
+        回调缺失 / 抛异常一律兜底空串（= 0.0.0.0 全网卡监听，既有行为）。
+        """
+        if not self._listen_interface_get:
+            return ""
+        try:
+            return str(self._listen_interface_get() or "").strip()
+        except Exception as e:
+            log_warning("fetcher.listen_interface", f"读取出口网卡配置失败：{e}")
+            return ""
+
+    def apply_port_mapping(self, enabled: bool) -> None:
+        """运行时开关 UPnP/NAT-PMP 端口映射（热更新，无需重建会话）。
+
+        做种与「连上 NAT 后 peer」都依赖入站端口：关闭时 swarm 里无开放
+        端口的 peer 连不上，且做种时无人能连入 → 客户端报做种失败。
+        实现见 core.session。
+        """
+        self._sess.apply_port_mapping(enabled)
 
     def protected_dirs(self) -> set[str]:
         """配额清理保护名单：所有已注册记录的落盘目录（含预览与下载）。
@@ -521,10 +597,10 @@ class SessionManager:
     def buffered_segments_of_preview(self):
         """当前预览文件的已缓存分段（文件内字节区间 [start, end) 列表）。
 
-        供进度条着色。用 handle.status().pieces **一次性**取全部块的落盘
-        状态（C++ 层，比逐块 have_piece 快几个数量级），再在文件块范围内
-        合并连续段 —— 700ms 一次也不构成负担，顺带落实了 P2-1 的批量位图。
-        无预览 / 状态不可用时返回 None（进度条退化为不着色）。
+        供进度条着色。plan/09 起走**增量视图**：小块用一次基线位图精确扫描，
+        大块走降采样（≤512 次绑定调用），不再在 Python 里逐块索引位图
+        （旧实现在 40 万块文件上实测 8.4ms/轮，且整个循环挂在 GUI 线程）。
+        无预览 / 状态不可用 / 无视图且位图取不到时返回 None（进度条退化为不着色）。
         """
         with self._lock:
             active = self.scheduler.active
@@ -534,27 +610,50 @@ class SessionManager:
             return None
         try:
             ti = handle.torrent_file()
-            pieces = getattr(handle.status(), "pieces", None)
-            if ti is None or not pieces:
+            if ti is None:
                 return None
             pl = ti.piece_length()
             if pl <= 0:
                 return None
-            segs: list[tuple[int, int]] = []
-            run = None                      # 连续已落盘段的起始块
-            for p in range(f.start_piece, f.end_piece + 1):
-                if pieces[p]:
-                    if run is None:
-                        run = p
-                elif run is not None:
-                    segs.append(self._piece_range_bytes(run, p - 1, pl, f))
-                    run = None
-            if run is not None:
-                segs.append(self._piece_range_bytes(run, f.end_piece, pl, f))
-            return segs
+            # plan/09：分段是**唯一**仍需要「整片块状态」的用途，交给增量视图
+            # ——全部走实时 have_piece 探测，探测点数封顶在 SEG_PROBE_BUDGET
+            # （区间块数 ≤ 预算时逐块精确），**不再在 Python 里逐块索引位图**
+            # （旧实现在 40 万块文件上实测 8.4ms/轮，且整个循环挂在 GUI 线程）。
+            runs = None
+            view = getattr(self.scheduler, "piece_view", None)
+            if view is not None:
+                runs = view.buffered_runs(f.start_piece, f.end_piece)
+            if runs is None:
+                # 无视图（未注入 / 测试替身 / 视图不可用）→ 退回位图精确扫描，
+                # 行为与基线逐字一致
+                pieces = getattr(handle.status(), "pieces", None)
+                if not pieces:
+                    return None
+                runs = self._runs_from_bitmap(pieces, f.start_piece,
+                                              f.end_piece)
+            return [self._piece_range_bytes(a, b, pl, f) for a, b in runs]
         except Exception as e:
             log_warning("fetcher.buffered_segments", f"{e}")
             return None
+
+    @staticmethod
+    def _runs_from_bitmap(pieces, sa: int, sb: int) -> list[tuple[int, int]]:
+        """位图 → ``[sa, sb]`` 内的连续已落盘段（块号闭区间列表）。
+
+        基线口径（大块降采样可复算它作对照）；只在「无增量视图」时使用。
+        """
+        segs: list[tuple[int, int]] = []
+        run = None                          # 连续已落盘段的起始块
+        for p in range(sa, sb + 1):
+            if pieces[p]:
+                if run is None:
+                    run = p
+            elif run is not None:
+                segs.append((run, p - 1))
+                run = None
+        if run is not None:
+            segs.append((run, sb))
+        return segs
 
     @staticmethod
     def _piece_range_bytes(first: int, last: int, pl: int, f) -> tuple[int, int]:

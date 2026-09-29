@@ -232,6 +232,38 @@ private fun writeLocked(target: File, data: ByteArray): File {
   return target
 }
 
+/**
+ * 清扫崩溃/强杀遗留的 `*.tmp` 孤儿（plan/11 R-14 的安卓移植）。
+ *
+ * 背景：[atomicWriteBytes] 用**唯一**临时名（`<name>.<nanotime>.tmp`），
+ * 崩溃/进程被杀后残留**不会被下次写覆盖**（固定临时名才会），而是每次崩溃
+ * 新增一个 ⇒ 无界累积。只扫三处固定位置（cacheDir 根、`.resume/`、`.meta/`，
+ * 与三个写盘点的落盘目录一一对应），**不递归**、也**绝不在写路径上扫**
+ * （桌面 plan/08 D3-b：「30 次写入 30 次全目录扫描」是已修缺陷，别再引入）。
+ *
+ * 只删 `olderThanMs` 之前的条目：防止与另一实例/另一线程的并发写入赛跑
+ * （纵深防御）。清扫是旁路设施：任何失败静默跳过，绝不抛。
+ *
+ * 调用时机：引擎拿到 cacheRoot 时（启动路径，此时无任何并发写者）。
+ */
+fun sweepTmpFiles(cacheDir: File, olderThanMs: Long = 60_000L): Int {
+  val deadline = System.currentTimeMillis() - olderThanMs.coerceAtLeast(0L)
+  var removed = 0
+  for (sub in listOf(cacheDir, File(cacheDir, ".resume"), File(cacheDir, ".meta"))) {
+    val entries = sub.listFiles() ?: continue
+    for (f in entries) {
+      try {
+        if (!f.isFile || !f.name.endsWith(".tmp")) continue
+        if (f.lastModified() > deadline) continue
+        if (f.delete()) removed++
+      } catch (e: Throwable) {
+        // 旁路设施：单个文件失败不影响其余清扫
+      }
+    }
+  }
+  return removed
+}
+
 /** 原子写任务清单；返回写出的文件路径。失败抛 [IOException]。 */
 fun saveTasks(cacheDir: File, tasks: Map<String, TaskRecord>): File =
   atomicWriteBytes(taskFilePath(cacheDir), encodeTasks(tasks).toByteArray(Charsets.UTF_8))

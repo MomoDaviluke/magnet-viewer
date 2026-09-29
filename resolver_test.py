@@ -46,7 +46,8 @@ try:
     from core.persist import TaskPersistence
     from core.registry import TaskRecord, TaskRegistry
     from core.resolver import ResolverCore, result_from_torrent_info
-    from core.states import (STATE_COMPLETED, STATE_DOWNLOADING, STATE_FAILED,
+    from core.states import (BOOTSTRAP_TRACKERS, FALLBACK_TRACKERS,
+                             STATE_COMPLETED, STATE_DOWNLOADING, STATE_FAILED,
                              STATE_META_FETCH, STATE_PAUSED, STATE_READY,
                              STATE_SEEDING)
     from core.taskops import TaskOps
@@ -138,7 +139,7 @@ class CountingPersist:
         self.resume_requests.append(rec)
 
 
-def mk_env(ses=None):
+def mk_env(ses=None, extra_trackers_get=None):
     ws = tempfile.mkdtemp(prefix="mv_resolver_")
     cache = os.path.join(ws, "cache")
     dl = os.path.join(cache, "downloads")
@@ -155,7 +156,8 @@ def mk_env(ses=None):
                       persist_tasks=persist.persist_tasks,
                       request_resume=persist.request_resume,
                       emit_metadata=lambda r: emet.append(r),
-                      emit_error=lambda m: eerr.append(m))
+                      emit_error=lambda m: eerr.append(m),
+                      extra_trackers_get=extra_trackers_get)
     return ws, reg, ses, sched, persist, ops, rs, emet, eerr
 
 
@@ -319,7 +321,10 @@ def section_magnet(ck):
         atp = ses.added[0]
         ck.check(atp.flags & lt.torrent_flags.upload_mode,
                  "只取元数据：upload_mode")
+        # 默认开关关闭：恰好 5 条，且精确等于 BOOTSTRAP_TRACKERS（守住既有行为）
         ck.check(len(atp.trackers) == 5, "无 tracker 注入 bootstrap（5 条）")
+        ck.check(list(atp.trackers) == list(BOOTSTRAP_TRACKERS),
+                 "默认：注入恰为 BOOTSTRAP_TRACKERS（内容/顺序不漂移）")
         ck.check(h in [r.handle for r in reg.torrents.values()]
                  and reg.resolving, "登记当前任务：META_FETCH 等待态")
         ck.check(eerr == [] and emet == [], "元数据未就绪：不发射任何回调")
@@ -338,6 +343,44 @@ def section_magnet(ck):
             resmod.result_from_torrent_info = real
     finally:
         shutil.rmtree(ws, ignore_errors=True)
+
+    # 开关打开：注入 10 条（udp 5 + http/https 5），前 5 条仍为 udp
+    ws2, reg2, ses2, _, _, _, rs2, _, _ = mk_env(
+        extra_trackers_get=lambda: True)
+    try:
+        h2 = FakeHandle(IH)
+        ses2.add_result = h2
+        rs2._resolve_magnet(MAG)
+        atp2 = ses2.added[0]
+        ck.check(len(atp2.trackers) == 10,
+                 "extra_trackers 开：注入 10 条（udp5 + http/https5）")
+        ck.check(list(atp2.trackers)
+                 == list(BOOTSTRAP_TRACKERS) + list(FALLBACK_TRACKERS),
+                 "10 条 = BOOTSTRAP + FALLBACK，顺序先 udp 后 http")
+        ck.check(all(t.startswith("udp://")
+                     for t in list(atp2.trackers)[:5]),
+                 "前 5 条保持 udp（顺序：先 udp 后 http）")
+        ck.check(all(not t.startswith("udp://")
+                     for t in list(atp2.trackers)[5:]),
+                 "后 5 条为 http/https 兜底")
+    finally:
+        shutil.rmtree(ws2, ignore_errors=True)
+
+    # 回调抛异常：不得崩溃，回落 5 条（兜底语义）
+    def _boom():
+        raise RuntimeError("配置读取失败")
+    ws3, reg3, ses3, _, _, _, rs3, _, _ = mk_env(extra_trackers_get=_boom)
+    try:
+        h3 = FakeHandle(IH)
+        ses3.add_result = h3
+        rs3._resolve_magnet(MAG)
+        atp3 = ses3.added[0]
+        ck.check(len(atp3.trackers) == 5,
+                 "回调异常：回落 5 条 bootstrap（不崩溃）")
+        ck.check(list(atp3.trackers) == list(BOOTSTRAP_TRACKERS),
+                 "回调异常：回落恰为 BOOTSTRAP_TRACKERS")
+    finally:
+        shutil.rmtree(ws3, ignore_errors=True)
 
 
 def section_connect(ck):

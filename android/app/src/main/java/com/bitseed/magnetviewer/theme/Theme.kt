@@ -47,6 +47,8 @@ data class Palette(
   val dangerSoft: androidx.compose.ui.graphics.Color,
   val dangerPressed: androidx.compose.ui.graphics.Color,
   val okSoft: androidx.compose.ui.graphics.Color,
+  // 审计 2026-09-29：视频区恒黑底上的占位文字色（黑底专色，不随主题反转明度）
+  val videoPlaceholder: androidx.compose.ui.graphics.Color,
 ) {
   companion object {
     /** 浅色：桌面 LIGHT 字典原值（不新造）。 */
@@ -75,9 +77,10 @@ data class Palette(
         dangerSoft = Pal.dangerSoft,
         dangerPressed = Pal.dangerPressed,
         okSoft = Pal.okSoft,
+        videoPlaceholder = Pal.videoPlaceholder,
       )
 
-    /** 深色：同一批色值换角色（窗口底=Pal.text、面板=Pal.textMuted、文字=Pal.bg…）。 */
+    /** 深色：ok/danger 语义反转为「暗底 + 亮字」（[DarkPal] 独立值，不复用浅色值换角色）。 */
     val Dark =
       Palette(
         bg = Pal.text,
@@ -94,15 +97,16 @@ data class Palette(
         accent = Pal.accentHover,
         accentHover = Pal.accent,
         accentPressed = Pal.accentPressed,
-        ok = Pal.ok,
+        ok = DarkPal.ok,
         warn = Pal.warn,
-        danger = Pal.danger,
-        altRow = Pal.textMuted,
+        danger = DarkPal.danger,
+        altRow = DarkPal.altRow,
         surfaceSunken = Pal.text,
         tonalPressed = Pal.accentPressed,
-        dangerSoft = Pal.dangerPressed,
-        dangerPressed = Pal.danger,
-        okSoft = Pal.ok,
+        dangerSoft = DarkPal.dangerSoft,
+        dangerPressed = DarkPal.dangerPressed,
+        okSoft = DarkPal.okSoft,
+        videoPlaceholder = DarkPal.videoPlaceholder,
       )
   }
 }
@@ -161,8 +165,8 @@ private val DarkColors =
     onSurfaceVariant = Pal.borderStrong,
     outline = Pal.textDim,
     outlineVariant = Pal.textMuted,
-    error = Pal.danger,
-    onError = Pal.bg,
+    error = DarkPal.danger,
+    onError = Pal.text,
   )
 
 /**
@@ -173,7 +177,11 @@ private val DarkColors =
 @Composable
 fun MagnetViewerTheme(themeMode: String = THEME_LIGHT, content: @Composable () -> Unit) {
   val dark = isDarkTheme(themeMode, isSystemInDarkTheme())
-  CompositionLocalProvider(LocalPal provides if (dark) Palette.Dark else Palette.Light, LocalShapes provides UiShapes()) {
+  CompositionLocalProvider(
+    LocalPal provides if (dark) Palette.Dark else Palette.Light,
+    LocalShapes provides UiShapes(),
+    LocalSpacing provides Spacing(),
+  ) {
     MaterialTheme(colorScheme = if (dark) DarkColors else LightColors, typography = Typography, content = content)
   }
 }

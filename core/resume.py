@@ -38,13 +38,45 @@ def resume_path(cache_dir: str, info_hash: str) -> str:
     return os.path.join(resume_dir(cache_dir), f"{ih}.fastresume")
 
 
+def normalized_resume(data: dict) -> dict:
+    """把 libtorrent 2.1 的 resume data 归一为「自研 bencode 认得」的结构。
+
+    坑（性能专项 P-1b 引入 info 段后暴露）：开启 ``save_info_dict`` 后，
+    resume data 的 ``info`` 键是**已编码好的 bencode 原始字节**，python 绑定
+    把它暴露成 **有符号 int 元组**（不是 bytes，也不是 dict）—— 自研
+    ``bencode`` 不认 tuple，直接编码抛 TypeError，整份 resume data 写盘
+    静默失败（表现：任务重启后没有续传数据、退回重新索取元数据）。
+
+    还原方式：元组 → 字节 → 走自研 ``bdecode`` 变回嵌套 dict。bencode 字典
+    要求键有序且本就按序存储，重新编码与原字节**逐字节一致**，info-hash
+    不受影响（这是能否正确恢复的前提）。首字节不是 ``d``/``l`` 的元组按普通
+    字节串处理，绝不臆测。
+    """
+    def _norm(obj):
+        if isinstance(obj, tuple):
+            raw = bytes(int(x) & 0xFF for x in obj)
+            if raw[:1] in (b"d", b"l"):
+                try:
+                    return _norm(_bdecode(raw))
+                except Exception:
+                    return raw
+            return raw
+        if isinstance(obj, dict):
+            return {k: _norm(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_norm(v) for v in obj]
+        return obj
+    return _norm(data)
+
+
 def encode_resume(data: dict) -> bytes:
     """把 resume data dict（bytes key）编码为 bencode 字节。
 
     键必须是 bytes/str（libtorrent resume 格式规范），不合格抛 ValueError。
+    编码前先过 :func:`normalized_resume`（info 段的 int 元组还原，见其说明）。
     """
     try:
-        return _bencode(data)
+        return _bencode(normalized_resume(data))
     except Exception as e:
         raise ValueError(f"fastresume 编码失败：{e}") from e
 

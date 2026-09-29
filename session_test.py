@@ -276,17 +276,41 @@ def section_pure(ck):
                  "DHT/LSD 默认开启（元数据获取依赖）")
         ck.check(st["enable_upnp"] is False and st["enable_natpmp"] is False,
                  "UPnP/NAT-PMP 默认关闭（只收不做种，减暴露面）")
-        ck.check(st["connections_limit"] == 300
+        # 性能专项 P-2：connections_limit 由 300 提到 400（peer 上限配合
+        # connection_speed 一起放宽爬坡速度），其余吞吐项见
+        # session.THROUGHPUT_SETTINGS（每项都带书面依据）。
+        ck.check(st["connections_limit"] == 400
                  and st["alert_queue_size"] == 5000
                  and st["active_downloads"] == 5,
                  "连接数/告警队列/并发数为承诺值")
         ck.check(st["alert_mask"] == 63, "alert_mask 注入（防默认掩码过窄漏告警）")
+        ck.check(all(st.get(k) == v
+                     for k, v in session.THROUGHPUT_SETTINGS.items()),
+                 "吞吐专项参数全部并入会话 settings（P-2）")
 
         proxy = {"type": "socks5", "host": "127.0.0.1", "port": 1080,
                  "peer": True, "user": "", "password": ""}
         st2 = session.build_session_settings(0, 3, proxy)
         ck.check(any("proxy" in k for k in st2),
                  "代理配置合并进会话 settings（lt_proxy_settings 生效）")
+
+        # 改造验证（2026-09-18）：port_mapping / listen_interface 开关真的生效
+        st3 = session.build_session_settings(6881, 5, port_mapping=True)
+        ck.check(st3["enable_upnp"] is True and st3["enable_natpmp"] is True,
+                 "port_mapping=True → enable_upnp/enable_natpmp 均为 True")
+
+        st4 = session.build_session_settings(6881, 5, listen_interface="192.168.5.4")
+        ck.check(st4["listen_interfaces"] == "192.168.5.4:6881",
+                 'listen_interface="192.168.5.4" → listen_interfaces 绑定该 IP')
+
+        st5 = session.build_session_settings(6881, 5, listen_interface="   ")
+        ck.check(st5["listen_interfaces"] == "0.0.0.0:6881",
+                 'listen_interface 纯空白 → 回落 "0.0.0.0:6881"')
+
+        st6 = session.build_session_settings(6881, 5)
+        ck.check(st6["listen_interfaces"] == "0.0.0.0:6881"
+                 and st6["enable_upnp"] is False and st6["enable_natpmp"] is False,
+                 "守住默认：不传参仍 0.0.0.0:6881 且 upnp/natpmp 关闭")
     finally:
         session.lt = real_lt
 
@@ -359,6 +383,49 @@ def section_start(ck):
         ck.check(host4["timeout"] == 90.0, "不传 metadata_timeout：宿主值不变")
     finally:
         session.lt = real_lt
+
+
+# --------------------------------------------------------------------------
+# §B2 apply_port_mapping 热更新（验证开关真的打到会话）
+# --------------------------------------------------------------------------
+
+def section_port_mapping(ck):
+    ck.section("§B2 apply_port_mapping：UPnP/NAT-PMP 热更新打到会话")
+    # 有会话：开关参数真的进 apply_settings
+    d, host, calls = make_deps()
+    core = session.SessionCore(d)
+    ses = FakeSession()
+    host["ses"] = ses
+    core.apply_port_mapping(True)
+    ck.check(ses.applied and ses.applied[-1] == {"enable_upnp": True,
+                                                 "enable_natpmp": True},
+             "apply_port_mapping(True) → 会话收到 {enable_upnp:True, enable_natpmp:True}")
+    core.apply_port_mapping(False)
+    ck.check(ses.applied[-1] == {"enable_upnp": False,
+                                 "enable_natpmp": False},
+             "apply_port_mapping(False) → 会话收到 {enable_upnp:False, enable_natpmp:False}")
+
+    # 会话为 None：安全早退，无异常
+    d2, host2, _ = make_deps()
+    core2 = session.SessionCore(d2)
+    try:
+        core2.apply_port_mapping(True)
+        ck.check(True, "ses=None 时 apply_port_mapping 安全早退（无异常）")
+    except Exception as e:
+        ck.check(False, f"apply_port_mapping ses=None 不应抛：{e}")
+
+    # apply_settings 主动抛异常：被吞，不冒泡（只 log_warning）
+    class BoomSes(FakeSession):
+        def apply_settings(self, s):
+            raise RuntimeError("会话已死")
+    d3, host3, _ = make_deps()
+    core3 = session.SessionCore(d3)
+    host3["ses"] = BoomSes()
+    try:
+        core3.apply_port_mapping(True)
+        ck.check(True, "apply_port_mapping：apply_settings 异常被吞（不上抛）")
+    except Exception as e:
+        ck.check(False, f"apply_port_mapping 异常不应冒泡：{e}")
 
 
 # --------------------------------------------------------------------------
@@ -913,6 +980,7 @@ def main() -> int:
     ck.section("core/session.py 专项验收（假依赖，不启真会话/不联网）")
     section_pure(ck)
     section_start(ck)
+    section_port_mapping(ck)
     section_hot_update(ck)
     section_shutdown(ck)
     section_alert_dispatch(ck)

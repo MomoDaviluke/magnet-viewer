@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
+import time
 
 from PySide6.QtCore import (QObject, QTimer, QStringListModel, Qt, QUrl,
                             Signal)
@@ -20,6 +21,7 @@ from core.cache_quota import downloaded_bytes, enforce_preview_limit
 from core.config import AppConfig
 from core.fetcher import SessionManager
 from core import logutil
+from core import proxycheck
 from core.logutil import log_warning
 from core.models import (ParseResult, PieceMap, TorrentFile, disk_root,
                          file_disk_path, human_size)
@@ -37,14 +39,16 @@ TAB_FILES, TAB_PREVIEW, TAB_DOWNLOADS = 0, 1, 2
 
 
 def _clear_preview_cache(cache_dir: str,
-                         keep_dirs: set[str] = ()) -> int:
+                         keep_dirs=set()) -> int:
     """只清预览缓存内容，保留 downloads/ 与任务持久化文件。
 
     统一走 core.cache_guard.clear_cache_contents 的保留名单（决策 D8/D9）；
     返回删除的条目数。注意：设置对话框「立即清理」曾在此之后再无名单清空
     整个目录、误删用户下载数据（P0-1）——所有清理入口都必须经此函数。
-    ``keep_dirs``（阶段 C C1）：活任务落盘目录快照（protected_dirs()），
-    连同内容整体跳过——convert 转正任务的目录仍在 .preview/<ih> 下。
+    ``keep_dirs``（阶段 C C1 + plan/11 R-7）：活任务落盘目录的**静态快照**
+    （退出清理路径）或**回调**（手动清理路径：每删一个顶层条目前重取名单，
+    TOCTOU 逐条复核），连同内容整体跳过——convert 转正任务的目录仍在
+    .preview/<ih> 下。
     """
     return clear_cache_contents(cache_dir, keep_dirs=keep_dirs)
 
@@ -53,6 +57,17 @@ class _Bridge(QObject):
     """把 core 后台线程的回调转成 Qt 信号（跨线程安全）。"""
     metadata_ready = Signal(object)
     resolve_failed = Signal(str)
+
+
+class _InboundBridge(QObject):
+    """入站能力探测的跨线程信号桥（D-2026-09-18）。
+
+    探测会阻塞约 3 秒（SSDP 网络等待），必须跑在后台线程；
+    结果经 Qt 信号回到主线程展示，绝不跨线程直接操作控件。
+    ``done`` 携带 ``inbound_report`` 返回的 dict；``failed`` 携带异常文本。
+    """
+    done = Signal(dict)
+    failed = Signal(str)
 
 
 def stream_rel(result: ParseResult | None, cache_dir: str, f: TorrentFile) -> str:
@@ -178,6 +193,43 @@ class StreamCallbacks:
         self.session.scheduler.request_range(start, end_excl)
 
 
+def gate_wait_timeout_reason(st: dict, file, elapsed_s: float,
+                             proxy_hint: str = "") -> str:
+    """开播门控等待超时的**可归因**文案（纯函数 → 单测可断言，无需起 GUI）。
+
+    为什么需要（C3，2026-09-18）：旧门控分支**没有任何计时器** —— 数据永不到达时
+    用户会无限看到「等待数据/索引块就绪」，既不知道等的是什么、也不知道卡在哪。
+    这里只陈述**事实数字**、不下武断结论：同一组数字在不同资源上含义不同
+    （冷门资源 peer 少是正常的），所以给的是「去看什么」而不是「就是资源没种」。
+    """
+    contig = int(st.get("contiguous", 0) or 0)
+    target = min(1024 * 1024, getattr(file, "size", 0) or 0)
+    idx_ok = "已就绪" if st.get("tail_entry_ready", True) else "未就绪"
+    peers = int(st.get("num_peers", 0) or 0)
+    seeds = int(st.get("num_seeds", 0) or 0)
+    rate_kb = float(st.get("download_rate", 0) or 0) / 1024.0
+    state = st.get("state", "?")
+    return (
+        f"等待开播数据超时（已等 {elapsed_s:.0f} 秒）：头部连续数据 "
+        f"{contig / 1024 / 1024:.2f}MB / 需 {target / 1024 / 1024:.2f}MB，"
+        f"索引块{idx_ok}；当前 peer {peers}（种子 {seeds}）、"
+        f"速率 {rate_kb:.1f}KB/s、状态 {state}。"
+        f"若 peer 与速率长期为 0，多半是资源无做种或本机网络受限；"
+        f"可再次点击播放重试，或换一个资源。{proxy_hint}"
+    )
+
+
+def stream_failure_message(note: str = "") -> str:
+    """播放器多次打开失败时的文案（纯函数；``note`` = 流服务最近一次应答摘要）。
+
+    C4 的要点就是带上服务端应答：否则用户与日志里只剩播放器的原始报错
+    （FFmpeg 的 `moov atom not found` / ExoPlayer 的 5xx 文本），既不知道
+    服务端回了什么码，也不知道它等了多久、就绪了多少，排查只能靠猜。
+    """
+    base = "播放器多次打开失败：数据仍未就绪，已转为后台慢速重试…"
+    return f"{base}（{note}）" if note else base
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -231,7 +283,12 @@ class MainWindow(QMainWindow):
             active_downloads=int(self.cfg.get("default_concurrency") or 3),
             # 阶段 B：预览缓存模式（convert/hold）——每次关预览时现读，
             # 保存设置即「下次关预览生效」，无需重建会话。
-            cache_mode_get=lambda: self.cfg.get("preview_cache_mode"))
+            cache_mode_get=lambda: self.cfg.get("preview_cache_mode"),
+            # 入站能力（D-2026-09-18）：端口映射 + 出口网卡。启动时读一次
+            # 固定；端口映射另可在保存设置时热更新，无需重启。
+            port_mapping_get=lambda: self.cfg.get("port_mapping"),
+            listen_interface_get=lambda: self.cfg.get("listen_interface"),
+            extra_trackers_get=lambda: self.cfg.get("extra_trackers"))
         self.session.start(proxy=self.cfg.proxy(),
                            metadata_timeout=self.cfg.get("metadata_timeout"))
         # 会话级限速 + 日志开关：启动即按配置应用（P2-18 此前承诺了
@@ -265,6 +322,10 @@ class MainWindow(QMainWindow):
         self.result: ParseResult | None = None
         self._preview_file: TorrentFile | None = None
         self._pending_video: tuple[TorrentFile, str] | None = None  # 等待首批数据
+        # 起表时刻（C3）：门控等待超时判据用它计时。只在**赋值** `_pending_video`
+        # 时刷新，读取处只在 `_pending_video is not None` 时才会用 —— 因此不需要
+        # 在每个清空点同步清零（陈旧值不会参与判断）。
+        self._pending_video_since: float = 0.0
         self._stream_url: str | None = None   # 当前视频流地址（失败重试用）
         self._stream_attempts = 0
         self._last_source: str = ""           # 最近一次解析来源（转下载用）
@@ -390,7 +451,15 @@ class MainWindow(QMainWindow):
         self.tabs.setTabEnabled(TAB_PREVIEW, False)
         root.addWidget(self.tabs, 1)
 
-        # hint：移到页签下方、状态栏上方（与输入框同行会挤顶栏）
+        # hint：移到页签下方、状态栏上方（与输入框同行会挤顶栏）。
+        # 右侧挂「检测入站能力」按钮（D-2026-09-18）：一键探测当前监听端口
+        # 能否从公网入站连通，不通则给出在路由器手动端口转发的步骤。
+        # 用一行 HBox 包住，左文案（拉伸）+ 右按钮，避免顶栏挤压。
+        self.hint_row = QWidget()
+        self.hint_row.setObjectName("hintRow")
+        hint_lay = QHBoxLayout(self.hint_row)
+        hint_lay.setContentsMargins(SP_LG, SP_SM, SP_LG, SP_SM)
+        hint_lay.setSpacing(SP_MD)
         self.hint = QLabel()
         # 模板保存原始指引文案：保存设置时只替换超时数字，不截断其他部分
         self._hint_template = ("解析只获取文件清单（不下载资源本体）；"
@@ -399,8 +468,22 @@ class MainWindow(QMainWindow):
         self.hint.setText(
             self._hint_template.format(int(self.session.metadata_timeout)))
         self.hint.setObjectName("hint")
-        self.hint.setContentsMargins(SP_LG, SP_SM, SP_LG, SP_SM)
-        root.addWidget(self.hint)
+        self.hint.setWordWrap(True)
+        hint_lay.addWidget(self.hint, 1)
+        self.btn_inbound = QPushButton("检测入站能力")
+        self.btn_inbound.setObjectName("ghost")
+        self.btn_inbound.setToolTip(
+            "检测当前监听端口能否从公网入站连通（UPnP 不可用时常不通）。\n"
+            "不通会给出在路由器手动做端口转发的步骤。")
+        self.btn_inbound.clicked.connect(self._detect_inbound)
+        hint_lay.addWidget(self.btn_inbound)
+        root.addWidget(self.hint_row)
+
+        # 入站能力探测桥：结果经信号回主线程展示（后台线程只 emit，不碰控件）
+        self._inbound_running = False
+        self._inbound_bridge = _InboundBridge()
+        self._inbound_bridge.done.connect(self._on_inbound_done)
+        self._inbound_bridge.failed.connect(self._on_inbound_failed)
 
         # 状态栏（#statusBar：面板底色 + 上边框）
         self.status_panel = StatusPanel()
@@ -424,6 +507,8 @@ class MainWindow(QMainWindow):
                 float(self.cfg.get("metadata_timeout")))
             # 限速与日志开关：保存即热更新，无需重启
             self.session.apply_rate_limit(int(self.cfg.get("download_rate_limit") or 0))
+            # 端口映射（UPnP/NAT-PMP）：保存即热更新，做种/入站连接的前提
+            self.session.apply_port_mapping(bool(self.cfg.get("port_mapping")))
             logutil.set_enabled(bool(self.cfg.get("logging_enabled")))
             self.hint.setText(
                 self._hint_template.format(int(self.session.metadata_timeout)))
@@ -443,8 +528,10 @@ class MainWindow(QMainWindow):
         if self._shutdown_started:
             return          # 停机窗口守卫（I2）：不启新工作、不弹模态
         self._stop_preview()
+        # plan/11 R-7：传**回调**而非快照——删除期间活任务可能新增/转正，
+        # cache_guard 会在每删一个顶层条目前重取名单（TOCTOU 逐条复核）。
         return self._clear_preview_cache_now(
-            keep_dirs=self._live_cache_dirs(),
+            keep_dirs=self._live_cache_dirs,
             log_key="main.clear_cache_now")
 
     def _live_cache_dirs(self) -> set[str]:
@@ -462,12 +549,13 @@ class MainWindow(QMainWindow):
             log_warning("main.live_cache_dirs", f"取活任务名单失败：{e}")
             return set()
 
-    def _clear_preview_cache_now(self, keep_dirs: set[str] = (),
+    def _clear_preview_cache_now(self, keep_dirs=set(),
                                  log_key: str = "main.clear_cache") -> int:
         """守卫 + 清理的统一执行段（手动清理/退出清理共用，D8/D9/C1）。
 
-        ``keep_dirs``：活任务目录快照（连同内容整体跳过清理）。返回删除
-        条目数；守卫拒绝或清理异常返回 -1（只告警）。
+        ``keep_dirs``：活任务目录快照（静态集合，退出清理路径在用）**或**
+        回调（返回最新名单，plan/11 R-7 的 TOCTOU 逐条复核形态——手动清理
+        路径在用）。返回删除条目数；守卫拒绝或清理异常返回 -1（只告警）。
         """
         if not guard_ok_for_cleanup(self.cache_dir):
             log_warning(log_key, f"拒绝清理非受管缓存目录：{self.cache_dir}")
@@ -513,6 +601,68 @@ class MainWindow(QMainWindow):
             self.session.resolve(source)
         except Exception as e:
             self._on_error(str(e))
+
+    # ---------- 入站能力检测（D-2026-09-18）----------
+
+    def _detect_inbound(self):
+        """点击「检测入站能力」：后台线程探测 + 主线程展示结果。
+
+        探测（``inbound_report``）会阻塞约 3 秒（SSDP M-SEARCH 网络等待），
+        必须跑在后台线程，否则界面冻结。``core.inbound`` 延迟导入——该模块由
+        其他 worker 并行创建，若此刻尚不存在，仅本次检测兜底失败，不连累
+        主窗口整体导入（否则 smoke/gui_feature 测试会崩）。
+        """
+        if self._shutdown_started:
+            return                      # 停机窗口守卫：不启新工作、不弹模态
+        if self._inbound_running:
+            return                      # 防重入：探测进行中忽略再次点击
+        self._inbound_running = True
+        self.btn_inbound.setEnabled(False)
+        self.btn_inbound.setText("检测中…")
+        # 监听端口取 session（启动时固定），取不到回落 6881（契约兜底）
+        try:
+            port = int(getattr(self.session, "listen_port", 6881) or 6881)
+        except Exception:
+            port = 6881
+
+        def _run():
+            try:
+                from core import inbound          # 延迟导入，规避模块尚缺失
+                report = inbound.inbound_report(listen_port=port, timeout=3.0)
+                self._inbound_bridge.done.emit(report)
+            except Exception as e:                # 探测本身异常 → 失败兜底
+                self._inbound_bridge.failed.emit(str(e))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_inbound_done(self, report: dict):
+        """后台探测成功：主线程格式化并弹窗展示（更新控件必须在主线程）。"""
+        if self._shutdown_started:
+            self._inbound_finish()               # 关窗中不弹模态，仅复位按钮
+            return
+        try:
+            from core import inbound
+            text = inbound.format_hint(report)
+        except Exception:
+            text = "检测完成，但结果格式化失败，请重试。"
+        QMessageBox.information(self, "入站能力检测结果", text)
+        self._inbound_finish()
+
+    def _on_inbound_failed(self, msg: str):
+        """后台探测异常：主线程弹失败兜底文案，绝不崩溃。"""
+        if self._shutdown_started:
+            self._inbound_finish()
+            return
+        QMessageBox.warning(
+            self, "入站能力检测失败",
+            f"检测未能完成：{msg}\n\n可稍后重试，或直接在路由器做端口转发后再试。")
+        self._inbound_finish()
+
+    def _inbound_finish(self):
+        """复位按钮状态（无论成功/失败/关窗都调用）。"""
+        self._inbound_running = False
+        self.btn_inbound.setEnabled(True)
+        self.btn_inbound.setText("检测入站能力")
 
     # ---------- 下载任务：添加与操作 ----------
 
@@ -726,6 +876,7 @@ class MainWindow(QMainWindow):
             # 再 set_stream，避免播放器读到稀疏零数据或探测不到 moov
             self._stream_url = self.server.url_for(self._stream_rel(f))
             self._pending_video = (f, self._stream_url)
+            self._pending_video_since = time.monotonic()   # 门控计时起表（C3）
             self.preview.video.set_waiting(f.name, f.size)
         else:
             self.preview.show_gallery(f)
@@ -754,8 +905,12 @@ class MainWindow(QMainWindow):
     def _on_scrub_preview(self, byte_offset: int):
         """拖动中预取：目标区间先点播，松手前数据已在路上。
 
-        request_range 自带 60 块上限，预取 4MB 足够开播解码；
+        `request_range` 的上限与顺序窗口**同源**（`window_pieces` 的 16MB 字节
+        预算，见 C1）：4MB 块 → 4 块（16MB）、16KB 块 → 60 块（960KB），
+        对本预取（目标 4MB）都够开播解码；
         误预取（拖过又拖回）由下次 seek 的 clear_piece_deadlines 回收。
+        节流由 `preview_player.SCRUB_INTERVAL_MS`（300ms）负责，不会每次
+        拖动都打一次点播。
         """
         if self._shutdown_started:
             return          # 停机窗口守卫（I2）：不启新工作、不弹模态
@@ -908,29 +1063,111 @@ class MainWindow(QMainWindow):
                 self._pending_video = None
                 self.preview.video.set_stream(url, f.name, f.size)
             else:
-                # 阶段 3：等数据 / 等索引块分句提示。**仅文案分支**——放行
-                # 判据是上面的布尔量，文案不反过来驱动门控（本轮询方法也
-                # 不读文案）。
-                self.preview.video.set_waiting_stage(
-                    WAIT_DATA if not data_ok else WAIT_INDEX)
+                # C3（2026-09-18）：门控等待**必须有上界**。旧实现在这里没有
+                # 任何计时器 —— 数据永不到达时用户会无限看到「等待数据」，
+                # 既不知道等的是什么、也不知道卡在哪。到点给可归因结论并停止
+                # 空转（下载仍在后台继续；用户可再点播放重试，重新计时）。
+                # 时间戳兜底：**直接赋值 `_pending_video` 的路径**（测试替身、
+                # 以及将来可能新增的入口）不会设 `_pending_video_since`，
+                # 那样 elapsed 会变成「从开机算起」的天文数字、超时立刻触发。
+                # 把「无时间戳」按「此刻刚开始等」处理，语义正确且对调用方宽容。
+                if self._pending_video_since <= 0:
+                    self._pending_video_since = time.monotonic()
+                elapsed_s = time.monotonic() - self._pending_video_since
+                if elapsed_s * 1000 >= self.GATE_WAIT_TIMEOUT_MS:
+                    self._on_gate_timeout(f, st, elapsed_s)
+                else:
+                    # 阶段 3：等数据 / 等索引块分句提示。**仅文案分支**——放行
+                    # 判据是上面的布尔量，文案不反过来驱动门控（本轮询方法也
+                    # 不读文案）。
+                    self.preview.video.set_waiting_stage(
+                        WAIT_DATA if not data_ok else WAIT_INDEX)
+
+    # ---------- 等待与失败的可归因（C3 / C4） ----------
+
+    def _on_gate_timeout(self, f, st: dict, elapsed_s: float):
+        """门控等待超时：给可归因结论、停止空转（C3）。
+
+        不弹模态框：播放页已有醒目的错误标题区（`show_error`），弹窗会打断
+        用户正在做的其他操作；同时写状态栏，保证「不看播放页也能看到」。
+        """
+        msg = gate_wait_timeout_reason(st, f, elapsed_s, self._proxy_hint())
+        self._pending_video = None          # 停止空转（用户可再点播放重试）
+        log_warning("main.gate_timeout", msg)
+        self.preview.video.show_error(msg)
+        self.status_panel.set_state(msg)
+
+    def _proxy_hint(self) -> str:
+        """已配置代理时的提示（复用代理自检的纯文案，**不联网、不阻塞 GUI**）。"""
+        try:
+            return proxycheck.hint_text(self.cfg.proxy())
+        except Exception as e:
+            log_warning("main.proxy_hint", f"{e}")
+            return ""
+
+    def _last_stream_note(self) -> str:
+        """流服务最近一次应答摘要（C4）。取不到时返回空串，绝不抛。"""
+        try:
+            return self.server.last_response_note()
+        except Exception as e:
+            log_warning("main.stream_note", f"{e}")
+            return ""
 
     # ---------- 播放失败重试 ----------
 
+    # 退避参数（2026-09-17 等待超时专项）。旧实现是 1500ms × 次数 的**线性**
+    # 退避，并在第 4 次失败后直接 `return`——弹一句「播放器多次打开失败」就
+    # 不再重试。慢链路上数据常常只差几秒就位（尾部 moov 入口 + 头部前缀），
+    # 用户看到的却是终态错误。改为**指数**退避 + 不硬性放弃：越过
+    # STREAM_RETRY_SOFT_LIMIT 只提示一次，重试链继续以封顶间隔跑（数据真到位
+    # 就立刻开播，数据永远不来也不会比旧行为更差——旧行为同样什么都没发生，
+    # 只是不再更新提示）。
+    STREAM_RETRY_BASE_MS = 800
+    STREAM_RETRY_MAX_MS = 12000
+    STREAM_RETRY_SOFT_LIMIT = 3
+
+    # 开播门控的等待上限（毫秒，C3）。旧实现没有计时器：数据永不到达时用户
+    # 会无限看到「等待数据」。取 60s —— 给慢链路足够时间，又能在「确实等不出来」
+    # 时给出结论。注意与 `metadata_timeout`（默认 90s）区分：那是**元数据阶段**
+    # 的上限，本项是元数据到手**之后**等首批数据/索引块，是前后两个阶段。
+    GATE_WAIT_TIMEOUT_MS = 60_000
+
     def _on_stream_failed(self):
-        """播放器打开媒体失败：多半是索引块/数据仍在下载，稍后重试。"""
+        """播放器打开媒体失败：多半是索引块/数据仍在下载 → 催数据 + 退避重试。
+
+        「催数据」（``scheduler.rearm``）是有意加的：旧实现只重排一个定时器，
+        完全被动等 ``tick()``（700ms 一拍，且带「窗口仍充裕即返回」的防抖）
+        把数据补上。播放器**已经**失败，说明按现有预约没能及时满足它，
+        此时该做的是立刻把尾部索引窗与播放位置窗口重刷为最高优先级。
+        """
         if self._shutdown_started:
             return          # 停机窗口守卫（I2）：不启新工作、不弹模态
         if self._preview_file is None or self._pending_video is not None:
             return  # 已停止或尚未开播
         if self._stream_url is None:
             return
-        if self._stream_attempts >= 4:
-            self.preview.video.show_error("播放器多次打开失败：数据仍未就绪，继续下载中…")
-            self.status_panel.set_state("播放器多次打开失败：数据仍未就绪，继续下载中…")
-            return
         self._stream_attempts += 1
-        delay = 1500 * self._stream_attempts
+        n = self._stream_attempts
+        self._rearm_download()
+        if n == self.STREAM_RETRY_SOFT_LIMIT:
+            # C4：带上流服务最近一次应答（码 + 区间 + 就绪量 + 等待耗时）——
+            # 否则用户与日志里只剩播放器的原始报错，服务端侧一无所知。
+            msg = stream_failure_message(self._last_stream_note())
+            self.preview.video.show_error(msg)
+            self.status_panel.set_state(msg)
+        delay = min(self.STREAM_RETRY_MAX_MS,
+                    self.STREAM_RETRY_BASE_MS * (2 ** min(6, n - 1)))
         QTimer.singleShot(delay, self._retry_stream)
+
+    def _rearm_download(self):
+        """催数据：立即重刷尾部索引窗 + 播放位置窗口（幂等、有界）。
+
+        失败只记日志——重试链本身不因催数据失败而中断。
+        """
+        try:
+            self.session.scheduler.rearm()
+        except Exception as e:
+            log_warning("main.stream_rearm", f"{e}")
 
     def _retry_stream(self):
         if self._shutdown_started:

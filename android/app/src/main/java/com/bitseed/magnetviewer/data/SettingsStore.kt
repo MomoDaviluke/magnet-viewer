@@ -28,6 +28,8 @@ import kotlinx.coroutines.flow.map
  *            ├ downloadRateLimit ─→ BtEngine.applyRateLimit(kbps)
  *            ├ metadataTimeout ──→ BtEngine.applyMetadataTimeout(seconds)
  *            ├ previewCacheMode ─→ BtEngine.setPreviewCacheMode(mode)
+ *            ├ portMapping ──────→ BtEngine.applyPortMapping(enabled)      （热生效）
+ *            ├ extraTrackers ────→ BtEngine.applyExtraTrackers(enabled)    （下次加种生效）
  *            ├ uiTheme ──────────→ isDarkTheme() → MagnetViewerTheme（即时换肤）
  *            └ （cacheLimitMb / loggingEnabled 见下方注释：Android 侧只持久化，见「未接线」说明）
  * ```
@@ -67,6 +69,12 @@ object SettingsKeys {
   const val UI_THEME = "ui_theme"
   const val LOGGING_ENABLED = "logging_enabled"
 
+  /** 入站能力（诊断 D-2026-09-18，安卓侧同步桌面）：UPnP/NAT-PMP 端口映射。 */
+  const val PORT_MAPPING = "port_mapping"
+
+  /** peer 发现（诊断 D-2026-09-18，安卓侧同步桌面）：追加 HTTP/HTTPS 兜底 tracker。 */
+  const val EXTRA_TRACKERS = "extra_trackers"
+
   /** 全部键名（顺序 = 桌面 DEFAULTS 顺序），供单测逐键断言。 */
   val ALL: List<String> =
     listOf(
@@ -82,6 +90,8 @@ object SettingsKeys {
       PREVIEW_CACHE_MODE,
       UI_THEME,
       LOGGING_ENABLED,
+      PORT_MAPPING,
+      EXTRA_TRACKERS,
     )
 }
 
@@ -144,7 +154,9 @@ fun isDarkTheme(themeMode: String?, systemDark: Boolean): Boolean =
  * 执行点（每一项都有接线，见各字段注释）：
  * - `cacheLimitMb` → `MagnetViewModel.enforceCacheLimit`（逐次设置变更 + 启动恢复后）；
  * - `loggingEnabled` → `AppLog.syncFromSettings`（**三处日志出口的总开关**，修 I-02）；
- * - 其余项 → `MagnetViewModel.applySettings`（代理/限速/超时/缓存模式热更新）。
+ * - 其余项 → `MagnetViewModel.applySettings`（代理/限速/超时/缓存模式热更新，
+ *   以及 `portMapping` → `BtEngine.applyPortMapping`、
+ *   `extraTrackers` → `BtEngine.applyExtraTrackers`）。
  */
 data class AppSettings(
   val proxyType: String = PROXY_TYPE_NONE,
@@ -159,6 +171,22 @@ data class AppSettings(
   val previewCacheMode: String = PREVIEW_CACHE_CONVERT,
   val uiTheme: String = THEME_LIGHT,
   val loggingEnabled: Boolean = true,
+  /**
+   * UPnP/NAT-PMP 端口映射（诊断 D-2026-09-18）。默认 false —— 与桌面
+   * `DEFAULTS["port_mapping"]` 一致：本应用默认只「收」不做种，端口映射徒增暴露面。
+   * 关闭时会连不上同为 NAT 后的 peer（swarm 里占比很高），做种时也无人能连入。
+   * 保存设置即热生效（`BtEngine.applyPortMapping`）。
+   */
+  val portMapping: Boolean = false,
+  /**
+   * 追加 HTTP/HTTPS 兜底 tracker（诊断 D-2026-09-18）。默认 false —— 与桌面
+   * `DEFAULTS["extra_trackers"]` 一致：默认路径仍是既有 5 条 udp。
+   * 开启条件：UDP 出站受阻（实测公共 DHT 引导节点 5 个仅 1 个响应），
+   * 且磁力链不带 `tr=` 时 peer 发现只剩 DHT 一条路。
+   * **保存即生效**：加种路径注入 5/10 条，已在跑的任务由
+   * `BtEngine.applyExtraTrackers` 直接追加缺失条目（只做加法，不必重新添加任务）。
+   */
+  val extraTrackers: Boolean = false,
 ) {
 
   /** 值域归一（可反复调用，幂等）。 */
@@ -215,6 +243,8 @@ data class AppSettings(
             ?: d.previewCacheMode,
         uiTheme = normalizeThemeMode(p[stringPreferencesKey(SettingsKeys.UI_THEME)] ?: d.uiTheme),
         loggingEnabled = p[booleanPreferencesKey(SettingsKeys.LOGGING_ENABLED)] ?: d.loggingEnabled,
+        portMapping = p[booleanPreferencesKey(SettingsKeys.PORT_MAPPING)] ?: d.portMapping,
+        extraTrackers = p[booleanPreferencesKey(SettingsKeys.EXTRA_TRACKERS)] ?: d.extraTrackers,
       )
     }
   }
@@ -235,6 +265,8 @@ fun writeSettings(p: MutablePreferences, s: AppSettings): MutablePreferences {
   p[stringPreferencesKey(SettingsKeys.PREVIEW_CACHE_MODE)] = v.previewCacheMode
   p[stringPreferencesKey(SettingsKeys.UI_THEME)] = v.uiTheme
   p[booleanPreferencesKey(SettingsKeys.LOGGING_ENABLED)] = v.loggingEnabled
+  p[booleanPreferencesKey(SettingsKeys.PORT_MAPPING)] = v.portMapping
+  p[booleanPreferencesKey(SettingsKeys.EXTRA_TRACKERS)] = v.extraTrackers
   return p
 }
 

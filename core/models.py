@@ -148,6 +148,12 @@ class PieceMap:
 
     have(piece_index) 返回该种子分块是否已完整落盘
     （libtorrent 只有整块落盘才算 have，未下载区间是稀疏零数据，不可读取）。
+
+    ``view``：**可选**的增量可用性视图（``core.pieceview.PieceView``）。
+    有它时，``contiguous_bytes_of`` / ``ready_until_of`` / ``range_available_of``
+    走「一次性基线 + 增量推进」，判定成本与种子规模**无关**；没有它（测试替身、
+    纯函数调用）退回 ``have`` 逐块路径，行为与基线逐字一致。
+    本字段刻意做成不透明对象，``models`` 不依赖 libtorrent 也不依赖 pieceview。
     """
     piece_length: int
     offset: int                 # 文件首字节在种子数据流中的偏移
@@ -155,6 +161,7 @@ class PieceMap:
     end_piece: int              # 闭区间
     size: int
     have: Callable[[int], bool]
+    view: object = None         # 可选：PieceView（增量快路径）
 
 
 def have_from_bitmap(pieces) -> Callable[[int], bool]:
@@ -165,6 +172,10 @@ def have_from_bitmap(pieces) -> Callable[[int], bool]:
     一次 `handle.status()` 快照 + Python 侧 O(1) 索引。
     越界/非整数索引一律 False——与 have_piece 语义一致（不可判定按不可用，
     绝不误判可读）。位图与 have_piece 的一致性已在 lt 2.1.1 实测验证。
+
+    注意（plan/09）：本函数仍是**体积O(块数)**的一次性物化（实测 18.75 ns/块）。
+    热路径已改走 ``PieceView``（惰性 + 增量）；本函数保留给测试替身与
+    「小规模精确扫描」等场景。
     """
     bits = list(pieces)
     n = len(bits)
@@ -180,6 +191,18 @@ def have_from_bitmap(pieces) -> Callable[[int], bool]:
     return have
 
 
+def bytes_up_to_piece(piece: int, piece_length: int, offset: int,
+                      limit: int) -> int:
+    """块号 → 文件内字节位置：``max(0, min(limit, piece*piece_length - offset))``。
+
+    **共用换算公式**（plan/09 判据 A4 的构造保证）：位图路径
+    （``contiguous_bytes`` / ``ready_until``）与增量路径
+    （``*_of`` 系列）必须共用同一公式，两条路径才可能**逐值一致**——
+    否则「换了 have 提供者，结果不变」只能靠人眼约定，迟早漂移。
+    """
+    return max(0, min(limit, piece * piece_length - offset))
+
+
 def contiguous_bytes(pm: PieceMap, limit: int | None = None) -> int:
     """文件头部连续可读字节数（从 0 开始、中途无缺失块的连续区间）。
 
@@ -192,8 +215,7 @@ def contiguous_bytes(pm: PieceMap, limit: int | None = None) -> int:
     p = pm.start_piece
     while p <= pm.end_piece and pm.have(p):
         p += 1
-    contig = p * pm.piece_length - pm.offset
-    return max(0, min(size, contig))
+    return bytes_up_to_piece(p, pm.piece_length, pm.offset, size)
 
 
 def ready_until(pm: PieceMap, start: int, end_excl: int) -> int:
@@ -231,3 +253,59 @@ def range_available(pm: PieceMap, start: int, end_excl: int) -> bool:
         if not pm.have(p):
             return False
     return True
+
+
+# ---------------------------------------------------------------- 增量派发层
+# plan/09 方案 D：`PieceMap` 上挂了增量视图时走规模无关的快路径；否则逐字
+# 退回上面的纯函数。三个派发函数**不改变任何语义**——判据 A4「逐值一致」
+# 由「共用 bytes_up_to_piece + 相同的边界条件」构造保证，并有 D6 段常驻对拍。
+
+def _view_of(pm: PieceMap):
+    v = getattr(pm, "view", None)
+    return v if v is not None else None
+
+
+def contiguous_bytes_of(pm: PieceMap, limit: int | None = None) -> int:
+    """``contiguous_bytes`` 的增量版本（无 view 时等价于调用纯函数）。"""
+    view = _view_of(pm)
+    if view is None or pm.piece_length <= 0:
+        return contiguous_bytes(pm, limit)
+    size = pm.size if limit is None else min(pm.size, limit)
+    if size <= 0:
+        return 0
+    end = view.contiguous_from(pm.start_piece, pm.end_piece + 1)
+    if end is None:                       # 不可判定 → 退回纯函数（保守）
+        return contiguous_bytes(pm, limit)
+    return bytes_up_to_piece(end, pm.piece_length, pm.offset, size)
+
+
+def ready_until_of(pm: PieceMap, start: int, end_excl: int) -> int:
+    """``ready_until`` 的增量版本（无 view 时等价于调用纯函数）。"""
+    view = _view_of(pm)
+    if start >= end_excl or pm.piece_length <= 0 or end_excl > pm.size:
+        return start
+    if view is None:
+        return ready_until(pm, start, end_excl)
+    p0 = (pm.offset + start) // pm.piece_length
+    p1 = (pm.offset + end_excl - 1) // pm.piece_length
+    p = view.contiguous_from(p0, p1 + 1)
+    if p is None:
+        return ready_until(pm, start, end_excl)
+    return max(start, min(end_excl, p * pm.piece_length - pm.offset))
+
+
+def range_available_of(pm: PieceMap, start: int, end_excl: int) -> bool:
+    """``range_available`` 的增量版本（无 view 时等价于调用纯函数）。"""
+    if start >= end_excl or end_excl <= 0:
+        return True
+    if end_excl > pm.size or pm.piece_length <= 0:
+        return False
+    view = _view_of(pm)
+    if view is None:
+        return range_available(pm, start, end_excl)
+    p0 = (pm.offset + start) // pm.piece_length
+    p1 = (pm.offset + end_excl - 1) // pm.piece_length
+    ok = view.range_ready_pieces(p0, p1)
+    if ok is None:                        # 不可判定 → 退回纯函数（保守）
+        return range_available(pm, start, end_excl)
+    return bool(ok)

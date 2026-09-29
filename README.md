@@ -21,7 +21,7 @@
 - 本机环境（JDK 17/21、SDK 36、NDK r29、`gradle.bat` 的坑）：见 [`android/ENV.md`](android/ENV.md)
 - 端到端测试靶场（本机做种 + 磁力链 peer 提示 + 模拟器 adb 驱动，不依赖公网）：见 [`android/tools/testrig/README.md`](android/tools/testrig/README.md)
 
-**两版关系**：桌面 Python 版仍是**行为参照**——调度语义（播放窗口按字节、递增 deadline、moov 尾部入口块、点播块数上限）、落盘布局（`.preview/<ih>/`、`downloads/<ih>/`、`.tasks.json`、`.resume/<ih>.fastresume`）与设置键名逐条对齐，并由**跨语言 golden 夹具**（13 组 / 155 条，`android/tools/gen_parity_fixtures.py`）机器校验一致性。
+**两版关系**：桌面 Python 版仍是**行为参照**——调度语义（播放窗口按字节、递增 deadline、moov 尾部入口块、点播块数上限）、落盘布局（`.preview/<ih>/`、`downloads/<ih>/`、`.tasks.json`、`.resume/<ih>.fastresume`、`.meta/<ih>.torrent`；`.dht_state` 为桌面专有——libtorrent4j 2.1.0-39 未绑定 `load_state`，安卓端存得下读不回，故未移植）与设置键名逐条对齐，并由**跨语言 golden 夹具**（13 组 / 155 条，`android/tools/gen_parity_fixtures.py`）机器校验一致性。
 
 ## 运行
 
@@ -159,8 +159,10 @@ magnet-viewer/
 ├── taskops_test.py       # 任务 CRUD 专项（含 R-3 出锁派生探针，秒级）
 ├── resolver_test.py      # 解析与元数据编排专项（假会话，秒级）
 ├── preview_test.py       # 预览桥与状态专项（假句柄，秒级）
+├── inbound_test.py       # 入站能力自检（内网 IP 枚举 / SSDP 探测 / 手动转发文案，纯标准库）
+├── proxycheck_test.py    # 代理可用性自检（SOCKS5 真握手 / 会话接线 / 超时文案根因提示）
 ├── hybrid_v2_test.py     # 入口矩阵混合 v2 列（两入口端到端）
-├── regression_run.py     # 一键回归（20 套）
+├── regression_run.py     # 一键回归（27 套）
 ├── magnet-viewer.spec    # PyInstaller 打包配置（onedir，产物 dist/MagnetViewer/）
 ├── build.bat             # 一键打包（清旧产物 → 构建 → pack_check 自检）
 ├── pack_check.py         # 打包产物自检（必需组件 / 瘦身是否失效 / 体积哨兵）
@@ -210,16 +212,17 @@ magnet-viewer/
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
 | `qt_stream_open_test.py`（QMediaPlayer FFmpeg 后端 offscreen 实测，依赖同上） | 通过：A 仅头部→`FormatError`（即用户遇到的 moov atom not found）；B 头+尾+按需补拉→`LoadedMedia` 成功开播；C 全量→成功 |
 | GUI 无头启动 | 通过（主窗口构造、会话与流服务启动、退出码 0） |
-| `gui_feature_test.py`（offscreen 实测 126 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume 不误删）** / **画廊按 save_subdir 隔离路径加载大图** / **评审 P0 防回归（添加下载对话框 priority() 可调用 · 下载页 700ms 刷新后选中与详情保持）** / **播放器 seek 防抖·预取·缓冲分段着色** |
+| `gui_feature_test.py`（offscreen 实测 126 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume/.meta/.dht_state 不误删）** / **画廊按 save_subdir 隔离路径加载大图** / **评审 P0 防回归（添加下载对话框 priority() 可调用 · 下载页 700ms 刷新后选中与详情保持）** / **播放器 seek 防抖·预取·缓冲分段着色** |
 | `single_file_test.py`：单文件种子 × 本地种子/磁力链两条入口 | 通过（12/12）：路径层级、`file_disk_path` 落点、流服务按 `f.path` 供给 206（目录隔离后断言随 `.preview/<ih>/` 布局更新，接口未变） |
 | `local_torrent_test.py`：本地 .torrent 闭环 | 通过（9/9）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
 | `hybrid_v2_test.py`：**入口矩阵混合 v2 列补齐**（P0-2/P1-1 防回归）：默认产种（meta version=2）× 本地 .torrent / 磁力链两条入口 | 通过（19/19）：造种自检 parser hash==lt.info_hash()（SHA-256 截断 20 字节）、两入口 info_hash 与造种端一致、多文件层级 root/inner、预览下载完成、流服务 206、纯 v2 明确 ValueError（剥 files 键构造）|
 | `download_mgr_test.py`：下载管理模块验收（MVP 7 + 增强 2 + 边界 5 + 流服务安全） | **通过（80/80，退出码 0）**：添加磁力链→下载中 / 暂停（5s 磁盘字节快照不变）/ 恢复（**进度续增**为主判据——暂停快照可能已因分块乱序到达而等于全长，此时字节数本就无法再增，故字节续增降级为条件断言）/ 删除任务（目录释放、重添无残留）/ 退出重启续传（`.tasks.json`+fastresume 读回、上传增量证不重下）/ 完成（落盘=声明值）/ 双任务并发 100% / 限速 ±20% / 边界（重复 hash·per-task 看门狗·防穿越·resume 损坏重建·缓存被清不崩溃）/ 下载中任务流服务安全（分块级可用性，绝不整文件喂零数据） |
+| `perf_cache_test.py`：缓存与吞吐性能专项（本机做种闭环） | **通过（69 项）**：元数据缓存编解码往返/防穿越/**损坏自愈**/LRU 淘汰/命中率统计 / **冷解析 vs 热解析实测（0.31s → 0.005s，同一磁力链二次解析零网络往返）** / 下载任务命中缓存跳过 META_FETCH / **重启恢复 fastresume 含 info 段（不再全体重拉元数据）** / 会话吞吐参数构造值+真会话回读 / **告警响应 A/B（固定 sleep 107ms → wait_for_alert ~0ms）** / DHT 路由表读写容错 / 清理保留名单 |
 | `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python live_test.py` 复核。 |
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
-> 一键回归：`python regression_run.py`（20 套：`contract_check` 契约自检 + `theme_check` 主题门禁 + 6 套重构专项（persist/session/registry/taskops/resolver/preview，假依赖秒级）+ `close_lag_test` 关窗异步化 + 9 套旧测试（含混合 v2 入口矩阵）+ 下载管理模块验收；也可 `python regression_run.py smoke` 按名字前缀单跑）。
-> 覆盖率报告：`python coverage_run.py`（快速集，秒级）/ `coverage_run.py full`（全量 20 套）——coverage.py 接入，只报告不设门禁；基线（2026-09-07 快速集）：registry 97% / preview 94% / session 95% / persist 90% / resolver 88% / fetcher 85%。
+> 一键回归：`python regression_run.py`（27 套：`contract_check` 契约自检 + `theme_check` 主题门禁 + 6 套重构专项（persist/session/registry/taskops/resolver/preview，假依赖秒级）+ `close_lag_test` 关窗异步化 + 9 套旧测试（含混合 v2 入口矩阵）+ 下载管理模块验收 + 7 套专项护栏（`perf_cache_test` 缓存与吞吐参数 / `wait_timeout_test` 门控与等待超时 / `pieceview_test` 块可用性视图 / `throughput_test` 千兆吞吐 / `concurrency_test` 并发安全 / `inbound_test` 入站能力自检 / `proxycheck_test` 代理可用性自检）；也可 `python regression_run.py smoke` 按名字前缀单跑）。
+> 覆盖率报告：`python coverage_run.py`（快速集，秒级）/ `coverage_run.py full`（全量 27 套）——coverage.py 接入，只报告不设门禁；基线（2026-09-07 快速集）：registry 97% / preview 94% / session 95% / persist 90% / resolver 88% / fetcher 85%。
 > 测试覆盖策略：按**数据入口路径**（本地种子 / 磁力链；单文件 / 多文件 / 混合 v2）铺排，而非仅按功能模块——历史上三个缺陷都源于同一功能的不同入口未各自覆盖。详见 `REVIEW.md`。
 
 ## 已修复问题
@@ -232,7 +235,7 @@ magnet-viewer/
 6. **本地流服务目录穿越（安全修复）**。两处缺陷：
    - 恶意种子可声明 `path: ["..","..","Windows","win.ini"]` 或绝对路径，旧代码在 `file_disk_path()` 中原样拼接，路径会逃出缓存目录。修复：新增 `core.models.safe_rel_path()`，逐级丢弃 `.`/`..`/空段、剥离盘符与根前缀、把分隔符与 Windows 非法字符替换为下划线；`parser` 与 `fetcher` 两条路径构造链路均已接入。
    - 流服务的越界校验用 `fp.startswith(root)`，会把**同前缀兄弟目录**误判为合法（`C:\...\cacheT` 与 `C:\...\cacheT_evil`）。实测证明旧校验对 `/../cacheT_evil/secret.mp4` 返回 True 并放行。修复：改用 `os.path.commonpath()` + `normcase` 的 `_is_within()`。
-7. **「清理缓存」误删用户下载数据（数据安全修复）**。设置对话框「立即清理缓存」先经主窗口保留名单清预览缓存后，又用 `_rmtree_quiet` **无名单清空整个缓存目录**——`downloads/`（已下载文件）、`.tasks.json`（任务清单）、`.resume/`（续传数据）全被删除。修复：清理统一收敛到 `core.cache_guard.clear_cache_contents()`（保留名单：downloads/.tasks.json/.resume/受管标记），所有清理入口（对话框/退出清理）共用。
+7. **「清理缓存」误删用户下载数据（数据安全修复）**。设置对话框「立即清理缓存」先经主窗口保留名单清预览缓存后，又用 `_rmtree_quiet` **无名单清空整个缓存目录**——`downloads/`（已下载文件）、`.tasks.json`（任务清单）、`.resume/`（续传数据）全被删除。修复：清理统一收敛到 `core.cache_guard.clear_cache_contents()`（保留名单：downloads/.tasks.json/.resume/.meta/.dht_state/受管标记，后两者为性能专项新增的元数据缓存与 DHT 路由表快照），所有清理入口（对话框/退出清理）共用。
 8. **画廊图片在任务隔离布局下永不显示（功能失效修复）**。目录隔离改造后任务落盘 `cache_dir/.preview/<ih>/` 或 `downloads/<ih>/`，而 `ui/gallery.py` 仍按 `cache_dir` 平铺拼路径 → 已下载图片永远显示"下载中…"。修复：新增 `core.models.disk_root()`（`save_subdir` 相对时拼接、绝对时原样使用），画廊与主窗口的磁盘键、流服务路径统一经它计算。
 9. **设置项「默认下载目录」「默认并发下载数」保存后不生效（设置接线修复）**。`SessionManager` 构造只传了 cache_dir，两个设置项从未接入。修复：主窗口按配置传入 `download_dir`/`active_downloads`；流服务支持多根目录（`bases`），`download_dir` 配置在缓存目录之外时任务文件的预览/分块级可用性仍可服务（修改需重启生效，设置面板已注明）。
 

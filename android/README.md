@@ -19,7 +19,8 @@
 | 缓存配额 | `cache_limit_mb` 超限按 LRU 清理 `.preview/`（保护活跃任务），设置页可「立即清理」并看当前占用 |
 | 持久化 | `.tasks.json` 原子写 + `.resume/<ih>.fastresume`；**杀进程/重启后清单自动恢复**，可续传 |
 | 后台运行 | `dataSync` 前台服务 + 通知（暂停/继续/停止）；灭屏继续下载 |
-| 设置 | 代理（none/socks5/http + 账号密码 + peer 走代理）、下载限速、元数据超时、缓存上限、预览缓存模式（convert/hold）、主题（浅色/深色/跟随系统）、日志开关；DataStore 持久化，保存即生效 |
+| 设置 | 代理（none/socks5/http + 账号密码 + peer 走代理，**含探活与不可达回退直连**）、下载限速、元数据超时、缓存上限、预览缓存模式（convert/hold）、主题（浅色/深色/跟随系统）、日志开关、**端口映射（UPnP/NAT-PMP）**、**追加兜底 tracker**；DataStore 持久化，保存即生效 |
+| 入站与 peer 发现 | `port_mapping` 开 UPnP/NAT-PMP（无入站端口时连不上 NAT 后的 peer）；`extra_trackers` 在 UDP 受阻时追加一组 HTTP/HTTPS tracker 作为第二条发现通道（**保存即生效**：加种注入 5/10 条，已在跑的任务直接追加缺失条目）。两项默认关闭，与桌面 `DEFAULTS` 一致 |
 
 ## 落盘布局（与桌面一致）
 
@@ -96,13 +97,18 @@ python android/tools/release_check.py --self-test  # 只跑内置自检（不需
 - **下载限速**在部分场景不生效（libtorrent 限速器与大块/本地通道交互问题，桌面版同源），做种端侧限速在本机回环上也不稳定。
 - **工作目录在应用内部存储**：文件对文件管理器不可见，卸载即删。需要交付给用户时走导出（后续阶段）或先转到 `downloads/` 目录。
 - 模拟器上读写 `/storage/emulated/0` 会触发系统 MediaProvider 崩溃（见上）；真机不受影响，但代码已统一走内部存储。
+- **端口映射在蜂窝网络下多数会失败**：蜂窝出口没有可发现的 IGD，UPnP/NAT-PMP 都会失败。这是预期结果、不影响下载（DHT/tracker 仍能建立出站连接），只有 Wi-Fi 下的家用路由器才可能成功。另外部分运营商是 CGNAT，**用户无法手动做端口转发**——所以本开关是安卓侧唯一手段。
+- **兜底 tracker 只做加法、不做减法**：开启会把缺失的 HTTP/HTTPS tracker 追加到**当前任务**
+  （不必重新添加磁力链）；但关闭开关**不会**移除已追加的条目 —— 这是刻意的，因为
+  `replaceTrackers` 是整体替换，会把磁力链自带的 `tr=` 一起抹掉。重启后回到基线 5 条。
+  与桌面版的差异：桌面只在加种时注入（下次添加任务才生效），安卓多做了「对运行中任务追加」。
 
 ## 测试与验证
 
 | 手段 | 现状 |
 |---|---|
-| JVM 单测 | **181 个**（流服务语义、调度纯函数、持久化/恢复、配额 LRU、任务操作守卫、画廊逻辑等），无 `@Ignore`、无空断言 |
-| 跨语言对拍 | `tools/gen_parity_fixtures.py` 由桌面 Python 生成 golden 夹具（13 组 / 155 条），Kotlin 侧逐条断言一致；`--check` 可作 CI 门禁 |
+| JVM 单测 | **297 个**（流服务语义、调度纯函数、持久化/恢复、配额 LRU、任务操作守卫、画廊逻辑、代理探活、端口映射决策、兜底 tracker 注入面等），无 `@Ignore`、无空断言 |
+| 跨语言对拍 | `tools/gen_parity_fixtures.py` 由桌面 Python 生成 golden 夹具（**14 组 / 156 条**），Kotlin 侧逐条断言一致；`--check` 可作 CI 门禁 |
 | 端到端靶场 | `tools/testrig/`：本机做种 + 磁力链 `x.pe` peer 提示 + 模拟器 `adb` 驱动，**不依赖公网**；含视频/大文件/图片三套夹具 |
 | 发布包实测 | release APK 在模拟器上跑通「解析 → 清单 → 预览出画面」；签名/16KB 对齐/ABI 三项均过 |
 | CI | `.github/workflows/android.yml`（构建+单测+上传产物，另含对拍夹具一致性门禁）；**尚未在 GitHub 上真跑过** |

@@ -1,3 +1,22 @@
 <resources>
     <string name="app_name">MagnetViewer</string>
+
+    <!-- 主屏（MagnetScreen）—— 审计 2026-09-29 第 17 项分批抽取：先抽主路径高曝光文案 -->
+    <string name="app_title">磁力链预览器</string>
+    <string name="settings">设置</string>
+    <string name="input_placeholder">粘贴磁力链接 magnet:?xt=urn:btih:…</string>
+    <string name="resolve">解析</string>
+    <string name="resolving">解析中…</string>
+    <string name="stop_preview">停止预览</string>
+    <string name="retry">重试</string>
+    <string name="action_preview">预览</string>
+    <string name="action_not_video">非视频</string>
+    <string name="action_image_gallery">图片 · 画廊</string>
+    <string name="seek_finish_note">拖动结束生效（按字节位置）</string>
+
+    <!-- 空态（EmptyState） -->
+    <string name="empty_title">还没有任务</string>
+    <string name="empty_subtitle">粘贴磁力链，点「解析」开始</string>
+    <string name="empty_hint">先看完整文件清单，不下载本体</string>
+    <string name="sample_magnet">示例磁力链</string>
 </resources>

@@ -28,6 +28,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bitseed.magnetviewer.theme.LocalPal
 import com.bitseed.magnetviewer.theme.LocalShapes
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.heightIn
 
 /**
  * 删除确认底部 Sheet（G-01 / 方案 B §4·§5）：
@@ -48,11 +50,11 @@ fun DeleteConfirmSheet(
   var choice by remember { mutableStateOf<DeleteConfirmLogic.Choice?>(DeleteConfirmLogic.Choice.KEEP) }
 
   ModalBottomSheet(onDismissRequest = onDismiss) {
-    Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-      Text("移除任务", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
+    Column(modifier = Modifier.fillMaxWidth().padding(18.dp)) {
+      Text("移除任务", style = MaterialTheme.typography.titleMedium, color = pal.text)
       Spacer(Modifier.height(4.dp))
-      Text(taskName, fontSize = 13.sp, color = pal.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-      Spacer(Modifier.height(16.dp))
+      Text(taskName, style = MaterialTheme.typography.bodySmall, color = pal.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      Spacer(Modifier.height(18.dp))
       val ordered = DeleteConfirmLogic.ORDER
       ordered.forEachIndexed { i, c ->
         val dangerous = DeleteConfirmLogic.isDangerous(c)
@@ -67,22 +69,24 @@ fun DeleteConfirmSheet(
               .background(bg)
               .border(1.dp, borderColor, shapes.shapeButton)
               .clickable { choice = c }
-              .padding(horizontal = 12.dp, vertical = 10.dp)
+              .padding(horizontal = 12.dp, vertical = 12.dp)
         ) {
           Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(label, fontSize = 13.sp, color = fg, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-            if (choice == c) Text("✓", fontSize = 13.sp, color = pal.accent)
+            Text(label, style = MaterialTheme.typography.bodySmall, color = fg, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            if (choice == c) Text("✓", style = MaterialTheme.typography.bodySmall, color = pal.accent)
           }
         }
         if (i < ordered.size - 1) Spacer(Modifier.height(DeleteConfirmLogic.GAP_DP.dp))
       }
-      Spacer(Modifier.height(16.dp))
+      Spacer(Modifier.height(18.dp))
       Row {
         Button(
           onClick = { onConfirm(DeleteConfirmLogic.confirm(choice)); onDismiss() },
           shape = shapes.shapeButton,
-        ) { Text("确认移除", fontSize = 13.sp) }
-        TextButton(onClick = { onConfirm(null); onDismiss() }) { Text("取消", fontSize = 13.sp, color = pal.accent) }
+        ) { Text("确认移除", style = MaterialTheme.typography.bodySmall) }
+        TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = { onConfirm(null); onDismiss() }) { Text("取消", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
       }
     }
   }

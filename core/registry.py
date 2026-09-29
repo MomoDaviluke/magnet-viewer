@@ -23,6 +23,7 @@ remove_torrent）就地 log_warning，与迁移前逐字节同语义。
 """
 from __future__ import annotations
 
+import itertools
 import os
 import time
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ from .states import STATE_META_FETCH, STATE_READY
 DOWNLOADS_SUBDIR = "downloads"
 PREVIEW_SUBDIR = ".preview"
 METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种（fetcher 再导出，兼容）
+
+# hash_key 兜底临时键的单调序号（审计 2026-09-29：替代可复用的 id(handle)）
+_TMP_KEY_SEQ = itertools.count()
 
 
 @dataclass
@@ -77,8 +81,11 @@ def hash_key(handle) -> str:
     ih = ih.strip().lower()
     if len(ih) not in (40, 64) or any(c not in "0123456789abcdef"
                                       for c in ih):
-        # 兜底：纯 v2 / 无 btih 磁力链（增强期用临时 task_id 匹配，见 t2 规划）
-        return f"tmp-{id(handle)}"
+        # 兜底：纯 v2 / 无 btih 磁力链（增强期用临时 task_id 匹配，见 t2 规划）。
+        # 审计 2026-09-29（P3）：原先用 tmp-{id(handle)}——CPython 的 id 在
+        # 对象回收后可被复用，两个先后存活的失效句柄可能撞同一临时键导致
+        # 注册表串台。改用单调递增序号（count.__next__ 是 C 实现，GIL 下原子）。
+        return f"tmp-{next(_TMP_KEY_SEQ)}"
     return ih
 
 
@@ -122,6 +129,7 @@ class TaskRegistry:
         self._resolve_started: float = 0.0
         self._gen: int = 0
         self._metadata_timeout: float = METADATA_TIMEOUT
+        self._struct_version: int = 0
 
     # ---------- 别名（property：读写都不带锁，供调用方在自持锁段内用） ----------
 
@@ -180,6 +188,21 @@ class TaskRegistry:
     @metadata_timeout.setter
     def metadata_timeout(self, v: float) -> None:
         self._metadata_timeout = float(v)
+
+    @property
+    def struct_version(self) -> int:
+        """注册表**结构代次**：记录集合（增/删/替换）每变一次 +1。
+
+        用途：``core.preview.PreviewCore`` 的落盘目录索引按此失效——避免
+        「元数据后到」这类纯字段更新触发无谓重建，也让查询热路径不必抓锁
+        （只读一个 int，GIL 下原子）。**不含** ``rec.result`` 的赋值：
+        索引查询时实时读 ``rec.result``，本就不需要为它失效。
+        """
+        return self._struct_version
+
+    def _bump_struct_locked(self) -> None:
+        """结构代次自增（须持锁）。"""
+        self._struct_version += 1
 
     # ---------- 查询 ----------
 
@@ -258,8 +281,20 @@ class TaskRegistry:
             except Exception as e:
                 log_warning("fetcher.register.replace", f"{e}")
         self.torrents[ih] = rec
+        self._bump_struct_locked()
         if make_current:
             self.apply_current_locked(rec, ih)
+
+    def drop_record_locked(self, ih: str) -> None:
+        """从注册表移除一条记录（须持锁），并失效结构代次。
+
+        「仅解析未就绪的 review 任务」在换代时被丢弃（``begin_resolve``）——
+        该路径原先直接 ``torrents.pop``，会绕过结构代次、让 ``PreviewCore``
+        的落盘目录索引继续指向已移除的记录（查询时仍会校验
+        ``rec.handle``/``rec.result``，故不会误命中，但索引会无谓膨胀）。
+        """
+        self.torrents.pop(ih, None)
+        self._bump_struct_locked()
 
     def apply_current_locked(self, rec: TaskRecord, ih: str) -> None:
         """把记录设为「当前」（同步全部别名；须持锁）。"""
@@ -308,6 +343,7 @@ class TaskRegistry:
         """复位全部运行时状态（须持锁，供 shutdown 调用）。"""
         self.tasks.clear()
         self.torrents.clear()
+        self._bump_struct_locked()
         self._current_ih = None
         self._handle = None
         self._result = None

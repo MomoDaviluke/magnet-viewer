@@ -27,11 +27,14 @@ from typing import Any, Callable
 import libtorrent as lt
 
 from .logutil import log_exception, log_warning
+from .metacache import (load_torrent_info, params_from_ti,
+                        save_torrent_info)
 from .models import ParseResult, TorrentFile, safe_rel_path
 from .parser import is_torrent_path, parse_torrent_file
 from .persist import save_subdir_of
 from .registry import TaskRecord, TaskRegistry, hash_key, ih_from_params
-from .states import (BOOTSTRAP_TRACKERS, STATE_COMPLETED, STATE_DOWNLOADING,
+from .states import (BOOTSTRAP_TRACKERS, FALLBACK_TRACKERS, STATE_COMPLETED,
+                     STATE_DOWNLOADING,
                      STATE_FAILED, STATE_PAUSED, STATE_READY, STATE_SEEDING)
 from .taskops import TaskOps
 
@@ -93,7 +96,14 @@ class ResolverCore:
                  persist_tasks: Callable[[], None],
                  request_resume: Callable[[TaskRecord], None],
                  emit_metadata: Callable[[ParseResult], None],
-                 emit_error: Callable[[str], None]):
+                 emit_error: Callable[[str], None],
+                 extra_trackers_get: Callable[[], bool] | None = None):
+        """extra_trackers_get: 可选回调 -> bool，是否追加
+        :data:`states.FALLBACK_TRACKERS`（HTTP/HTTPS 兜底 tracker）的取值来源
+        （UI 注入 AppConfig.get；core 层不 import Qt）。None/异常兜底 False，
+        即「只注入既有 5 条 udp tracker」的既有行为。"""
+
+        self._extra_trackers_get = extra_trackers_get
         self.reg = reg
         self.ops = ops
         self.cache_dir = cache_dir
@@ -103,6 +113,17 @@ class ResolverCore:
         self._request_resume = request_resume
         self._emit_metadata = emit_metadata
         self._emit_error = emit_error
+
+    def _extra_trackers(self) -> bool:
+        """是否追加 HTTP/HTTPS 兜底 tracker（回调缺失 / 抛异常 → False）。"""
+        if not self._extra_trackers_get:
+            return False
+        try:
+            return bool(self._extra_trackers_get())
+        except Exception as e:
+            log_warning("resolver.extra_trackers",
+                        f"读取兜底 tracker 配置失败：{e}")
+            return False
 
     # ---------- 解析入口（预览/查看清单，落盘 .preview/<ih>） ----------
 
@@ -134,8 +155,21 @@ class ResolverCore:
         """
         reg = self.reg
         ses = self._ses_get()
+        # plan/11 R-10：`scheduler.stop()` **移出锁段**。第 2 批给调度器加了自有
+        # 互斥锁之后，「持 reg.lock 调它」会形成 `reg.lock → scheduler._lock` 的
+        # 跨对象锁序边；虽然本模块从不在持 scheduler 锁时回头取 reg.lock（故不成环），
+        # 但去掉这条边更稳：将来任何人在调度器锁内读注册表，都不会立刻变成死锁。
+        # 移出后仍安全：stop 只清调度器自己的 handle/file，置空后并发 tick/
+        # request_range 都是 `not active` 早退（plan/11 R-5 已保证不抛）。
+        #
+        # 「stop() 与本函数拿到 reg.lock 之间」的窗口会不会被 start_preview 钻空？
+        # **不会**：begin_resolve 与 PreviewCore.start_preview 都在 **T1（GUI 线程）**
+        # 上调用（`core/fetcher.py:333` 的 `_begin_resolve` ← `resolve()` ← UI；
+        # `ui/main_window.py:715/776` 的 start_preview），同线程内二者串行，
+        # 中途也没有让出事件循环的点。若将来有人在**别的线程**调 start_preview，
+        # 这个窗口就会打开——届时应在本函数加「`reg.gen` 未变则重新 stop」的复核。
+        self._scheduler_get().stop()
         with reg.lock:
-            self._scheduler_get().stop()
             rec = reg.current_record()
             if rec is not None and rec.download:
                 pass  # 下载任务：保留运行（含 META_FETCH 等待元数据）
@@ -149,7 +183,9 @@ class ResolverCore:
                         log_warning("fetcher.begin_resolve.remove_torrent",
                                     f"{e}")
                 if rec is not None and reg.current_ih is not None:
-                    reg.torrents.pop(reg.current_ih, None)
+                    # 统一走注册表入口：结构代次随之失效（预览的落盘目录索引
+                    # 依赖它，裸 pop 会让索引指向已移除记录）
+                    reg.drop_record_locked(reg.current_ih)
                 # 游离句柄兜底（无注册表记录，不应出现）
                 if reg.handle is not None and ses is not None:
                     try:
@@ -208,6 +244,9 @@ class ResolverCore:
                 log_exception("fetcher.resolve_torrent.add", e)
                 self._emit_error(f"加入会话失败：{e}")
             return
+        # 落盘元数据缓存：本地种子同样入缓存，后续以磁力链形态（同一个
+        # info_hash）打开该资源时可直接命中（性能专项 P-1）。失败无副作用。
+        save_torrent_info(self.cache_dir, result.info_hash, atp.ti)
         with reg.lock:
             if gen != reg.gen:
                 # 竞态兜底：换代后不再占用会话，句柄让位
@@ -235,7 +274,22 @@ class ResolverCore:
         p.save_path = save_dir
         p.flags |= lt.torrent_flags.upload_mode  # 只取元数据，不下载资源
         if hasattr(p, "trackers") and not p.trackers:
-            p.trackers = BOOTSTRAP_TRACKERS
+            # 无 tr= 的磁力链：默认注入 5 条 udp；开启 extra_trackers 时追加
+            # HTTP/HTTPS 兜底（UDP 出站受阻网络的第二条发现通道）。
+            p.trackers = (BOOTSTRAP_TRACKERS + FALLBACK_TRACKERS
+                          if self._extra_trackers() else BOOTSTRAP_TRACKERS)
+        # 性能专项 P-1（最大瓶颈）：元数据缓存命中 → 直接注入 torrent_info，
+        # 整段 DHT 查找 + ut_metadata 握手被跳过。add_torrent 后
+        # handle.torrent_file() 立即可用，下面的「已就绪快路径」随即回调
+        # on_metadata —— 文件树秒出，零网络往返。未命中时 p.ti 保持 None，
+        # 行为与基线逐字一致（照旧走 DHT 获取）。
+        if ih_known is not None:
+            ti = load_torrent_info(self.cache_dir, ih_known)
+            if ti is not None:
+                p = params_from_ti(
+                    ti, save_dir, upload_mode=True,
+                    trackers=(list(p.trackers)
+                              if hasattr(p, "trackers") and p.trackers else None))
         ses = self._ses_get()
         try:
             handle = ses.add_torrent(p)
@@ -361,6 +415,9 @@ class ResolverCore:
             return
         result.cache_dir = self.cache_dir
         result.save_subdir = save_subdir_of(self.cache_dir, rec.save_path)
+        # 性能专项 P-1：元数据到手即落盘缓存（无论下载任务还是预览任务），
+        # 下次解析同 info_hash 的资源直接命中，跳过 DHT 往返。写失败无副作用。
+        save_torrent_info(self.cache_dir, result.info_hash, ti)
         with reg.lock:
             rec.result = result
             if rec.download:

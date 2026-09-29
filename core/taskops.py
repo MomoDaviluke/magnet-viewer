@@ -31,6 +31,7 @@ from typing import Any, Callable
 import libtorrent as lt
 
 from .logutil import log_warning
+from .metacache import load_torrent_info, params_from_ti, save_torrent_info
 from .models import ParseResult
 from .parser import is_torrent_path, parse_torrent_file
 from .persist import (TaskPersistence, is_resume_key, is_within,
@@ -65,12 +66,17 @@ class TaskOps:
     def __init__(self, reg: TaskRegistry, persist: TaskPersistence,
                  ses_get: Callable[[], Any],
                  scheduler_get: Callable[[], Any],
-                 download_dir: str):
+                 download_dir: str,
+                 on_meta_ready: Callable[[TaskRecord], None] | None = None):
         self.reg = reg
         self.persist = persist
         self._ses_get = ses_get
         self._scheduler_get = scheduler_get
         self.download_dir = download_dir
+        # 性能专项 P-1d：添加磁力链任务时若元数据缓存命中，走这条回调把
+        # 任务直接推进到「元数据就绪」（等价于 resolver.on_metadata_received）。
+        # 缺省 None = 基线行为（缓存命中也照旧等 META_FETCH 告警）。
+        self._on_meta_ready = on_meta_ready
 
     # ---------- 添加 ----------
 
@@ -156,6 +162,17 @@ class TaskOps:
         p.save_path = save_dir
         if hasattr(p, "trackers") and not p.trackers:
             p.trackers = BOOTSTRAP_TRACKERS
+        # 性能专项 P-1d：元数据缓存命中 → 注入 ti，任务跳过 META_FETCH。
+        # 注意：带 ti 的 add_torrent **不会**再发 metadata_received_alert，
+        # 因此必须在注册后手动驱动一次「元数据就绪」（见下方 _on_meta_ready）。
+        ti = load_torrent_info(self.reg.cache_dir, ih) if ih else None
+        if ti is not None:
+            # 必须换成由 ti 构造的 params（混合 v1+v2 种子沿用磁力链 params
+            # 会撞 mismatching info-hash），详见 metacache.params_from_ti。
+            p = params_from_ti(
+                ti, save_dir,
+                trackers=(list(p.trackers)
+                          if hasattr(p, "trackers") and p.trackers else None))
         try:
             handle = ses.add_torrent(p)
         except Exception as e:
@@ -182,6 +199,13 @@ class TaskOps:
         if ih:
             self.persist.persist_tasks()
         handle.resume()
+        if ti is not None and self._on_meta_ready is not None:
+            # 出锁、出 I/O 之后驱动（P1-4 同款编排）；失败只告警——最坏退化
+            # 为「等下一次 metadata_received_alert」，不会丢任务。
+            try:
+                self._on_meta_ready(rec)
+            except Exception as e:
+                log_warning("taskops.add_magnet.meta_ready", f"{e}")
         return key
 
     def _add_torrent_file_task(self, ses, source: str, result: ParseResult,
@@ -405,13 +429,17 @@ class TaskOps:
         reg = self.reg
         ses = self._ses_get()
         sched = self._scheduler_get()
+        stop_sched = False
         with reg.lock:
             rec = reg.torrents.get(key)
             if rec is not None:
-                # 正在预览该句柄：先停预览调度
+                # 正在预览该句柄：需要停预览调度——但**不在此处调** sched.stop()。
+                # R-10（审计 2026-09-29 P3）：持 reg.lock 调调度器会形成
+                # reg.lock → scheduler._lock 的跨对象锁序边，与 begin_resolve
+                # 整改后的「调度器锁内绝不取注册表锁」决策冲突。先记标志出锁再停。
                 if sched.handle is not None and rec.handle is not None \
                         and sched.handle == rec.handle:
-                    sched.stop()
+                    stop_sched = True
                 if rec.handle is not None and ses is not None:
                     try:
                         # delete_files 时 remove 选项=1（libtorrent 删除文件），
@@ -421,7 +449,12 @@ class TaskOps:
                     except Exception as e:
                         log_warning("fetcher.remove_task.remove_torrent",
                                     f"{e}")
-                del reg.torrents[key]
+                # 审计 2026-09-29（P2）：裸 del 绕过 _bump_struct_locked，
+                # PreviewCore 的 _dir_index 依赖 struct_version 失效重建——
+                # 唯一真正摘句柄的入口却不 bump，目录索引会继续指向已移除
+                # 的记录（PieceView 也不回收）。改走 *_locked 族（持 reg.lock，
+                # 满足调用方须持锁的约定）。
+                reg.drop_record_locked(key)
                 save_path = rec.save_path or None
                 if key == reg.current_ih:
                     reg.current_ih = None
@@ -435,6 +468,10 @@ class TaskOps:
                 return False
             if save_path is None:
                 save_path = task.get("save_path") or None if task else None
+        if stop_sched:
+            # 出锁再停预览调度（R-10，见上注释）：此时句柄可能已被 remove，
+            # 调度器 stop 只做轮询清理，不访问句柄数据，顺序安全。
+            sched.stop()
         self.persist.persist_tasks()
         if delete_files and save_path:
             self.delete_task_files(key, save_path)
@@ -503,9 +540,12 @@ class TaskOps:
             rec = reg.torrents.get(key)
             if rec is None:
                 return False
-            self._scheduler_get().stop()
             reg.apply_current_locked(rec, key)
             reg.gen += 1   # 焦点切换即换代：让路中的陈旧解析自弃
+        # R-10（审计 2026-09-29 P3）：scheduler.stop 原先在 reg.lock 内调——
+        # 同 remove_task 的锁序边问题，出锁再停（先切别名再停调度，停之前的
+        # 一次 tick 读到新焦点句柄无害，轮询本就按焦点容错）。
+        self._scheduler_get().stop()
         return True
 
     # ---------- 快照 ----------

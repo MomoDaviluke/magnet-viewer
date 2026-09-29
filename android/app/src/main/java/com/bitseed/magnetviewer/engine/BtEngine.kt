@@ -7,11 +7,12 @@ import com.bitseed.magnetviewer.core.model.PieceMap
 import com.bitseed.magnetviewer.core.model.TorrentFile
 import com.bitseed.magnetviewer.core.model.safeRelPath
 import com.bitseed.magnetviewer.core.normalizePreviewCacheMode
-import com.bitseed.magnetviewer.core.states.BOOTSTRAP_TRACKERS
 import com.bitseed.magnetviewer.core.states.METADATA_TIMEOUT_SECONDS
+import com.bitseed.magnetviewer.core.states.trackersFor
 import com.bitseed.magnetviewer.core.states.STATE_COMPLETED
 import com.bitseed.magnetviewer.data.AppLog
 import com.bitseed.magnetviewer.data.cleanupEmptySourceDir
+import com.bitseed.magnetviewer.data.sweepTmpFiles
 import com.bitseed.magnetviewer.core.states.STATE_DELETED
 import com.bitseed.magnetviewer.core.states.STATE_DOWNLOADING
 import com.bitseed.magnetviewer.core.states.STATE_FAILED
@@ -37,6 +38,7 @@ import com.bitseed.magnetviewer.data.planRemoveTask
 import com.bitseed.magnetviewer.data.planRestore
 import com.bitseed.magnetviewer.data.previewDirFor
 import com.bitseed.magnetviewer.data.priorityQueueOrder
+import com.bitseed.magnetviewer.data.MetaCache
 import com.bitseed.magnetviewer.data.promoteDirFor
 import com.bitseed.magnetviewer.data.stateAfterRestore
 import com.bitseed.magnetviewer.stream.PieceSource
@@ -282,7 +284,18 @@ class BtEngine(private val listener: Listener) : EngineControl {
    * 源目录清掉（非空则保留）。
    */
   private val pendingMoveSources = java.util.concurrent.ConcurrentHashMap<String, File>()
-  private var taskSeq = 0
+  // plan/11 第 4 项（taskSeq 撞号）：原为普通 var，`tempTaskKey()`（未同步）与
+  // `registerTask/taskForUpdate`（taskLock 内）并发自增会撞号 ⇒ 改原子计数器。
+  private val taskSeq = java.util.concurrent.atomic.AtomicInteger(0)
+
+  // plan/11 §6.4 必修 3：元数据缓存的**落盘执行器**（单线程串行、daemon）。
+  // 元数据到达回调 onMetadataReceived 整体在引擎监视器锁（@Synchronized）内，
+  // 而 MetaCache.writeQuietly 是 fsync 级写盘——fsync 期间所有告警回调都得排队。
+  // 现改为「锁内只做 info 段提取 + 编码（纯内存，几 KB）→ 落盘投递到本执行器」。
+  // 串行保证多条元数据间的写序；写本身幂等，进程死亡丢一条可重建，daemon 随进程退。
+  private val metaCacheWriter = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+    Thread(r, "meta-cache-writer").apply { isDaemon = true }
+  }
 
   /**
    * 「恢复续传」的 info_hash 集合：这些任务的元数据到达后**不要**按解析语义暂停
@@ -300,6 +313,18 @@ class BtEngine(private val listener: Listener) : EngineControl {
   @Volatile private var lastProxy: ProxyConfig? = null
   @Volatile private var lastRateLimitKbps: Int = 0
   @Volatile private var metadataTimeoutSeconds: Int = METADATA_TIMEOUT_SECONDS
+
+  /**
+   * 端口映射开关（诊断 D-2026-09-18）：会话启动时决定 `enable_upnp`/`enable_natpmp`，
+   * 运行中经 [applyPortMapping] 热更新。默认 false = 桌面 `DEFAULTS["port_mapping"]` 同款。
+   */
+  @Volatile private var lastPortMapping: Boolean = false
+
+  /**
+   * 兜底 tracker 开关（诊断 D-2026-09-18）：**加种时**决定注入 5 条还是 10 条
+   * （见 [trackersFor]），运行中经 [applyExtraTrackers] 追加到现有句柄。
+   */
+  @Volatile private var lastExtraTrackers: Boolean = false
 
   /** 预览缓存模式：`convert`（默认，桌面 config 默认值）/ `hold`；只由 setPreviewCacheMode 改。 */
   @Volatile private var cacheMode: String = PREVIEW_CACHE_CONVERT
@@ -353,10 +378,81 @@ class BtEngine(private val listener: Listener) : EngineControl {
   // ---------------------------------------------------------------- 会话生命周期
 
   /**
+   * 下发吞吐调参（性能专项 P-2；表见 [EngineTuning]）。
+   *
+   * 用 `setInteger/setBoolean(settings_pack.*.swigValue(), v)` 的通用入口——这些键
+   * 在 libtorrent4j 的 `SettingsPack` 上**没有**专用 setter（NOTES-libtorrent4j §6.8）。
+   *
+   * 两条纪律：
+   * 1. 未知键名**记日志而不是静默跳过**——拼错的键 libtorrent 会当没看见，静默丢弃
+   *    等于这轮优化白做，事后也没法从日志里发现；
+   * 2. 单独 try 包住每项：一项不接受（版本差异）不能让整个会话起不来。
+   *
+   * 无需自带同步：仅 [ensureStarted] 体内两处调用，天然处于其监视器锁内
+   * （原 @Synchronized 曾错位挂在本函数上，见下）。
+   */
+  private fun applyTuning(settings: SettingsPack) {
+    for ((name, value) in EngineTuning.ints) {
+      val key = intTypeOf(name)
+      if (key == null) {
+        log("吞吐调参跳过（未知 int 键）：$name")
+        continue
+      }
+      try {
+        settings.setInteger(key.swigValue(), value)
+      } catch (e: Throwable) {
+        log("吞吐调参下发失败：$name=$value（" + (e.message ?: e.javaClass.simpleName) + "）")
+      }
+    }
+    for ((name, value) in EngineTuning.bools) {
+      val key = boolTypeOf(name)
+      if (key == null) {
+        log("吞吐调参跳过（未知 bool 键）：$name")
+        continue
+      }
+      try {
+        settings.setBoolean(key.swigValue(), value)
+      } catch (e: Throwable) {
+        log("吞吐调参下发失败：$name=$value（" + (e.message ?: e.javaClass.simpleName) + "）")
+      }
+    }
+    log(EngineTuning.summary())
+  }
+
+  /** 键名 → swig `settings_pack.int_types`（未知名返回 null，由调用方记日志）。 */
+  private fun intTypeOf(name: String): org.libtorrent4j.swig.settings_pack.int_types? =
+    when (name) {
+      "connection_speed" -> org.libtorrent4j.swig.settings_pack.int_types.connection_speed
+      "unchoke_slots_limit" -> org.libtorrent4j.swig.settings_pack.int_types.unchoke_slots_limit
+      "num_optimistic_unchoke_slots" ->
+        org.libtorrent4j.swig.settings_pack.int_types.num_optimistic_unchoke_slots
+      "file_pool_size" -> org.libtorrent4j.swig.settings_pack.int_types.file_pool_size
+      "tick_interval" -> org.libtorrent4j.swig.settings_pack.int_types.tick_interval
+      "auto_manage_interval" -> org.libtorrent4j.swig.settings_pack.int_types.auto_manage_interval
+      "max_peerlist_size" -> org.libtorrent4j.swig.settings_pack.int_types.max_peerlist_size
+      else -> null
+    }
+
+  /** 键名 → swig `settings_pack.bool_types`（未知名返回 null，由调用方记日志）。 */
+  private fun boolTypeOf(name: String): org.libtorrent4j.swig.settings_pack.bool_types? =
+    when (name) {
+      "prioritize_partial_pieces" ->
+        org.libtorrent4j.swig.settings_pack.bool_types.prioritize_partial_pieces
+      "dht_aggressive_lookups" ->
+        org.libtorrent4j.swig.settings_pack.bool_types.dht_aggressive_lookups
+      else -> null
+    }
+
+  /**
    * 启动 DHT 会话（幂等）。失败返回 false（错误已通过 [Listener.onMetadataError] 上报）。
    *
    * 会话是**引擎级单例**（`manager` 字段），全程只 start 一次、不在轮询期间 stop；
    * 只有 [shutdown] 会停它（调用方必须保证此后不再读句柄）。
+   *
+   * @Synchronized 必须挂在本函数上（审计 2026-09-29）：两个并发入口
+   * （加种 / 恢复清单）都从 IO 协程进来，check-then-act 无锁时
+   * 可同时通过 `started` 检查对同一 SessionManager 双重 start。
+   * 注解原先错位落在 [applyTuning] 头上（KDoc 隔断所致），ensureStarted 反而裸奔。
    */
   @Synchronized
   fun ensureStarted(): Boolean {
@@ -372,19 +468,27 @@ class BtEngine(private val listener: Listener) : EngineControl {
       currentResult = null
       started = false
     }
-    log("会话启动中（监听 $LISTEN_INTERFACES，DHT/LSD 开启）…")
+    log("会话启动中（监听 $LISTEN_INTERFACES，DHT/LSD 开启，${portMappingSummary(lastPortMapping)}）…")
     return try {
       val settings = SettingsPack.defaultSettings()
       settings.setEnableDht(true)
       settings.setEnableLsd(true)
-      // UPnP / NAT-PMP 没有专用 setter（NOTES-libtorrent4j §6.8）：本应用只「收」不做种
-      settings.setBoolean(org.libtorrent4j.swig.settings_pack.bool_types.enable_upnp.swigValue(), false)
-      settings.setBoolean(org.libtorrent4j.swig.settings_pack.bool_types.enable_natpmp.swigValue(), false)
+      // UPnP / NAT-PMP 没有专用 setter（NOTES-libtorrent4j §6.8）：用 bool_types 下发。
+      // 两个布尔由 portMappingPlan 统一决策（诊断 D-2026-09-18）：关闭时连不上同为
+      // NAT 后的 peer，做种/上传时也无人能连入。
+      val pm = portMappingPlan(lastPortMapping)
+      settings.setBoolean(
+        org.libtorrent4j.swig.settings_pack.bool_types.enable_upnp.swigValue(), pm.enableUpnp
+      )
+      settings.setBoolean(
+        org.libtorrent4j.swig.settings_pack.bool_types.enable_natpmp.swigValue(), pm.enableNatpmp
+      )
       settings.listenInterfaces(LISTEN_INTERFACES)
-      settings.connectionsLimit(300)
+      settings.connectionsLimit(EngineTuning.CONNECTIONS_LIMIT)
       settings.alertQueueSize(5000)
       settings.setMaxMetadataSize(MAX_METADATA_SIZE)
       settings.activeDownloads(3)
+      applyTuning(settings) // 性能专项 P-2：吞吐参数（详见 EngineTuning）
       manager.addListener(alertListener)
       manager.start(SessionParams(settings))
       started = true
@@ -399,11 +503,18 @@ class BtEngine(private val listener: Listener) : EngineControl {
         val settings = SettingsPack.defaultSettings()
         settings.setEnableDht(true)
         settings.setEnableLsd(true)
-        settings.setBoolean(org.libtorrent4j.swig.settings_pack.bool_types.enable_upnp.swigValue(), false)
-        settings.setBoolean(org.libtorrent4j.swig.settings_pack.bool_types.enable_natpmp.swigValue(), false)
+        // 随机端口回退分支同样按配置下发端口映射（与上面主分支同源，避免两处漂移）
+        val pm = portMappingPlan(lastPortMapping)
+        settings.setBoolean(
+          org.libtorrent4j.swig.settings_pack.bool_types.enable_upnp.swigValue(), pm.enableUpnp
+        )
+        settings.setBoolean(
+          org.libtorrent4j.swig.settings_pack.bool_types.enable_natpmp.swigValue(), pm.enableNatpmp
+        )
         settings.listenInterfaces("0.0.0.0:0")
-        settings.connectionsLimit(300)
+        settings.connectionsLimit(EngineTuning.CONNECTIONS_LIMIT)
         settings.setMaxMetadataSize(MAX_METADATA_SIZE)
+        applyTuning(settings) // 性能专项 P-2：随机端口回退分支同样要带吞吐参数
         manager.addListener(alertListener)
         manager.start(SessionParams(settings))
         started = true
@@ -434,29 +545,59 @@ class BtEngine(private val listener: Listener) : EngineControl {
   /**
    * 退出前尽力让 fastresume 落盘：请求 + **有界等待**（默认 1.5s）文件真的出现。
    * 超时只告警，绝不阻断退出（下次启动按「无 resume」处理，元数据会重新拉）。
+   *
+   * 审计 2026-09-29（P2）：原先只给焦点任务落 fastresume（`currentHandle ?: return`），
+   * 多任务下从未经历暂停/预览/转正事件的非焦点任务没有任何落盘触发点
+   * （[requestResumeDataFor] 只在 pause/resume/preview/promote 时调用），正常退出
+   * 也丢续传。改为对**全部下载型任务**逐个请求 + 统一等待（预算不变，均摊给多任务）。
    */
   private fun drainResumeBeforeShutdown(timeoutMs: Long = 1500L) {
     val root = cacheRoot ?: return
-    val ih = currentInfoHash.trim().lowercase()
-    if (!isResumeKey(ih)) return
-    val h = currentHandle ?: return
-    if (!isHandleUsable(h)) return
-    val target = ResumeStore.path(root, ih) ?: return
-    if (target.isFile && target.length() > 0) return
-    requestResumeData("会话关闭")
-    val deadline = System.currentTimeMillis() + timeoutMs
-    while (System.currentTimeMillis() < deadline) {
-      if (target.isFile && target.length() > 0) {
-        log("退出前 fastresume 已确认落盘：${target.path}")
-        return
+    // 锁内只收集待落盘名单（ih + target 路径），请求与等待都在锁外——
+    // requestResumeDataFor 自己不取 taskLock，等待轮询也不该占着锁。
+    data class Pending(val ih: String, val target: File)
+    val pending = ArrayList<Pending>(2)
+    synchronized(taskLock) {
+      for (t in taskMap.values) {
+        val ih = t.infoHash.trim().lowercase()
+        if (!isResumeKey(ih)) continue
+        if (!t.download) continue   // 仅解析任务无下载进度，fastresume 无续传价值
+        val h = t.handle ?: continue
+        if (!isHandleUsable(h)) continue
+        val target = ResumeStore.path(root, ih) ?: continue
+        if (target.isFile && target.length() > 0) continue  // 已有落盘，不重复
+        pending.add(Pending(ih, target))
       }
+    }
+    if (pending.isEmpty()) return
+    synchronized(taskLock) {
+      for (p in pending) {
+        taskMap[p.ih]?.let { requestResumeDataFor(it, "会话关闭") }
+      }
+    }
+    val deadline = System.currentTimeMillis() + timeoutMs
+    val remaining = HashSet<String>()
+    pending.forEach { remaining.add(it.ih) }
+    while (System.currentTimeMillis() < deadline && remaining.isNotEmpty()) {
+      val it = remaining.iterator()
+      while (it.hasNext()) {
+        val ih = it.next()
+        val f = ResumeStore.path(root, ih)
+        if (f != null && f.isFile && f.length() > 0) {
+          log("退出前 fastresume 已确认落盘：${f.path}")
+          it.remove()
+        }
+      }
+      if (remaining.isEmpty()) break
       try {
         Thread.sleep(100L)
       } catch (_: InterruptedException) {
         return
       }
     }
-    log("退出前 fastresume 未在 ${timeoutMs}ms 内落盘（只告警，不阻断退出）")
+    if (remaining.isNotEmpty()) {
+      log("退出前 fastresume 未在 ${timeoutMs}ms 内落盘 ${remaining.size} 项（只告警，不阻断退出）")
+    }
   }
 
   fun isRunning(): Boolean =
@@ -526,6 +667,15 @@ class BtEngine(private val listener: Listener) : EngineControl {
       return null
     }
     this.cacheRoot = cacheRoot
+    // plan/11 R-14（安卓移植）：拿到 cacheRoot 时清扫崩溃/强杀遗留的 `*.tmp`
+    // 孤儿（唯一临时名引入后，残留不再被下次写覆盖，会累积）。此刻尚无本引擎
+    // 的并发写者；60s 新鲜度护栏防与另一实例赛跑。旁路设施：失败只记日志。
+    try {
+      val swept = sweepTmpFiles(cacheRoot)
+      if (swept > 0) log("清扫崩溃遗留临时文件 $swept 个（$cacheRoot）")
+    } catch (e: Throwable) {
+      log("清扫临时文件失败（不影响加种）：" + (e.message ?: e.javaClass.simpleName))
+    }
     val atp =
       try {
         AddTorrentParams.parseMagnetUri(uri)
@@ -544,7 +694,10 @@ class BtEngine(private val listener: Listener) : EngineControl {
         focusTaskImpl(existing.infoHash)
         val dir = existing.saveDir ?: previewDir(cacheRoot, magnetHash)
         val done = existing.result
-        if (done != null) listener.onMetadataReady(existing.infoHash, done, true)
+        // 审计 2026-09-29（P2，J-01 残留）：第 4 参 download 原先落默认值 true，
+        // 仅解析任务重复解析会被宿主改回下载型（重启后被当下载任务恢复续传）。
+        // 对照 onMetadataReady 正常路径传 task.download 的写法。
+        if (done != null) listener.onMetadataReady(existing.infoHash, done, true, existing.download)
         listener.onStatus("该磁力链已在任务列表（复用既有任务，不重复建）")
         publishActivity()
         return dir
@@ -560,12 +713,28 @@ class BtEngine(private val listener: Listener) : EngineControl {
     }
     return try {
       atp.setSavePath(dir.path)
-      if (atp.getTrackers().isNullOrEmpty()) atp.setTrackers(BOOTSTRAP_TRACKERS)
+      if (atp.getTrackers().isNullOrEmpty()) atp.setTrackers(trackersFor(lastExtraTrackers))
       // 只解析不下载：upload_mode + 「所有文件默认 dont_download」
       atp.setFlags(TorrentFlags.UPLOAD_MODE.or_(TorrentFlags.DEFAULT_DONT_DOWNLOAD))
+      // 性能专项 P-1：元数据缓存命中 → 直接注入 torrent_info，整段 DHT 查找 +
+      // ut_metadata 握手被跳过（文件树秒出，零网络往返）。注入失败会在下面
+      // 摘掉缓存重试一次，因此**这里永远不会让加种从「能成功」变成「失败」**。
+      val cachedTi = if (ih.isNotEmpty()) readCachedTorrentInfo(cacheRoot, ih) else null
+      if (cachedTi != null) alignParamsToTorrentInfo(atp, cachedTi)
       log("加种开始：infohash=${ih.ifEmpty { "?" }} 保存目录=${dir.path} peer提示数=${atp.peers()?.size ?: 0}")
-      val ec = ErrorCode(org.libtorrent4j.swig.error_code())
-      val h = SessionHandle(manager.swig()).addTorrent(atp, ec)
+      var ec = ErrorCode(org.libtorrent4j.swig.error_code())
+      var h = SessionHandle(manager.swig()).addTorrent(atp, ec)
+      if ((ec.isError || h == null || !h.isValid()) && cachedTi != null) {
+        // 注入路径失败（如混合种子的 info-hash 未能对齐）→ 摘掉 ti 退回基线重试：
+        // 缓存只加速，不允许把原本能解析的资源变成失败。
+        log("元数据缓存注入未成功（${ec.getMessage()}）：摘掉缓存退回基线路径重试")
+        val fallback = AddTorrentParams.parseMagnetUri(uri)
+        fallback.setSavePath(dir.path)
+        if (fallback.getTrackers().isNullOrEmpty()) fallback.setTrackers(trackersFor(lastExtraTrackers))
+        fallback.setFlags(TorrentFlags.UPLOAD_MODE.or_(TorrentFlags.DEFAULT_DONT_DOWNLOAD))
+        ec = ErrorCode(org.libtorrent4j.swig.error_code())
+        h = SessionHandle(manager.swig()).addTorrent(fallback, ec)
+      }
       log(
         "加种结果：isError=${ec.isError} message=${ec.getMessage()} " +
           "handle=${if (h == null) "null" else "isValid=" + h.isValid()}"
@@ -630,6 +799,107 @@ class BtEngine(private val listener: Listener) : EngineControl {
   private fun previewDir(cacheRoot: File, infoHash: String): File {
     val sub = if (infoHash.isEmpty()) ".preview/tmp" else ".preview/" + safeRelPath(infoHash)
     return File(cacheRoot, sub)
+  }
+
+  // ---------------------------------------------------------------- 元数据缓存（P-1）
+  // 布局与语义见 data/MetaCache.kt（桌面 core/metacache.py 同款）。本段只做
+  // native 桥接：swig byte_span → ByteArray、TorrentInfo.bdecode → 注入 params。
+
+  /**
+   * 读缓存并解码成 [TorrentInfo]；未命中 / 损坏返回 null。
+   *
+   * 损坏（bdecode 抛异常 / `isValid` 为假）时**顺手删掉**该条目——下次元数据到达
+   * 会重写，不留一颗永远解不开的毒丸在盘上。
+   */
+  private fun readCachedTorrentInfo(cacheRoot: File, infoHash: String): TorrentInfo? {
+    val bytes = MetaCache.read(cacheRoot, infoHash) ?: return null
+    // 显式可空类型：native 侧 bdecode 正常路径不返回 null，但缓存是**完全不可信**的
+    // 外部输入，保留一次运行时兜底（比事后一个 NPE 便宜得多）。
+    val ti: TorrentInfo? = try {
+      TorrentInfo.bdecode(bytes)
+    } catch (e: Throwable) {
+      log("元数据缓存解码失败（已删除，下次重写）：" + (e.message ?: e.javaClass.simpleName))
+      MetaCache.delete(cacheRoot, infoHash)
+      return null
+    }
+    if (ti == null || !ti.isValid()) {
+      log("元数据缓存非法（已删除，下次重写）：${infoHash.take(12)}…")
+      MetaCache.delete(cacheRoot, infoHash)
+      return null
+    }
+    log(
+      "元数据缓存命中：${infoHash.take(12)}… name=${ti.name()} 文件数=${ti.numFiles()} " +
+        "（跳过 DHT/ut_metadata 往返）| ${MetaCache.statsLine()}"
+    )
+    return ti
+  }
+
+  /**
+   * 把缓存的元数据注入 `add_torrent_params`（P-1 的关键一步）。
+   *
+   * **为什么必须同时对齐 info_hashes**：混合 v1+v2 种子的 `ti` 同时带 v1/v2 两个
+   * info-hash，而磁力链的 btih 只有 v1；libtorrent 校验两者不等即抛
+   * `mismatching info-hash`（桌面 Python 绑定 2.1.1 实测，同一个坑）。这里以 ti
+   * 自报的哈希为准对齐，v1 / v2 / 混合三种形态都成立。
+   *
+   * 失败不抛：调用方（[addMagnet]）会摘掉缓存退回基线路径重试一次——缓存只允许
+   * 加速，绝不允许把「本来能解析」变成失败。
+   */
+  private fun alignParamsToTorrentInfo(atp: AddTorrentParams, ti: TorrentInfo) {
+    atp.setTorrentInfo(ti)
+    try {
+      atp.setInfoHashes(ti.infoHashes())
+    } catch (e: Throwable) {
+      log("info_hashes 对齐失败（继续，可能回退重试）：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * 取 torrent_info 的 **info 段原始字节**（已是编码好的 bencode）。
+   *
+   * libtorrent4j 只绑了 `byte_span`（无 `data()`），只能逐字节 `at(i)`；单次元数据
+   * 到达才调一次，几 KB~几百 KB 的开销可忽略。超过 [MetaCache.MAX_BYTES] 直接放弃
+   * （超大文件清单的种子不值得为它占盘，也避免一次性大分配）。
+   */
+  private fun infoSectionOf(ti: TorrentInfo): ByteArray? =
+    try {
+      val span = ti.swig().get_info_section()
+      val n = span.size().toInt()
+      if (n <= 0 || n > MetaCache.MAX_BYTES) {
+        log("info 段大小异常（$n 字节），不入缓存")
+        null
+      } else {
+        ByteArray(n) { span.at(it.toLong()) }
+      }
+    } catch (e: Throwable) {
+      log("info 段读取失败（不入缓存）：" + (e.message ?: e.javaClass.simpleName))
+      null
+    }
+
+  /**
+   * 元数据到手即落盘缓存（幂等；失败只告警）。
+   *
+   * 不带 tracker：libtorrent4j 2.1.0-39 未绑定 `TorrentInfo.trackers()`，而注入缓存时
+   * atp 的 tracker（磁力链 `tr=` / BOOTSTRAP 兜底）本就已设好，写进 .torrent 也不会
+   * 被多读一次——少写一份事实，少一处不一致。
+   */
+  private fun saveMetadataCache(infoHash: String, ti: TorrentInfo) {
+    val root = cacheRoot ?: return
+    if (infoHash.isEmpty() || !isResumeKey(infoHash)) return
+    val section = infoSectionOf(ti) ?: return
+    val blob = try {
+      MetaCache.encodeTorrent(section)
+    } catch (e: Throwable) {
+      log("元数据缓存编码失败（已忽略）：" + (e.message ?: e.javaClass.simpleName))
+      return
+    }
+    // plan/11 §6.4 必修 3：本方法运行在引擎监视器锁内（onMetadataReceived @Synchronized），
+    // writeQuietly 是 fsync 级写盘——fsync 期间全部告警回调排队。编码（纯内存）留锁内，
+    // **落盘投递到锁外串行执行器**（metaCacheWriter）：fsync 不再持有监视器锁。
+    metaCacheWriter.execute {
+      MetaCache.writeQuietly(root, infoHash, blob) { warn -> log(warn) }
+      log("元数据已入缓存：${infoHash.take(12)}… ${blob.size} 字节 | ${MetaCache.statsLine()}")
+    }
   }
 
   /**
@@ -796,6 +1066,11 @@ class BtEngine(private val listener: Listener) : EngineControl {
       "元数据到位：name=${ti.name()} 文件数=${ti.numFiles()} 分块数=${ti.numPieces()} " +
         "块长=${ti.pieceLength()} info_hash=$ih（候选=${routeCandidates.joinToString(",") { it.take(8) }}）"
     )
+    // 性能专项 P-1：元数据到手**先**入缓存（无论预览任务还是下载任务）——
+    // 它只在本地写一个几 KB 的文件，却能让下次解析同一 info_hash 彻底免掉
+    // DHT/ut_metadata 往返。放在解析清单之前：即使后面的清单构造失败，
+    // 缓存本身仍是有效资产（下次直接命中）。
+    saveMetadataCache(ih, ti)
     val result =
       try {
         resultFromTorrentInfo(ti, ih)
@@ -963,8 +1238,16 @@ class BtEngine(private val listener: Listener) : EngineControl {
         log("fastresume 告警取参数异常：" + (e.message ?: e.javaClass.simpleName))
         return
       }
-    val ih =
-      infoHashOfParams(params).ifEmpty { currentInfoHash.trim().lowercase() }
+    // 审计 2026-09-29（P2）：原先 params 拿不到哈希时回退 currentInfoHash——
+    // 多任务下这是跨任务污染：非焦点任务的 resume 字节会写进焦点任务的
+    // .resume/<ih>.fastresume（下次启动用错续传数据指向错的 save_path/优先级）。
+    // 拿不到哈希 = 无法确定归属 = 只能跳过（与桌面 persist.write_resume_from_alert
+    // 的「坏 ih 只告警」口径一致）。
+    val ih = infoHashOfParams(params)
+    if (ih.isEmpty()) {
+      log("fastresume 落盘跳过：params 无 info_hash（多任务下不允许回退焦点哈希）")
+      return
+    }
     if (!isResumeKey(ih)) {
       log("fastresume 落盘跳过：拿不到合法 info_hash（'$ih'）")
       return
@@ -1057,7 +1340,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
     val trackers = atp.getTrackers()
     if (trackers.isNullOrEmpty()) {
       val fromMagnet = magnet.getTrackers()
-      atp.setTrackers(if (fromMagnet.isNullOrEmpty()) BOOTSTRAP_TRACKERS else fromMagnet)
+      atp.setTrackers(if (fromMagnet.isNullOrEmpty()) trackersFor(lastExtraTrackers) else fromMagnet)
     }
     if (resume != null) {
       val peers = magnet.peers()
@@ -1309,7 +1592,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
   // ---------------------------------------------------------------- 任务注册表（多任务）
 
   /** 临时任务键（磁力链里没有 btih 时；不落盘——持久化要求合法 info_hash）。 */
-  private fun tempTaskKey(): String = "tmp-" + (++taskSeq)
+  private fun tempTaskKey(): String = "tmp-" + taskSeq.incrementAndGet()
 
   /** 登记任务（幂等：同键已存在则只补句柄/目录）。 */
   private fun registerTask(
@@ -1332,7 +1615,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
       val t =
         EngineTask(
           infoHash = infoHash,
-          order = taskSeq++,
+          order = taskSeq.getAndIncrement(),
           source = source,
           saveDir = saveDir,
           state = state,
@@ -1459,7 +1742,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
       val t =
         EngineTask(
           infoHash = infoHash,
-          order = taskSeq++,
+          order = taskSeq.getAndIncrement(),
           saveDir = dir,
           state = STATE_META_FETCH,
           priority = 0,
@@ -2190,6 +2473,81 @@ class BtEngine(private val listener: Listener) : EngineControl {
       log("应用代理失败：" + (e.message ?: e.javaClass.simpleName))
       listener.onStatus("代理设置应用失败：" + (e.message ?: e.javaClass.simpleName))
     }
+  }
+
+  /**
+   * 热更新 UPnP/NAT-PMP 端口映射（无需重建会话）。
+   *
+   * 桌面 `SessionCore.apply_port_mapping` 的 Android 落点。为什么值得做成开关
+   * （诊断 D-2026-09-18）：关闭时 ① 连不上同为 NAT 后的 peer —— swarm 里无开放
+   * 端口的 peer 占比很高，可连候选会一路枯竭（症状是「有 peer 但速度起不来」）；
+   * ② 做种/上传时无人能连入。
+   *
+   * 安卓侧比桌面更需要这个开关：手机通常处于运营商 NAT 之后，用户**无法手动
+   * 做端口转发**（桌面还能让用户去路由器上转发），所以客户端开关是唯一手段。
+   *
+   * 注 1：libtorrent 的 UPnP 是异步发现，开启后要数秒才拿到映射，期间
+   * `portmap_alert` / `portmap_error_alert` 是唯一成败信号（与桌面同款语义）。
+   * 注 2：蜂窝网络下路由器侧无 IGD，映射多数会失败 —— 这是**预期结果**，
+   * 不影响下载本身（DHT/tracker 仍可建立出站连接）。
+   */
+  fun applyPortMapping(enabled: Boolean) {
+    lastPortMapping = enabled
+    log("应用端口映射：${portMappingSummary(enabled)} 会话运行中=${isRunning()}")
+    if (!isRunning()) {
+      listener.onStatus(PORT_MAPPING_PENDING_NOTE)
+      return
+    }
+    try {
+      val pm = portMappingPlan(enabled)
+      val sp = SettingsPack()
+      sp.setBoolean(
+        org.libtorrent4j.swig.settings_pack.bool_types.enable_upnp.swigValue(), pm.enableUpnp
+      )
+      sp.setBoolean(
+        org.libtorrent4j.swig.settings_pack.bool_types.enable_natpmp.swigValue(), pm.enableNatpmp
+      )
+      manager.applySettings(sp)
+      listener.onStatus(portMappingToggleNote(enabled))
+    } catch (e: Throwable) {
+      log("应用端口映射失败：" + (e.message ?: e.javaClass.simpleName))
+      listener.onStatus("端口映射设置应用失败：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
+
+  /**
+   * 兜底 tracker 开关（HTTP/HTTPS 追加通道，见 [trackersFor]）。
+   *
+   * 两条路一起走（与限速 I-01 同型）：
+   * 1. **加种时** —— `AddTorrentParams.setTrackers(trackersFor(lastExtraTrackers))`；
+   * 2. **已在跑的任务** —— [pushTrackers] 直接把缺失条目 `addTracker` 到现有句柄。
+   *
+   * 第 2 条的必要性：只做第 1 条的话，用户开了开关还得把磁力链重新添加一遍才生效，
+   * 现场几乎没人想得到 —— 那等于开关形同虚设。javap 复核确认
+   * `torrent_handle.addTracker/trackers` 在 libtorrent4j 2.1.0-39 已绑定。
+   *
+   * **只做加法**：不去 `replaceTrackers`（那会连磁力链自带的 `tr=` 一起抹掉）。
+   * 因此关闭开关**不会**移除已追加的条目，只影响之后新加的任务 —— 文案如实说明。
+   */
+  fun applyExtraTrackers(enabled: Boolean) {
+    lastExtraTrackers = enabled
+    val urls = trackersFor(enabled)
+    log("应用兜底 tracker：enabled=$enabled 目标=${urls.size} 条 会话运行中=${isRunning()}")
+    if (!isRunning() || !enabled) {
+      listener.onStatus(
+        if (!isRunning()) {
+          EXTRA_TRACKERS_PENDING_NOTE
+        } else {
+          extraTrackersNote(false, TrackerPushResult(0, 0))
+        }
+      )
+      return
+    }
+    // 快照先于加锁：锁内只取句柄引用，swig 调用一律在锁外（并发三律）
+    val handles = synchronized(taskLock) { taskMap.values.mapNotNull { it.handle } }
+    val result = pushTrackers(urls, handles.map { TorrentHandleOps(it) })
+    log("兜底 tracker 已下发：新增 ${result.urlsAdded} 条 / ${result.handlesTouched} 个有效句柄")
+    listener.onStatus(extraTrackersNote(true, result))
   }
 
   /**

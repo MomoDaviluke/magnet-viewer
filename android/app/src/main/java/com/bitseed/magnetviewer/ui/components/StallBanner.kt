@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bitseed.magnetviewer.theme.LocalPal
 import com.bitseed.magnetviewer.theme.LocalShapes
+import androidx.compose.material3.MaterialTheme
 
 /** 下载停滞提示（`MagnetUiState.stallNote` 的人话渲染）。 */
 @Composable
@@ -27,11 +28,11 @@ fun StallBanner(note: String?) {
       Modifier.fillMaxWidth()
         .clip(shapes.shapeButton)
         .background(pal.altRow)
-        .padding(horizontal = 10.dp, vertical = 8.dp)
+        .padding(horizontal = 12.dp, vertical = 8.dp)
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Text("⚠", fontSize = 13.sp, color = pal.warn, modifier = Modifier.padding(end = 6.dp))
-      Text(note, fontSize = 13.sp, color = pal.text, fontWeight = FontWeight.Medium, maxLines = 2)
+      Text("⚠", style = MaterialTheme.typography.bodySmall, color = pal.warn, modifier = Modifier.padding(end = 8.dp))
+      Text(note, style = MaterialTheme.typography.bodySmall, color = pal.text, fontWeight = FontWeight.Medium, maxLines = 2)
     }
   }
 }

@@ -16,20 +16,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.bitseed.magnetviewer.theme.LocalPal
 import com.bitseed.magnetviewer.theme.LocalShapes
+import androidx.compose.ui.res.stringResource
+import com.bitseed.magnetviewer.R
 
 /** 空态（方案 B §2）。中心 88px 图标（主色 tonal 底）+ 标题 + 两行人话 + 「示例磁力链」次按钮。 */
 @Composable
-fun EmptyState(onSample: () -> Unit = {}, sampleLabel: String = "示例磁力链") {
+fun EmptyState(onSample: () -> Unit = {}, sampleLabel: String = stringResource(R.string.sample_magnet)) {
   val pal = LocalPal.current
   val shapes = LocalShapes.current
   Column(
-    modifier = Modifier.fillMaxSize().padding(16.dp),
+    modifier = Modifier.fillMaxSize().padding(18.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
     verticalArrangement = Arrangement.Center,
   ) {
@@ -40,19 +41,19 @@ fun EmptyState(onSample: () -> Unit = {}, sampleLabel: String = "示例磁力链
     ) {
       Text("🧲", fontSize = 32.sp, color = pal.accent)
     }
-    Spacer(Modifier.height(16.dp))
-    Text("还没有任务", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
+    Spacer(Modifier.height(18.dp))
+    Text(stringResource(R.string.empty_title), style = MaterialTheme.typography.titleLarge, color = pal.text)
     Spacer(Modifier.height(8.dp))
     Text(
-      "粘贴磁力链，点「解析」开始",
-      fontSize = 15.sp,
+      stringResource(R.string.empty_subtitle),
+      style = MaterialTheme.typography.bodyLarge,
       color = pal.textMuted,
       textAlign = TextAlign.Center,
     )
-    Text("先看完整文件清单，不下载本体", fontSize = 13.sp, color = pal.textDim, textAlign = TextAlign.Center)
+    Text(stringResource(R.string.empty_hint), style = MaterialTheme.typography.bodySmall, color = pal.textDim, textAlign = TextAlign.Center)
     Spacer(Modifier.height(12.dp))
     OutlinedButton(onClick = onSample, shape = shapes.shapeButton) {
-      Text(sampleLabel, fontSize = 13.sp, color = pal.accent)
+      Text(sampleLabel, style = MaterialTheme.typography.bodySmall, color = pal.accent)
     }
   }
 }

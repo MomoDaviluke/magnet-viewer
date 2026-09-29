@@ -15,7 +15,7 @@
     core.models.contiguous_bytes / ready_until / range_available（构造 PieceMap + have 回调）
     core.scheduler.window_pieces / tail_window_bytes
     core.scheduler.tail_entry_pieces / tail_piece_window（轻量替身文件对象）
-    core.states.DOWNLOAD_STATES / BOOTSTRAP_TRACKERS / STATE_* 常量
+    core.states.DOWNLOAD_STATES / BOOTSTRAP_TRACKERS / FALLBACK_TRACKERS / STATE_* 常量
     core.config.lt_proxy_settings
 
 本脚本自身：不联网、不启动 libtorrent 会话、不写任何既有文件（只写上面那个夹具）。
@@ -315,6 +315,16 @@ def _build_bootstrap_trackers() -> list:
              "expect": sorted(core_states.BOOTSTRAP_TRACKERS)}]
 
 
+def _build_fallback_trackers() -> list:
+    """兜底 tracker（HTTP/HTTPS，`extra_trackers` 开关控制的追加通道）。
+
+    诊断 D-2026-09-18 新增：安卓侧 `TaskStates.kt` 同步了这组常量，两边必须逐条一致
+    —— 它是「UDP 出站受阻时多一条发现通道」的全部内容，漂移了就等于两边行为不同。
+    """
+    return [{"input": {},
+             "expect": sorted(core_states.FALLBACK_TRACKERS)}]
+
+
 def _build_state_constants() -> list:
     names = sorted(n for n in vars(core_states) if n.startswith("STATE_"))
     return [{"input": {"name": n}, "expect": getattr(core_states, n)} for n in names]
@@ -372,6 +382,7 @@ def build_payload() -> dict:
         "tail_piece_window": _build_tail_piece_window(),
         "download_states": _build_download_states(),
         "bootstrap_trackers": _build_bootstrap_trackers(),
+        "fallback_trackers": _build_fallback_trackers(),
         "state_constants": _build_state_constants(),
         "lt_proxy_settings": _build_lt_proxy_settings(),
     }

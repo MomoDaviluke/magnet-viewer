@@ -39,3 +39,17 @@ BOOTSTRAP_TRACKERS = [
     "udp://exodus.desync.com:6969/announce",
     "udp://tracker.torrent.eu.org:451/announce",
 ]
+
+# 兜底 tracker（HTTP/HTTPS，**与 BOOTSTRAP_TRACKERS 分开**）——
+# 诊断 D-2026-09-18：本机 UDP 出站大面积受阻（5 个公共 DHT 引导节点实测
+# 仅 1 个响应），udp:// tracker 大概率同样不可达，而磁力链若不带 ``tr=``
+# 参数，peer 发现就只剩 DHT 一条路。这里补一组走 TCP 443/80 的 tracker 作为
+# 第二条通道，由 ``extra_trackers`` 开关控制（默认关闭，保持既有 5 条 udp
+# 的行为与相关断言不变）。
+FALLBACK_TRACKERS = [
+    "http://tracker.opentrackr.org:1337/announce",
+    "https://tracker.opentrackr.org:443/announce",
+    "http://open.tracker.cl:80/announce",
+    "http://tracker.openbittorrent.com:80/announce",
+    "https://tracker.torrent.eu.org:443/announce",
+]

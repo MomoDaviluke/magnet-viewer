@@ -225,6 +225,18 @@
         "input": {}
       }
     ],
+    "fallback_trackers": [
+      {
+        "expect": [
+          "http://open.tracker.cl:80/announce",
+          "http://tracker.openbittorrent.com:80/announce",
+          "http://tracker.opentrackr.org:1337/announce",
+          "https://tracker.opentrackr.org:443/announce",
+          "https://tracker.torrent.eu.org:443/announce"
+        ],
+        "input": {}
+      }
+    ],
     "human_size": [
       {
         "expect": "0 B",
@@ -2017,5 +2029,5 @@
     ]
   },
   "generated_by": "android/tools/gen_parity_fixtures.py",
-  "source_sha": "0b14991aa76a30c3a45eb4e1ce0c6d22a75082ca"
+  "source_sha": "ac260516fa4c475bcfd42d596d8bb74bf77f8711"
 }

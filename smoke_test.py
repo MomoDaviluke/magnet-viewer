@@ -7,6 +7,7 @@
 import hashlib
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
@@ -330,7 +331,12 @@ def main():
     tasks, _ = upsert_task(tasks, fake)
     path_written = save_tasks(tdir, tasks)
     assert path_written == os.path.join(tdir, ".tasks.json")
-    assert os.path.isfile(path_written) and not os.path.exists(path_written + ".tmp")
+    assert os.path.isfile(path_written)
+    # 残留检查按「目录里还有没有 *.tmp」而非固定名 `<path>.tmp`：临时名自
+    # plan/11 R-1 起带 pid/线程号/序号（并发写者不得共用同一临时文件），
+    # 只查固定名会让这条断言恒真。
+    assert not [f for f in os.listdir(tdir) if f.endswith(".tmp")], \
+        "首次保存后不得残留临时文件"
     loaded = load_tasks(tdir)
     assert loaded == tasks, f"save/load roundtrip 不一致：{loaded}"
     assert loaded["a" * 40]["name"] == fake["name"]             # 中文名不丢字
@@ -388,7 +394,11 @@ def main():
         "replace 失败不得破坏旧文件（原子性）"
     save_tasks(tdir, tasks)                                       # 恢复后正常保存
     assert load_tasks(tdir) == tasks
-    assert not os.path.exists(path_written + ".tmp"), "保存后不得残留 .tmp"
+    # 残留检查按「目录里还有没有 *.tmp」而非固定名 `<path>.tmp`：
+    # 临时名自 plan/11 R-1 起带 pid/线程号/序号（并发写不得共用同一临时文件），
+    # 只查固定名会让这条断言恒真而失去意义。
+    leftovers = [f for f in os.listdir(tdir) if f.endswith(".tmp")]
+    assert not leftovers, f"保存后不得残留临时文件：{leftovers}"
     assert normalize_info_hash("A" * 40) == "a" * 40
     assert normalize_info_hash(None) is None and normalize_info_hash("zz") is None
     print("[2d] taskstore 原子替换通过：替换失败旧文件完好、成功后无残留")
@@ -420,7 +430,11 @@ def main():
     for junk in (b"", b"not bencode", raw[:-3], b"l1:ae"):        # 损坏 → None
         assert decode_resume(junk) is None, f"损坏数据应返回 None: {junk[:20]!r}"
     p = write_resume(tdir, ih, resume)                           # 原子写盘 + 读回
-    assert p == rp and os.path.isfile(rp) and not os.path.exists(rp + ".tmp")
+    assert p == rp and os.path.isfile(rp)
+    # 残留检查按「目录里还有没有 *.tmp」：临时名自 plan/11 R-1 起带
+    # pid/线程号/序号，只查固定名 `<path>.tmp` 会恒真而失去意义
+    assert not [f for f in os.listdir(os.path.dirname(rp))
+                if f.endswith(".tmp")], "fastresume 写盘后不得残留临时文件"
     assert decode_resume(open(rp, "rb").read()) == resume
     print("[2d] fastresume 通过：路径约定/编解码 roundtrip/损坏容错/lt 互通")
 
@@ -565,9 +579,14 @@ def main():
     srv2 = StreamServer(cache, avail_cb=lambda p: state["avail"], wait_timeout=0)
     srv2.start()
     url2 = srv2.url_for(rel)
-    with urllib.request.urlopen(url2, timeout=5) as resp:      # 全量 → 钳制到前缀
+    with urllib.request.urlopen(url2, timeout=5) as resp:      # 全量 → 前缀以 206 交出
+        # 审计 2026-09-29 第 13 项：前缀 < logical 时无 Range 请求回
+        # 206 + Content-Range（total=logical），不再回「200 + 截断 CL」——
+        # 后者会让客户端把前缀当完整文件（尾部 moov 探测不到）。
         body = resp.read()
-        assert resp.status == 200 and len(body) == 100 * 1024, (resp.status, len(body))
+        assert resp.status == 206 and len(body) == 100 * 1024, (resp.status, len(body))
+        cr = resp.headers.get("Content-Range", "")
+        assert cr == f"bytes 0-{100 * 1024 - 1}/{300 * 1024}", cr
     req = urllib.request.Request(url2, headers={"Range": "bytes=0-99"})
     with urllib.request.urlopen(req, timeout=5) as resp:       # 前缀内 Range → 206
         assert resp.status == 206 and len(resp.read()) == 100
@@ -577,12 +596,17 @@ def main():
         raise AssertionError("应当返回 416")
     except urllib.error.HTTPError as e:
         assert e.code == 416, e.code
+        # S8 诊断头：416 必须自证为 range
+        assert e.headers.get("X-Why") == "range", dict(e.headers)
     state["avail"] = 0
     try:                                                        # 零前缀 → 503
         urllib.request.urlopen(url2, timeout=5)
         raise AssertionError("应当返回 503")
     except urllib.error.HTTPError as e:
         assert e.code == 503, e.code
+        # S8 诊断头：数据未就绪的 503 必须自证 no-data（X-Ready-Bytes 为 0）
+        assert e.headers.get("X-Why") == "no-data", dict(e.headers)
+        assert e.headers.get("X-Ready-Bytes") == "0", dict(e.headers)
     srv2.shutdown()
     print("[3b] 前缀钳制通过：200 钳制 / 206 前缀内 / 416 超界 / 503 未就绪")
 
@@ -597,6 +621,8 @@ def main():
         raise AssertionError("pieces_cb 不可判定时应当返回 503，而不是吐零数据")
     except urllib.error.HTTPError as e:
         assert e.code == 503, e.code
+        # S8 诊断头：可用性不可判定的 503 必须自证 unavailable
+        assert e.headers.get("X-Why") == "unavailable", dict(e.headers)
     srv_nd.shutdown()
     print("[3b1] 不可判定不降级通过：pieces_cb 未命中 → 503（绝不喂稀疏零数据）")
 
@@ -634,6 +660,8 @@ def main():
         raise AssertionError("并发占满时应当返回 503")
     except urllib.error.HTTPError as e:
         assert e.code == 503 and e.headers.get("Retry-After"), (e.code, e.headers)
+        # S8 诊断头：并发占满的 503 必须自证 overloaded
+        assert e.headers.get("X-Why") == "overloaded", dict(e.headers)
     finally:
         lim.release()
     with urllib.request.urlopen(urllib.request.Request(
@@ -641,6 +669,127 @@ def main():
         assert resp.status == 206, resp.status     # 释放后恢复正常
     srv_lim.shutdown()
     print("[3b3] 并发上限通过：占满 → 503+Retry-After，释放 → 206 恢复")
+
+    # S2（2026-09-18）：等待中的请求不得挤占「写 body」的额度。
+    # 旧实现在入口抢一份 limiter 且覆盖整个等待阶段 → 十几个等待者即可让
+    # 「本来能立刻服务」的请求也 503。这里把等待额度真正占住，再验证同一个
+    # 服务器上的已就绪请求**仍能 206**。
+    srv_s2 = StreamServer(cache, pieces_cb=lambda p: None, avail_cb=lambda p: 0,
+                          wait_timeout=4.0, max_concurrency=2)
+    srv_s2.start()
+    cls_s2 = srv_s2._httpd.RequestHandlerClass
+    assert cls_s2.limiter is not cls_s2.wait_limiter, "等待与服务必须分账（S2）"
+    assert cls_s2.wait_limiter._value == 8, cls_s2.wait_limiter._value  # 2 × 4
+
+    def _hog():
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                srv_s2.url_for(rel),
+                headers={"Range": "bytes=0-1023"}), timeout=6)
+        except Exception:      # noqa: BLE001  等待超时后回 503，属预期
+            pass
+
+    hogs = [threading.Thread(target=_hog, daemon=True) for _ in range(2)]
+    for t in hogs:
+        t.start()
+    time.sleep(0.8)                       # 让它们都进入等待阶段并占住等待额度
+    full = os.path.getsize(disk)
+    cls_s2.avail_cb = staticmethod(lambda p: full)   # 该区间"已下载完"
+    with urllib.request.urlopen(urllib.request.Request(
+            srv_s2.url_for(rel),
+            headers={"Range": "bytes=0-1023"}), timeout=6) as resp:
+        assert resp.status == 206, f"等待者占额度时仍应 206，实得 {resp.status}"
+    for t in hogs:
+        t.join(timeout=8)
+    srv_s2.shutdown()
+    print("[3b4] S2 通过：等待额度被占满时，已就绪请求仍 206（等待不挤占服务）")
+
+    # S5（2026-09-18）：请求读超时必须存在，且**写 body 期间必须取消超时**。
+    # 前者防「连上不发请求」永久占线程（那会让并发上限形同虚设）；
+    # 后者防「播放器暂停不读」把传输截断 —— 两者缺一都会出事，故一起断言。
+    big = os.path.join(cache, os.path.dirname(rel) or "", "big.bin")
+    os.makedirs(os.path.dirname(big), exist_ok=True)
+    BIG = 4 * 1024 * 1024                 # 远大于内核收发缓冲，能真正压住 send
+    with open(big, "wb") as f:
+        f.write(os.urandom(BIG))
+    big_rel = (os.path.dirname(rel) + "/big.bin") if os.path.dirname(rel) else "big.bin"
+    srv_t = StreamServer(cache)
+    srv_t.start()
+    cls_t = srv_t._httpd.RequestHandlerClass
+    cls_t.timeout = 0.5                   # 探针加速：真实值 15s（见类属性注释）
+    try:
+        # (a) 僵尸连接必须被主动回收
+        zombie = socket.create_connection(("127.0.0.1", srv_t.port), timeout=6)
+        zombie.settimeout(6)
+        t0 = time.time()
+        closed = zombie.recv(1) == b""
+        zombie.close()
+        assert closed and (time.time() - t0) < 4, "连上不发请求的连接未被回收（S5）"
+        # (b) 客户端中途停读 > 超时值，body 不得被截断
+        sock2 = socket.create_connection(("127.0.0.1", srv_t.port), timeout=30)
+        sock2.settimeout(30)
+        path_q = srv_t.url_for(big_rel).split("127.0.0.1:%d" % srv_t.port, 1)[1]
+        sock2.sendall((
+            "GET %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+            "Range: bytes=0-%d\r\nConnection: close\r\n\r\n"
+            % (path_q, srv_t.port, BIG - 1)).encode("ascii"))
+        raw_b = b""
+        while b"\r\n\r\n" not in raw_b:
+            chunk = sock2.recv(1024)
+            if not chunk:
+                break
+            raw_b += chunk
+        head_b, _, body_b = raw_b.partition(b"\r\n\r\n")
+        assert int(head_b.split(b" ")[1]) == 206, head_b[:60]
+        time.sleep(1.5)                   # 停读 3× 超时值，压住服务端的 send
+        try:
+            while True:
+                chunk = sock2.recv(65536)
+                if not chunk:
+                    break
+                body_b += chunk
+        except socket.timeout:
+            pass
+        sock2.close()
+        assert len(body_b) == BIG, f"body 被超时截断：{len(body_b)} != {BIG}"
+    finally:
+        srv_t.shutdown()
+    print("[3b5] S5 通过：僵尸连接被回收，且客户端停读 1.5s 后 body 仍完整")
+
+    # C4（2026-09-18）：流服务记录最近一次应答，供播放失败时归因。
+    # 失败路径（503）必须也记录 —— 否则最需要排查的时候恰好什么都看不到。
+    cache_c4 = os.path.join(tmp, "cacheC4")
+    os.makedirs(cache_c4, exist_ok=True)
+    with open(os.path.join(cache_c4, "c4.bin"), "wb") as f:
+        f.write(os.urandom(64 * 1024))
+    srv_c4 = StreamServer(cache_c4)
+    srv_c4.start()
+    assert srv_c4.last_response_note() == "", "尚无应答时不应有摘要"
+    with urllib.request.urlopen(urllib.request.Request(
+            srv_c4.url_for("c4.bin"),
+            headers={"Range": "bytes=0-1023"}), timeout=5) as resp:
+        assert resp.status == 206, resp.status
+    note206 = srv_c4.last_response_note()
+    assert note206.startswith("流服务最近应答：206"), note206
+    assert "bytes 0-1023" in note206, note206
+    assert "等待" not in note206, f"快路径无等待，不该打印默认 0：{note206}"
+    srv_c4.shutdown()
+
+    srv_c4b = StreamServer(cache_c4, pieces_cb=lambda p: None, wait_timeout=0.2)
+    srv_c4b.start()
+    try:
+        urllib.request.urlopen(urllib.request.Request(
+            srv_c4b.url_for("c4.bin"),
+            headers={"Range": "bytes=0-1023"}), timeout=5)
+        raise AssertionError("不可判定应 503")
+    except urllib.error.HTTPError as e:
+        assert e.code == 503, e.code
+    note503 = srv_c4b.last_response_note()
+    assert note503.startswith("流服务最近应答：503"), note503
+    assert "等待" in note503, f"失败路径应带上等待耗时：{note503}"
+    srv_c4b.shutdown()
+    print(f"[3b6] C4 通过：流服务记录最近应答（{note206} / {note503}）")
+
 
     # 尾部索引窗口（moov 优先）纯逻辑测试
     mp4 = TorrentFile(0, "root/demo.mp4", 100 * 1024 * 1024, 0, 0, 6399)
@@ -815,8 +964,11 @@ def main():
     srv3.start()
     url3 = srv3.url_for(rel)
     with urllib.request.urlopen(url3, timeout=5) as resp:      # 无 Range → 连续前缀
+        # 审计 2026-09-29 第 13 项：前缀 < logical → 206 + Content-Range（total=logical）
         body = resp.read()
-        assert resp.status == 200 and len(body) == 3 * pl, (resp.status, len(body))
+        assert resp.status == 206 and len(body) == 3 * pl, (resp.status, len(body))
+        assert resp.headers.get("Content-Range") == f"bytes 0-{3 * pl - 1}/{size}", \
+            resp.headers.get("Content-Range")
     req = urllib.request.Request(url3, headers={"Range": "bytes=0-99"})
     with urllib.request.urlopen(req, timeout=5) as resp:       # 前缀内 → 206
         assert resp.status == 206 and len(resp.read()) == 100

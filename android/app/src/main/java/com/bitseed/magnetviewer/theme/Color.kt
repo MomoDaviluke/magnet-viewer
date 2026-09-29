@@ -39,4 +39,31 @@ object Pal {
   val dangerPressed = Color(0xFFA32C1F)
   /** 成功容器底（已完成 / 播放中芯片底）：[ok] 是深绿文字色，不能当底。 */
   val okSoft = Color(0xFFE9F4EE)
+  /** 视频区（恒黑底）占位文字：黑底上需要浅色，且深浅主题都不反转明度。 */
+  val videoPlaceholder = Color(0xFFD0D4DA)
+}
+
+/**
+ * 深色主题专属色值（浅色 [Pal] 之外新增，不复用浅色值换角色）。
+ *
+ * 背景（审计 P0 三连）：深色原实现把浅色值按角色重新映射，导致
+ * `okSoft == ok`（「已完成」徽章绿字绿底）、`dangerSoft` 与 `danger`
+ * 对比度约 1.3:1（红字红底）、`altRow == panel`（斑马纹失效）。
+ * 深色下 ok/danger 语义反转为「暗底 + 亮字」，故取独立色值。
+ */
+object DarkPal {
+  /** 成功容器底（暗绿）。 */
+  val okSoft = Color(0xFF17352A)
+  /** 成功文字（亮绿）：深色底上可读。 */
+  val ok = Color(0xFF6EE7A0)
+  /** 危险容器底（暗红）。 */
+  val dangerSoft = Color(0xFF3B1D18)
+  /** 危险文字（亮红）：深色底上可读。 */
+  val danger = Color(0xFFFF8A75)
+  /** 危险按下档（当前无直接消费者，保持语义完整）。 */
+  val dangerPressed = Color(0xFF5A2A22)
+  /** 交替行 / 卡内 inset（与 panel 0xFF5B6472 错开一档）。 */
+  val altRow = Color(0xFF525B68)
+  /** 视频区（恒黑底）占位文字：深色下稍柔和一档，仍在黑底上保持可读。 */
+  val videoPlaceholder = Color(0xFF9AA3AE)
 }

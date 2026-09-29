@@ -325,7 +325,10 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   private var settingsJob: Job? = null
 
   // ---- 持久化状态（任务清单 + 缓存根 + 当前任务标识）----
-  /** 内存清单（`.tasks.json` 的镜像；每次变更后异步落盘）。 */
+  /** 内存清单（`.tasks.json` 的镜像；每次变更后异步落盘）。
+   *  plan/11 §6.2 R-2：copy-on-write 不可变 Map（引用替换原子），但告警线程写与主线程读
+   *  之间仍需可见性保证 ⇒ `@Volatile`。写线程收敛到单协程列为长期项（下轮轮询自愈，等级低）。 */
+  @Volatile
   private var tasks: Map<String, TaskRecord> = emptyMap()
 
   /** 缓存根 `<filesDir>/magnet/cache`（首次 IO 时惰性解析）。 */
@@ -1233,6 +1236,11 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       runCatching { engine.applyRateLimit(v.downloadRateLimit) }
       runCatching { engine.applyMetadataTimeout(v.metadataTimeout) }
       runCatching { engine.setPreviewCacheMode(v.previewCacheMode) }
+      // 诊断 D-2026-09-18（安卓侧同步桌面）：端口映射热生效（UPnP/NAT-PMP），
+      // 兜底 tracker 记录到「下次加种生效」。两者都失败即吞——设置项不该让
+      // 设置流崩溃（与上面几项同款容错）。
+      runCatching { engine.applyPortMapping(v.portMapping) }
+      runCatching { engine.applyExtraTrackers(v.extraTrackers) }
     }
     _state.update {
       it.copy(

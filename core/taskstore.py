@@ -23,8 +23,10 @@ paused/completed/stopped/failed/seeding/deleted），此处不导入 fetcher/sta
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import threading
 import time
 from typing import Callable, Mapping
 
@@ -160,21 +162,110 @@ def normalize_task(raw) -> dict | None:
 
 # ---------------- 读写（原子写） ----------------
 
-def atomic_write_bytes(path: str, data: bytes) -> str:
-    """把字节内容原子写入 path：临时文件 + fsync + os.replace。
+_TMP_SEQ = itertools.count()      # 进程内单调序号：临时名唯一性的第三重保险
+_WRITE_SHARDS = 64                # 分片数：同路径必落同一片（互斥），内存有界
+_WRITE_LOCKS = [threading.Lock() for _ in range(_WRITE_SHARDS)]
 
-    中途失败（写盘/rename 抛错）不破坏已存在的目标文件；
-    成功后磁盘上不存在 `.tmp` 残留。
+
+def _tmp_path(path: str) -> str:
+    """目标路径 → **唯一**临时路径（同目录，保证 os.replace 是同卷原子替换）。
+
+    唯一性三重来源：pid（跨进程）+ 线程 id（跨线程）+ 进程内单调序号
+    （防同线程重入或 tid 快速复用）。三者叠加后并发写者不可能撞名。
+    """
+    return f"{path}.{os.getpid()}.{threading.get_ident()}.{next(_TMP_SEQ)}.tmp"
+
+
+def _write_lock_for(path: str):
+    """目标路径 → 写锁（按路径哈希分片，同路径恒得同一把）。
+
+    为什么用分片数组而不是「按路径建锁字典」（安卓 `TaskStore.kt` 的做法）：
+    安卓侧目标数受任务数约束，桌面侧还有 ``.meta/<ih>.torrent`` 这种随
+    「看过多少种子」单调增长的路径，字典会无界增长；固定分片换取**内存有界**。
+    代价是不同路径偶发共用一把锁（轻微串行化），对「写盘频率极低」的本场景
+    无影响。
+    """
+    key = os.path.normcase(os.path.abspath(path))
+    return _WRITE_LOCKS[hash(key) % _WRITE_SHARDS]
+
+
+def _replace_with_retry(tmp: str, path: str, attempts: int = 3) -> None:
+    """``os.replace`` 的**有界重试**（plan/11 R-15）。
+
+    Windows 上**目标**文件被读句柄打开（``open(path, "rb")`` 不共享删除）时，
+    ``MoveFileEx`` 抛 ``PermissionError [WinError 32/5]``——读方通常是 UI 轮询
+    读 ``.tasks.json`` 或 ``load_torrent_info`` 读 ``.meta``，窗口很短。
+    只重试权限冲突这一类（其它异常照原样立刻上抛），退避 2/10/30ms；
+    重试发生在 ``_write_lock_for`` 锁内，但该锁是**本模块私有**的（不是
+    registry 锁），不会与 §E 的「落盘不得持 registry 锁」红线冲突。
+    仍失败则照原样上抛——绝不吞。
+    """
+    delay = 0.002
+    for attempt in range(max(1, attempts)):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 5.0
+
+
+def atomic_write_bytes(path: str, data: bytes) -> str:
+    """把字节内容原子写入 path：唯一临时文件 + fsync + os.replace。
+
+    **并发安全（plan/11 R-1）。** 历史缺陷：临时名固定为 ``f"{path}.tmp"``
+    且全程无锁——两个线程在同一 ``open→fsync→replace`` 窗口写同一路径时会
+    **共用同一个临时文件**。
+
+    失败形态（**实测，非推断**）：
+      - **Windows 主导形态**：两个写者同时持有同一临时文件时，先完成者的
+        ``os.replace`` 抛 ``PermissionError [WinError 32]``——源文件仍被另一个
+        线程打开，``MoveFileEx`` 搬不动它。负向对照实测（5 写者 × 30 轮 × 5 次）：
+        **147–149 次异常 / 150 次写入**，即并发写几乎**每一次**都以异常收场，
+        而不是「偶尔产出坏文件」。安卓侧早已实测到同一现象并修掉，
+        见 ``data/TaskStore.kt:188-189`` 对 ``rename 失败：….tasks.json.tmp``
+        的记载——此类缺陷在本项目不是假想。
+      - POSIX 语义下则是两个 fd 各自从偏移 0 覆写 ⇒ **内容交错**，全程无异常。
+
+    后果：异常从本函数抛出后，调用方 ``persist_tasks`` 的 ``except`` 把它吞成
+    一行告警 ⇒ 并发落盘**静默失败**。最重的是 ``.tasks.json``：读端 ``load_tasks``
+    对损坏/缺失的策略是「返回空表」（绝不阻断启动）⇒ 用户下次启动**整个下载
+    任务列表为空**。``.meta`` / ``.fastresume`` / ``.dht_state`` 同受影响
+    （``.meta`` 有内容校验自愈，表现为缓存未命中 + 重取元数据）。
+
+    三道措施（与安卓 ``data/TaskStore.kt:192-218`` 同款，仅互斥实现不同，
+    见 ``_write_lock_for``）：
+
+    1. 临时名唯一（``_tmp_path``）——杜绝多写者共用临时文件；
+    2. 同目标路径互斥（``_write_lock_for``）；
+    3. 任何失败路径都清掉临时文件，不留 ``.tmp`` 残骸。
+
+    失败语义不变：中途失败不破坏已存在的目标文件，异常**照原样上抛**
+    （``save_tasks`` 的调用方依赖它判断「这次没写成」）。
+    成功后磁盘上不存在临时文件残留。
     """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    tmp = _tmp_path(path)
+    with _write_lock_for(path):
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            _replace_with_retry(tmp, path)      # plan/11 R-15：读-写撞 WinError 32 的有界重试
+        except BaseException:
+            # 清理必须覆盖 BaseException：残骸留在缓存目录会被后续 scandir
+            # 当成条目统计（.meta 剪枝按条目数算），也会让「无 .tmp 残留」
+            # 的护栏失效
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
     return path
 
 

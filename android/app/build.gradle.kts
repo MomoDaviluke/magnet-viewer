@@ -146,7 +146,7 @@ dependencies {
   // BT 引擎（libtorrent4j）+ 播放器（Media3）
   implementation(libs.libtorrent4j.core)
   implementation(libs.libtorrent4j.android.arm64)
-  implementation(libs.libtorrent4j.android.x86)
+  implementation(libs.libtorrent4j.android.x8664)
   implementation(libs.media3.exoplayer)
   implementation(libs.media3.ui)
 

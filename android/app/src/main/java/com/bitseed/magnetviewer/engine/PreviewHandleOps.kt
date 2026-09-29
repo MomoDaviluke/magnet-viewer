@@ -3,6 +3,7 @@ package com.bitseed.magnetviewer.engine
 import com.bitseed.magnetviewer.core.model.PieceMap
 import com.bitseed.magnetviewer.core.model.TorrentFile
 import com.bitseed.magnetviewer.data.AppLog
+import org.libtorrent4j.AnnounceEntry
 import org.libtorrent4j.PieceIndexBitfield
 import org.libtorrent4j.Priority
 import org.libtorrent4j.TorrentFlags
@@ -65,6 +66,19 @@ interface PreviewHandleOps {
   fun availability(): PieceAvailability?
 
   /**
+   * S6：种子总块数（未知返回 0）。增量视图用它判定规模；0 时调用方退回旧路径。
+   * 默认 0 —— 既有替身零破坏（同 [pieceProbe] 的约定）。
+   */
+  fun numPieces(): Int = 0
+
+  /**
+   * S6：增量可用性视图的探针（默认 **null = 视图不可用**，调用方退回
+   * [availability] 旧路径——「缓存只许加速，不许致败」）。
+   * 默认 null 让既有测试替身零破坏；真实现见 [TorrentHandleOps.pieceProbe]。
+   */
+  fun pieceProbe(): PieceView.PieceProbe? = null
+
+  /**
    * `TorrentHandle.setDownloadLimit(bytes)`（**字节/秒**，0 = 不限）：逐任务限速。
    *
    * 为什么需要它（I-01 的实测结论）：libtorrent 的**会话级** `download_rate_limit`
@@ -81,11 +95,14 @@ interface PreviewHandleOps {
  *
  * 位图不可用（`pieces()` 返回 0 指针 / 空位图）时退化为逐块 `havePiece()`；
  * 两者都判不出来一律返回 false（不可判定按**不可用**处理，绝不误判可读）。
+ *
+ * S6：同时充当增量视图的一次性**基线**（[PieceView.Baseline]）——
+ * 视图只在初始化 / 失效重建时物化一次，之后不再走本快照。
  */
 internal class TorrentPieceSnapshot(
   private val status: TorrentStatus?,
   private val handle: TorrentHandle?,
-) : PieceAvailability {
+) : PieceAvailability, PieceView.Baseline {
   private val bits: PieceIndexBitfield? =
     try {
       status?.pieces()
@@ -102,6 +119,10 @@ internal class TorrentPieceSnapshot(
 
   val hasBitfield: Boolean
     get() = bits != null && bitCount > 0
+
+  /** S6 基线口径：位图块数（不可用 = 0，视图按「规模未知」保守处理）。 */
+  override val size: Int
+    get() = if (hasBitfield) bitCount else 0
 
   override fun have(piece: Int): Boolean {
     if (piece < 0) return false
@@ -149,12 +170,61 @@ internal fun snapshotOf(h: TorrentHandle): TorrentPieceSnapshot? =
   }
 
 /**
+ * S6：[PieceView.PieceProbe] 的真实现——视图的三个探针动作全部带
+ * `isValid()` 守卫（失效句柄上的 swig 调用是原生崩溃，try/catch 接不住）。
+ *
+ * - [have]：`havePiece` 单查（JNI ~100ns，与块数无关——这是视图省掉
+ *   `status(QUERY_PIECES)` 全量位图拷贝的关键）；
+ * - [scalars]：无 flag 的 `status()` 标量（totalDone + state），失效自检的
+ *   O(1) 电平/边沿判据来源；checking 由 State ∈ {CHECKING_FILES,
+ *   CHECKING_RESUME_DATA} 映射（javap 复核：libtorrent4j 2.1.0-39 的
+ *   State 枚举**没有** ALLOCATING，与桌面 Python 侧的集合差一项）；
+ * - [baseline]：[snapshotOf] 一次性位图快照（只在视图初始化/失效重建时物化）。
+ *
+ * [identity] 用宿主 [TorrentHandleOps] 实例：句柄换代时 ops 会重建，
+ * 身份随之变化 → 视图按 matches 判定重建，防串台。
+ */
+private class HandlePieceProbe(
+  private val ops: TorrentHandleOps,
+  private val handle: TorrentHandle,
+) : PieceView.PieceProbe {
+  override val identity: Any get() = ops
+
+  override fun have(piece: Int): Boolean =
+    try {
+      if (!handle.isValid()) false else handle.havePiece(piece)
+    } catch (e: Throwable) {
+      false
+    }
+
+  override fun scalars(): PieceView.Scalars? =
+    try {
+      if (!handle.isValid()) {
+        null
+      } else {
+        handle.status()?.let { st ->
+          val s = st.state()
+          PieceView.Scalars(
+            st.totalDone(),
+            checking = s == TorrentStatus.State.CHECKING_FILES ||
+              s == TorrentStatus.State.CHECKING_RESUME_DATA,
+          )
+        }
+      }
+    } catch (e: Throwable) {
+      null
+    }
+
+  override fun baseline(): PieceView.Baseline? = snapshotOf(handle)
+}
+
+/**
  * [PreviewHandleOps] 的真实实现：薄薄一层委托 + **每次调用前的 `isValid()` 守卫**。
  *
  * 之所以在适配层再守一次（调度器入口也守）：句柄可能在一次调用序列中途失效
  * （种子被移除），而失效句柄上的 swig 调用是原生崩溃，`try/catch` 接不住。
  */
-class TorrentHandleOps(private val handle: TorrentHandle) : PreviewHandleOps {
+class TorrentHandleOps(private val handle: TorrentHandle) : PreviewHandleOps, TrackerTarget {
 
   override fun isValid(): Boolean =
     try {
@@ -186,7 +256,22 @@ class TorrentHandleOps(private val handle: TorrentHandle) : PreviewHandleOps {
 
   override fun availability(): PieceAvailability? = snapshotOf(handle)
 
+  override fun numPieces(): Int = guardedValue("numPieces", 0) { it.torrentFile()?.numPieces() ?: 0 }
+
+  override fun pieceProbe(): PieceView.PieceProbe? =
+    if (isValid()) HandlePieceProbe(this, handle) else null
+
   override fun setDownloadLimit(bytes: Int) = guarded("setDownloadLimit($bytes)") { it.setDownloadLimit(bytes) }
+
+  // ---- TrackerTarget（诊断 D-2026-09-18）：给已在跑的任务追加兜底 tracker ----
+  // 用 addTracker（追加）而不是 replaceTrackers（整体替换）——后者会把磁力链自带的
+  // tr= 一并抹掉，那是净损失。详见 TrackerPush.kt 的口径说明。
+
+  override fun trackerUrls(): List<String> =
+    guardedValue("trackerUrls", emptyList()) { h -> h.trackers().map { it.url() } }
+
+  override fun addTracker(url: String) =
+    guarded("addTracker($url)") { it.addTracker(AnnounceEntry(url)) }
 
   private inline fun guarded(what: String, body: (TorrentHandle) -> Unit) {
     try {

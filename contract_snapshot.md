@@ -67,11 +67,18 @@ alert 归属 `a.handle == self._handle`（:348/:351）。
   tick() 顺序滚动。
 - `request_range(start_byte, end_byte)` — 按字节区间点播，**幂等**（deadline 覆盖）。
 - `seek_to_byte(byte_offset)`、`tick()`、`stop()`（撤 auto_managed 防自动续传，
-  audit P1-9）、`contiguous_progress() -> int`、`tail_ready() -> bool`、
+  audit P1-9）、`contiguous_progress(have=None) -> int`、`tail_ready(have=None) -> bool`、
+  `tail_entry_ready(have=None) -> bool`、`gate_snapshot(have=None) -> dict`
+  （2026-09-17 等待超时专项：三个派生量 + 门控合并求值，可选 `have` = 调用方
+  已握有的位图快照，用于把一轮 UI 轮询的 4 次 `handle.status()`/位图物化
+  折叠为 1 次；不传参时行为与基线逐字一致）、
   `buffer_progress() -> float`、`active -> bool`。
 - `tail_piece_window(file, piece_length) -> list[int]`（纯函数，TAIL_FIRST_EXTS=
-  mp4/mov/m4v/3gp/3g2/mj2；4MB~64MB 窗口，≤128 块）。
-- 常量：LOOKAHEAD_PIECES=60、TAIL_BYTES_MIN/MAX、TAIL_RATIO=0.01、TAIL_MAX_PIECES=128。
+  mp4/mov/m4v/3gp/3g2/mj2；尾窗按字节收敛 `min(size, max(2MB, 0.25%·size),
+  16MB)`，≤128 块）、`tail_entry_pieces(file, piece_length) -> list[int]`
+  （开播门控的尾部入口 = 文件最后 `min(2MB, size)` 覆盖块）。
+- 常量：LOOKAHEAD_PIECES=60、LOOKAHEAD_BYTES=16MB、DEADLINE_STEP_MS=400、
+  TAIL_BYTES_MIN=2MB、TAIL_BYTES_MAX=16MB、TAIL_RATIO=0.0025、TAIL_MAX_PIECES=128。
 
 ## 3. StreamServer（core/stream_server.py）
 
@@ -92,8 +99,42 @@ alert 归属 `a.handle == self._handle`（:348/:351）。
 - `safe_rel_path(*segments)` — 逐级净化，防穿越（audit 修复 #6）。
 - `file_disk_path(cache_dir, f)` — `cache_dir / safe_rel_path(f.path)`（**单文件不套
   额外前缀**，audit 修复 #4 契约）。
-- `PieceMap` / `contiguous_bytes(pm, limit)` / `range_available(pm, start, end_excl)`；
+- `PieceMap(piece_length, offset, start_piece, end_piece, size, have, view=None)`
+  ——`view` 为**可选**的增量可用性视图（plan/09）；`contiguous_bytes(pm, limit)` /
+  `range_available(pm, start, end_excl)` / `ready_until(pm, start, end_excl)`
+  的语义**冻结不变**（桌面↔安卓对账夹具覆盖）。
+- **增量派发层**（plan/09 方案 D，语义与上面三个纯函数逐值等价，有 D6 段常驻对拍）：
+  `contiguous_bytes_of(pm, limit=None)` / `ready_until_of(pm, start, end_excl)` /
+  `range_available_of(pm, start, end_excl)` —— `PieceMap.view` 不为空时走
+  「一次性基线 + 增量推进」（成本与块数无关），否则逐字退回纯函数。
+- `bytes_up_to_piece(piece, piece_length, offset, limit)` —— 共用的字节换算公式
+  （`max(0, min(limit, piece*piece_length - offset))`）：位图路径与增量路径
+  共用它，「逐值一致」由构造保证而非靠约定。
+- `have_from_bitmap(pieces)`（P2-1 位图工厂，保留给测试替身与小规模精确扫描）、
   `human_size(n)`。
+
+## 4b. pieceview（core/pieceview.py，plan/09 方案 D 新增）
+
+- `PieceView(handle, piece_length, npieces)` —— 单句柄的块可用性视图。
+  替换「每次判定都物化全量位图」，使判定成本与种子规模**无关**：
+  - `have(p) -> bool`：单块按需绑定调用（≈5.5µs，与块数无关）；
+    越界/非整数/异常一律 `False`（不可判定按不可用，语义同 `have_from_bitmap`）。
+  - `contiguous_from(start, limit=None) -> int | None`：从 start 起的连续前缀末端
+    （摊销 O(1)，多锚点）；`None` = 不可判定。
+  - `range_ready_pieces(p0, p1) -> bool | None`：块区间是否全就绪（首缺即停）。
+  - `buffered_runs(sa, sb) -> list[(a, b)] | None`：进度条分段（唯一仍需整片块状态
+    的用途）：小块用基线位图精确扫描，大块降采样（≤ `SEG_PROBE_BUDGET` 次调用）。
+  - `rebuild_baseline(force=False)` / `invalidate()` / `matches(handle)` / `stats()`。
+  - 不变量：**块一旦落盘恒为 have**（连续前缀单调不减）。失效两只手：
+    `total_done` 下降（电平）、`state` **进入** `checking_*`（边沿，刻意不用电平——
+    否则长期处于校验态的种子会每轮重建基线，实测比优化前更糟）。
+  - 常量：`MAX_ADVANCE=4096`、`SEG_PROBE_BUDGET=256`、`SEG_EXACT_MAX=32768`。
+- 与 `PreviewScheduler` 的接缝：`attach_view(view)` / `piece_view` 属性；
+  未注入时调度器逐字退回位图路径（测试替身与直接 `begin()` 的用例不受影响）。
+- 与 `PreviewCore` 的接缝：`_view_for(handle, npieces, piece_length)` 按
+  `hash_key` 缓存视图并在句柄被替换时重建；`start_preview` 负责注入；
+  `status()` 用 `status(0)` 取 state/peers/rate（关位图）并把视图的 `have`
+  传给 `gate_snapshot`。
 
 ## 5. parser（core/parser.py）
 

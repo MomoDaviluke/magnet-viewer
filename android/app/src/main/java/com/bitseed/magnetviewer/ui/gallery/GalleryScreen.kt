@@ -48,6 +48,7 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import androidx.compose.material3.MaterialTheme
 
 /**
  * 画廊界面状态（VM → UI；纯数据）。
@@ -130,7 +131,7 @@ fun GalleryScreen(
     // 头：标题 + 返回
     Row(verticalAlignment = Alignment.CenterVertically) {
       Column(modifier = Modifier.weight(1f)) {
-        Text("图片画廊", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = pal.text)
+        Text("图片画廊", style = MaterialTheme.typography.titleMedium, color = pal.text)
         // E-01（说明只留一条）：VM 的 [state.note] 已经带「共 N 张图片 · 点缩略图看大图…」，
         // 它非空时这行就**让位**（否则同屏出现两条几乎一样的说明，就是 QA E-01 的原现象）；
         // note 为空（还没建立状态）时才用本地这句兜底。
@@ -140,20 +141,20 @@ fun GalleryScreen(
             "共 ${items.size} 张图片 · " +
               if (position < 0) "点缩略图看大图（翻到未下载的图片会自动按需下载）"
               else "大图查看（可缩放 / 上一张 / 下一张）",
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelMedium,
             color = pal.textMuted,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
           )
         }
       }
-      TextButton(onClick = onClose) { Text("返回文件清单", fontSize = 13.sp, color = pal.accent) }
+      TextButton(onClick = onClose) { Text("返回文件清单", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
     }
     if (state.note.isNotEmpty()) {
-      Text(state.note, fontSize = 12.sp, color = pal.textMuted, maxLines = 3, overflow = TextOverflow.Ellipsis)
+      Text(state.note, style = MaterialTheme.typography.labelMedium, color = pal.textMuted, maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
     if (items.isEmpty()) {
-      Text("该资源中没有图片文件", fontSize = 14.sp, color = pal.textDim)
+      Text("该资源中没有图片文件", style = MaterialTheme.typography.bodyLarge, color = pal.textDim)
       return@Column
     }
     if (cur == null) {
@@ -203,7 +204,7 @@ private fun ThumbCell(item: GalleryItem, onClick: () -> Unit) {
         .background(pal.panel)
         .border(1.dp, if (item.isTarget) pal.accent else pal.border, RoundedCornerShape(8.dp))
         .clickable(onClick = onClick)
-        .padding(6.dp)
+        .padding(8.dp)
   ) {
     Box(
       modifier = Modifier.fillMaxWidth().aspectRatio(1.33f).clip(RoundedCornerShape(6.dp)).background(pal.bgInput),
@@ -218,11 +219,11 @@ private fun ThumbCell(item: GalleryItem, onClick: () -> Unit) {
         )
       } else {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          Text("图片占位", fontSize = 11.sp, color = pal.textDim)
+          Text("图片占位", style = MaterialTheme.typography.labelMedium, color = pal.textDim)
           Spacer(Modifier.height(4.dp))
           Text(
             imageStateText(item.state, item.downloadedBytes.toDouble() / maxOf(1L, item.size)),
-            fontSize = 11.sp,
+            style = MaterialTheme.typography.labelMedium,
             color = if (item.state == ImageDownloadState.READY) pal.ok else pal.warn,
           )
           Spacer(Modifier.height(4.dp))
@@ -233,7 +234,7 @@ private fun ThumbCell(item: GalleryItem, onClick: () -> Unit) {
     Spacer(Modifier.height(4.dp))
     Text(
       item.name,
-      fontSize = 12.sp,
+      style = MaterialTheme.typography.labelMedium,
       fontWeight = FontWeight.Medium,
       color = pal.text,
       maxLines = 1,
@@ -243,7 +244,7 @@ private fun ThumbCell(item: GalleryItem, onClick: () -> Unit) {
       item.sizeText + " · " +
         imageStateText(item.state, item.downloadedBytes.toDouble() / maxOf(1L, item.size)) +
         (if (item.isTarget) " · 预览目标" else ""),
-      fontSize = 11.sp,
+      style = MaterialTheme.typography.labelMedium,
       color = if (item.state == ImageDownloadState.READY) pal.ok else pal.textMuted,
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
@@ -267,7 +268,7 @@ private fun BigViewer(
 ) {
   val pal = LocalPal.current
   val bmp = rememberSampledBitmap(item.diskPath, item.renderable, VIEWER_PX)
-  Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+  Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     Box(
       modifier =
         Modifier.fillMaxWidth()
@@ -290,17 +291,17 @@ private fun BigViewer(
           Text(
             if (item.state == ImageDownloadState.READY) "正在解码本地图片…"
             else "下载中 $pct%…（完成后自动显示）",
-            fontSize = 13.sp,
+            style = MaterialTheme.typography.bodySmall,
             color = pal.warn,
           )
-          Spacer(Modifier.height(6.dp))
+          Spacer(Modifier.height(8.dp))
           ThinBar(fraction = item.downloadedBytes.toDouble() / maxOf(1L, item.size), width = 200.dp)
         }
       }
     }
     Text(
       galleryInfoText(position, count, item.name, item.sizeText),
-      fontSize = 13.sp,
+      style = MaterialTheme.typography.bodySmall,
       color = pal.text,
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
@@ -308,28 +309,28 @@ private fun BigViewer(
     Text(
       "缩放 ${zoomPercent(scale)}%（范围 ${(MIN_SCALE * 100).toInt()}% ~ ${(MAX_SCALE * 100).toInt()}%）" +
         (if (item.isTarget) " · 当前预览目标（按需下载中）" else ""),
-      fontSize = 12.sp,
+      style = MaterialTheme.typography.labelMedium,
       color = pal.textMuted,
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
-      TextButton(onClick = { onStep(-1) }) { Text("← 上一张", fontSize = 13.sp, color = pal.accent) }
-      TextButton(onClick = { onStep(1) }) { Text("下一张 →", fontSize = 13.sp, color = pal.accent) }
+      TextButton(onClick = { onStep(-1) }) { Text("← 上一张", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
+      TextButton(onClick = { onStep(1) }) { Text("下一张 →", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
       Spacer(Modifier.width(4.dp))
-      TextButton(onClick = { onZoom(false) }) { Text("缩小", fontSize = 13.sp, color = pal.accent) }
-      TextButton(onClick = onResetZoom) { Text("重置", fontSize = 13.sp, color = pal.accent) }
-      TextButton(onClick = { onZoom(true) }) { Text("放大", fontSize = 13.sp, color = pal.accent) }
+      TextButton(onClick = { onZoom(false) }) { Text("缩小", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
+      TextButton(onClick = onResetZoom) { Text("重置", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
+      TextButton(onClick = { onZoom(true) }) { Text("放大", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
-      TextButton(onClick = onBackToGrid) { Text("返回网格", fontSize = 13.sp, color = pal.accent) }
+      TextButton(onClick = onBackToGrid) { Text("返回网格", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
       Text(
         if (position == 0) "已是第一张（不会越界）" else if (position == count - 1) "已是最后一张（不会越界）" else "",
-        fontSize = 12.sp,
+        style = MaterialTheme.typography.labelMedium,
         color = pal.textDim,
         modifier = Modifier.weight(1f),
       )
       Text(
         if (targetIndex >= 0) "预览目标 #$targetIndex" else "无预览目标",
-        fontSize = 12.sp,
+        style = MaterialTheme.typography.labelMedium,
         color = pal.textDim,
       )
     }
@@ -341,7 +342,7 @@ private fun BigViewer(
 private fun ThinBar(fraction: Double, width: androidx.compose.ui.unit.Dp) {
   val pal = LocalPal.current
   val f = fraction.coerceIn(0.0, 1.0).toFloat()
-  Box(modifier = Modifier.width(width).height(6.dp).clip(RoundedCornerShape(3.dp)).background(pal.border)) {
+  Box(modifier = Modifier.width(width).height(8.dp).clip(RoundedCornerShape(3.dp)).background(pal.border)) {
     Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(f).background(pal.accent))
   }
 }

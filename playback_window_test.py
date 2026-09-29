@@ -249,19 +249,37 @@ def section_tail(ck):
 
 def section_range(ck):
     ck.section("§D request_range：≤ 上限且 deadline 递增（插队不再全 0）")
-    # 400MB / 4MB 块 = 100 块 → 点播整文件必被 60 上限截断
+    # 400MB / 4MB 块 = 100 块。
+    # **上限口径 = 与顺序窗口同源的字节预算**（plan/07 阶段 1；2026-09-18 由
+    # 「固定 60 块」改为 ``window_pieces`` 换算）：旧口径在 4MB 块下等于
+    # **240MB 全 ASAP** —— 这正是 ``window_pieces`` 自己的 docstring 里论证过的
+    # 「libtorrent 在几十个同级紧急块里散抓 → 连续前缀凑不出 → 门控永不满足」
+    # 的成因。窗口与非窗口两处口径必须同源，否则等于把修好的问题搬到点播侧。
     s, h, f = mk(4 * MB, 400, have={99})
     s.begin(h, f)
     h.deadlines.clear()
     s.request_range(0, f.size)
     n = len(h.deadlines)
-    ck.check(n == sch.LOOKAHEAD_PIECES,
-             f"单次点播恰 {sch.LOOKAHEAD_PIECES} 块（实际 {n}）")
+    want_n = sch.window_pieces(4 * MB)
+    ck.check(n == want_n,
+             f"单次点播恰 window_pieces(4MB)={want_n} 块（实际 {n}）")
+    ck.check(n < sch.LOOKAHEAD_PIECES,
+             f"大块下点播上限已按字节预算收敛（{n} < 旧固定 {sch.LOOKAHEAD_PIECES} 块）")
     ck.check([p for p, _ in h.deadlines] == list(range(n)),
              "从区间头部连续预约（尾部不刷 ASAP）")
     ms = [m for _, m in h.deadlines]
     ck.check(ms == [i * sch.DEADLINE_STEP_MS for i in range(n)],
              f"deadline 递增 0/400/…/{(n - 1) * 400}（实际首尾 {ms[0]}/{ms[-1]}）")
+    # 小块**不劣化**：16KB 块下 window_pieces 仍为 LOOKAHEAD_PIECES，
+    # 点播上限与旧口径逐字一致（防止「修大块」把小块一起改小）。
+    s2, h2, f2 = mk(16 * 1024, 400, have={25599})
+    s2.begin(h2, f2)
+    h2.deadlines.clear()
+    s2.request_range(0, f2.size)
+    n2 = len(h2.deadlines)
+    ck.check(n2 == sch.LOOKAHEAD_PIECES,
+             f"16KB 块仍恰 {sch.LOOKAHEAD_PIECES} 块（小块行为与旧口径一致，"
+             f"实际 {n2}）")
     # 尾部小区间不受截断影响：390MB..尾 → piece 97/98/99
     h.deadlines.clear()
     s.request_range(390 * MB, f.size)
@@ -409,11 +427,54 @@ def section_entry(ck):
              f"16KB 块入口 = 最末 128 块（实际 {len(s4._entry_pieces)}）")
 
 
+def section_tick_debounce(ck):
+    ck.section("§B2 tick 防抖裕量随窗口规模伸缩（C2，2026-09-18）")
+    # 旧实现写死 16 块裕量：窗口按**字节预算**换算后 4MB 块下只有 4 块，
+    # `first_missing <= _scheduled_to - 16` 于是**恒为假** → 每拍（700ms）都重写
+    # 一次 deadline，窗口锚点被反复推前、近端优先级被稀释（防抖等于没有）。
+    # 新实现 slack = max(1, min(16, n // 2))：小块仍是 16（行为不变），
+    # 大块按半窗口伸缩。
+
+    def head_after_tick(pl, size_mb, have, scheduled_to):
+        """跑一次 tick()，返回**头部窗口区域**新写入的 deadline 块号集合。
+
+        必须按引擎真实的 `_tail_pieces`/`_entry_pieces` 排除尾部预约 ——
+        尾窗宽度随块长变化（4MB 块 ≈1 块、16KB 块可达 128 块），
+        用「排除末 N 块」这种近似会把尾窗误算进头部。
+        """
+        s, h, f = mk(pl, size_mb, have=have)
+        s.begin(h, f)
+        s._play_from = f.start_piece
+        s._scheduled_to = scheduled_to
+        h.deadlines.clear()
+        s.tick()
+        tail = set(s._tail_pieces or []) | set(s._entry_pieces or [])
+        return {p for p, _ in h.deadlines if p not in tail}
+
+    w4 = sch.window_pieces(4 * MB)
+    skipped = head_after_tick(4 * MB, 64, {0, 1}, scheduled_to=4)
+    ck.check(not skipped,
+             f"4MB 块（窗口 {w4} 块）领先 2 块 → 跳过头部预约"
+             f"（旧实现此处必然重写；实际 {sorted(skipped)}）")
+    worked = head_after_tick(4 * MB, 64, {0, 1}, scheduled_to=2)
+    ck.check(bool(worked),
+             f"窗口贴住 first_missing → 照常补（防抖不得变成不干活；"
+             f"实际 {sorted(worked)}）")
+    # 16KB 块：窗口 60 → 裕量仍为 16，边界与旧口径**逐字一致**（不劣化）
+    at16 = head_after_tick(16 * 1024, 400, {0, 1}, scheduled_to=2 + 16)
+    ck.check(not at16,
+             f"16KB 块领先 16 块 → 跳过（与旧口径一致；实际 {sorted(at16)}）")
+    at15 = head_after_tick(16 * 1024, 400, {0, 1}, scheduled_to=2 + 15)
+    ck.check(bool(at15),
+             f"16KB 块领先 15 块 → 照常补（旧口径的边界值；实际 {len(at15)} 块）")
+
+
 def main() -> int:
     ck = ts.Checker("playback_window_test（plan/07 阶段 1 播放窗口专项）")
     ck.section("按字节窗口 + deadline 递增保序（假句柄，不启会话）")
     section_window_pieces(ck)
     section_begin(ck)
+    section_tick_debounce(ck)
     section_tail(ck)
     section_range(ck)
     section_seek(ck)

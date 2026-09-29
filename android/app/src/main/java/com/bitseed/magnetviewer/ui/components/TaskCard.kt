@@ -26,6 +26,8 @@ import androidx.compose.ui.unit.sp
 import com.bitseed.magnetviewer.theme.LocalPal
 import com.bitseed.magnetviewer.theme.LocalShapes
 import com.bitseed.magnetviewer.ui.magnet.TaskRow
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.heightIn
 
 /**
  * **TaskCard**（方案 B「一任务一卡」）：
@@ -60,7 +62,7 @@ fun TaskCard(
         .clip(shapes.shapeCard)
         .background(pal.panel)
         .clickable { onFocus(row.infoHash) }
-        .padding(16.dp)
+        .padding(18.dp)
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
       Column(modifier = Modifier.weight(1f)) {
@@ -68,7 +70,7 @@ fun TaskCard(
           Text(
             (if (row.focused) "▶ " else "") + row.name,
             modifier = Modifier.weight(1f),
-            fontSize = 15.sp,
+            style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.SemiBold,
             color = pal.text,
             maxLines = 1,
@@ -82,8 +84,7 @@ fun TaskCard(
           if (percentText.isNotEmpty()) {
             Text(
               percentText,
-              fontSize = 20.sp,
-              fontWeight = FontWeight.SemiBold,
+              style = MaterialTheme.typography.titleLarge,
               color = pal.text,
             )
             Spacer(Modifier.width(8.dp))
@@ -91,7 +92,7 @@ fun TaskCard(
           Text(
             "总大小 ${row.totalSizeText} · 已下载 ${row.downloadedText}" +
               (if (row.rateText.isNotEmpty()) " · ${row.rateText}" else ""),
-            fontSize = 13.sp,
+            style = MaterialTheme.typography.bodySmall,
             color = pal.textMuted,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -103,73 +104,83 @@ fun TaskCard(
     if (percentText.isNotEmpty()) {
       Spacer(Modifier.height(8.dp))
       ProgressBar(fraction = row.progressPercent / 100f)
-      Spacer(Modifier.height(6.dp))
+      Spacer(Modifier.height(8.dp))
     }
     // 完成提示 / 错误条
     if (completionNote.isNotEmpty()) {
-      Text(completionNote, fontSize = 12.sp, color = pal.textMuted)
+      Text(completionNote, style = MaterialTheme.typography.labelMedium, color = pal.textMuted)
     }
     if (row.error.isNotEmpty()) {
       ErrorBanner(text = row.error)
     }
     if (row.note.isNotEmpty()) {
-      Text(row.note, fontSize = 12.sp, color = pal.ok)
+      Text(row.note, style = MaterialTheme.typography.labelMedium, color = pal.ok)
     }
     // 优先级（完成态禁用 + 提示）
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Text("优先级", fontSize = 12.sp, color = pal.textDim)
+      Text("优先级", style = MaterialTheme.typography.labelMedium, color = pal.textDim)
       for (p in 0..3) {
         TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
           onClick = { onPriority(row.infoHash, p) },
           enabled = TaskCardLogic.priorityEnabled(row.state) || p != row.priority,
         ) {
           Text(
             "P$p",
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelMedium,
             color = if (p == row.priority) pal.accent else pal.textMuted,
             fontWeight = if (p == row.priority) FontWeight.SemiBold else FontWeight.Normal,
           )
         }
       }
       if (TaskCardLogic.completionNote(row.state).isNotEmpty()) {
-        Text("完成不再影响速度", fontSize = 12.sp, color = pal.textDim)
+        Text("完成不再影响速度", style = MaterialTheme.typography.labelMedium, color = pal.textDim)
       }
     }
     // 操作（失败态禁用 转正/暂停/继续，给重试）
     Row(verticalAlignment = Alignment.CenterVertically) {
       if (failed) {
-        TextButton(onClick = { onFocus(row.infoHash) }) {
-          Text("重试", fontSize = 13.sp, color = pal.accent, fontWeight = FontWeight.Medium)
+        TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = { onFocus(row.infoHash) }) {
+          Text("重试", style = MaterialTheme.typography.bodySmall, color = pal.accent, fontWeight = FontWeight.Medium)
         }
       } else {
         TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
           onClick = { onPromote(row.infoHash) },
           enabled = !TaskCardLogic.shouldDisableOps(row.state),
-        ) { Text(if (row.savePath.contains("/downloads/")) "已转正" else "转正", fontSize = 13.sp, color = pal.accent) }
+        ) { Text(if (row.savePath.contains("/downloads/")) "已转正" else "转正", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
         TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
           onClick = { onPause(row.infoHash) },
           enabled = !TaskCardLogic.shouldDisableOps(row.state),
-        ) { Text("暂停", fontSize = 13.sp, color = pal.accent) }
+        ) { Text("暂停", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
         TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
           onClick = { onResume(row.infoHash) },
           enabled = !TaskCardLogic.shouldDisableOps(row.state),
-        ) { Text("继续", fontSize = 13.sp, color = pal.accent) }
+        ) { Text("继续", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
       }
-      TextButton(onClick = { onRemove(row.infoHash) }) {
-        Text("移除", fontSize = 13.sp, color = pal.danger)
+      TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = { onRemove(row.infoHash) }) {
+        Text("移除", style = MaterialTheme.typography.bodySmall, color = pal.danger)
       }
-      TextButton(onClick = { onToggleDetail(row.infoHash) }) {
-        Text(if (detailOpen) "收起详情" else "详情", fontSize = 13.sp, color = pal.accent)
+      TextButton(
+          modifier = Modifier.heightIn(min = 48.dp),
+          onClick = { onToggleDetail(row.infoHash) }) {
+        Text(if (detailOpen) "收起详情" else "详情", style = MaterialTheme.typography.bodySmall, color = pal.accent)
       }
     }
     // 详情折叠（工程信息收这里，默认收起）
     if (detailOpen) {
       Column(modifier = Modifier.fillMaxWidth().background(pal.altRow, shapes.shapeCard).padding(12.dp)) {
-        Text("已下载：${row.downloadedText} · 状态 ${row.state} · 保存到 ${row.savePath}", fontSize = 12.sp, color = pal.textDim)
+        Text("已下载：${row.downloadedText} · 状态 ${row.state} · 保存到 ${row.savePath}", style = MaterialTheme.typography.labelMedium, color = pal.textDim)
         if (row.files.isNotEmpty()) {
           Spacer(Modifier.height(4.dp))
           row.files.forEach { f ->
-            Text("${f.name} · ${f.sizeText}" + (if (f.isVideo) " · 视频" else ""), fontSize = 12.sp, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("${f.name} · ${f.sizeText}" + (if (f.isVideo) " · 视频" else ""), style = MaterialTheme.typography.labelMedium, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
           }
         }
       }
@@ -189,8 +200,8 @@ private fun StatusChip(state: String) {
       "FAILED" -> pal.dangerSoft to pal.danger
       else -> pal.altRow to pal.textMuted
     }
-  Column(modifier = Modifier.clip(shapes.shapeChip).background(bg).padding(horizontal = 10.dp, vertical = 4.dp)) {
-    Text(state, fontSize = 12.sp, color = fg, fontWeight = FontWeight.Medium, maxLines = 1)
+  Column(modifier = Modifier.clip(shapes.shapeChip).background(bg).padding(horizontal = 12.dp, vertical = 4.dp)) {
+    Text(state, style = MaterialTheme.typography.labelMedium, color = fg, fontWeight = FontWeight.Medium, maxLines = 1)
   }
 }
 
@@ -200,9 +211,9 @@ private fun ErrorBanner(text: String) {
   val pal = LocalPal.current
   val shapes = LocalShapes.current
   Column(
-    modifier = Modifier.fillMaxWidth().clip(shapes.shapeButton).background(pal.dangerSoft).padding(horizontal = 8.dp, vertical = 6.dp)
+    modifier = Modifier.fillMaxWidth().clip(shapes.shapeButton).background(pal.dangerSoft).padding(horizontal = 8.dp, vertical = 8.dp)
   ) {
-    Text(text, fontSize = 12.sp, color = pal.danger, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    Text(text, style = MaterialTheme.typography.labelMedium, color = pal.danger, maxLines = 2, overflow = TextOverflow.Ellipsis)
   }
 }
 
@@ -213,7 +224,7 @@ private fun ProgressBar(fraction: Float) {
   val shapes = LocalShapes.current
   Column(
     modifier =
-      Modifier.fillMaxWidth().height(6.dp).clip(shapes.shapeChip).background(pal.border)
+      Modifier.fillMaxWidth().height(8.dp).clip(shapes.shapeChip).background(pal.border)
   ) {
     Column(
       modifier = Modifier.fillMaxHeight().fillMaxWidth(fraction.coerceIn(0f, 1f)).background(pal.accent)

@@ -1,5 +1,6 @@
 package com.bitseed.magnetviewer.ui.magnet
 
+import com.bitseed.magnetviewer.stream.StreamServer
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,5 +40,36 @@ class MagnetStatusLogicTest {
       shouldShowStartupNote(startupInfoOnly = false, taskCount = 0),
     )
     assertTrue(shouldShowStartupNote(startupInfoOnly = false, taskCount = 2))
+  }
+
+  /**
+   * **等待预算单调链护栏（2026-09-18 新增）**。
+   *
+   * 现场：安卓服务端等 30s、而 ExoPlayer 用默认 ~8s 读超时 ⇒ 客户端先放弃、
+   * 服务端才回响应，「seek 后必然播放失败」，且报错只出现在播放器侧、
+   * 与服务端日志对不上，极难排查。修复靠两侧数值对齐，**不是**靠某侧单点调参。
+   *
+   * 因此把这条链固化成断言：任一处倒挂（例如有人把读超时降到 10s、
+   * 或把服务端等待提到 30s）都会立刻红，而不是等 QA 在设备上撞到。
+   *
+   * 链：`停滞(≈STALL_POLLS×pollMs) < 服务端等待 < 读超时`
+   */
+  @Test
+  fun streamTimeoutBudget_isMonotonic() {
+    val stallMs = StreamServer.STALL_POLLS * StreamServer.DEFAULT_POLL_MS
+    assertTrue(
+      "停滞提前返回（${stallMs}ms）必须显著短于服务端等待（" +
+        "${StreamServer.DEFAULT_WAIT_TIMEOUT_MS}ms），否则「等不出来」会拖满整个超时",
+      stallMs < StreamServer.DEFAULT_WAIT_TIMEOUT_MS / 4,
+    )
+    assertTrue(
+      "服务端等待（${StreamServer.DEFAULT_WAIT_TIMEOUT_MS}ms）必须**短于**播放器读超时" +
+        "（${STREAM_READ_TIMEOUT_MS}ms）—— 反了就回到「客户端先放弃」的老毛病",
+      StreamServer.DEFAULT_WAIT_TIMEOUT_MS < STREAM_READ_TIMEOUT_MS,
+    )
+    assertTrue(
+      "连接超时（${STREAM_CONNECT_TIMEOUT_MS}ms）应远短于读超时：回环连接不该等这么久",
+      STREAM_CONNECT_TIMEOUT_MS < STREAM_READ_TIMEOUT_MS / 2,
+    )
   }
 }

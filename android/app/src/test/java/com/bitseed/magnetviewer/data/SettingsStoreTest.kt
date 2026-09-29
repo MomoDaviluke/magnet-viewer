@@ -51,6 +51,11 @@ class SettingsStoreTest {
     assertEquals(PREVIEW_CACHE_CONVERT, d.previewCacheMode)
     assertEquals(THEME_LIGHT, d.uiTheme)
     assertTrue(d.loggingEnabled)
+    // 诊断 D-2026-09-18：两项默认关闭，与桌面 DEFAULTS 一致
+    // （port_mapping=False 保持「只收不做种、减暴露面」；extra_trackers=False
+    //  保持既有 5 条 udp 的行为与相关断言不变）。
+    assertFalse("桌面 DEFAULTS: port_mapping = False", d.portMapping)
+    assertFalse("桌面 DEFAULTS: extra_trackers = False", d.extraTrackers)
   }
 
   @Test
@@ -69,6 +74,8 @@ class SettingsStoreTest {
         "preview_cache_mode",
         "ui_theme",
         "logging_enabled",
+        "port_mapping",
+        "extra_trackers",
       ),
       SettingsKeys.ALL,
     )
@@ -97,6 +104,9 @@ class SettingsStoreTest {
         previewCacheMode = PREVIEW_CACHE_HOLD,
         uiTheme = "DARK",
         loggingEnabled = false,
+        // 诊断 D-2026-09-18：两项新键也要经同一条读写路径往返
+        portMapping = true,
+        extraTrackers = true,
       )
     val prefs = writeSettings(mutablePreferencesOf(), s)
     assertEquals(s.sanitized(), AppSettings.from(prefs))

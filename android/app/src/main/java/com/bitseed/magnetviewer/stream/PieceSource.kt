@@ -7,7 +7,7 @@ import com.bitseed.magnetviewer.core.model.PieceMap
  *
  * 实现方（engine 包）只在预览中的那个文件上给出 [PieceMap]；
  * 找不到对应任务/句柄时**必须返回 null**（= 不可判定），流服务会按「不可用」
- * 处理（等待 → 504），绝不会降级为整文件可用。
+ * 处理（等待 → 503），绝不会降级为整文件可用。
  */
 interface PieceSource {
   /** 磁盘绝对路径 → 该文件的分块可用性视图；不认识该路径时返回 null。 */

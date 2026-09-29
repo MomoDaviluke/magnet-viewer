@@ -12,6 +12,7 @@ import com.bitseed.magnetviewer.core.sched.tailPieceWindow
 import com.bitseed.magnetviewer.core.sched.tailWindowBytes
 import com.bitseed.magnetviewer.core.sched.windowPieces
 import com.bitseed.magnetviewer.core.states.BOOTSTRAP_TRACKERS
+import com.bitseed.magnetviewer.core.states.FALLBACK_TRACKERS
 import com.bitseed.magnetviewer.core.states.DOWNLOAD_STATES
 import com.bitseed.magnetviewer.core.states.STATE_COMPLETED
 import com.bitseed.magnetviewer.core.states.STATE_DELETED
@@ -150,6 +151,9 @@ class DesktopParitySelfCheckTest {
   fun stateConstants_matchDesktop() {
     assertEquals(DOWNLOAD_STATES.sorted(), group("download_states")[0].jsonObject["expect"]!!.jsonArray.map { it.jsonPrimitive.content }.sorted())
     assertEquals(BOOTSTRAP_TRACKERS.sorted(), group("bootstrap_trackers")[0].jsonObject["expect"]!!.jsonArray.map { it.jsonPrimitive.content }.sorted())
+    // 诊断 D-2026-09-18：兜底 tracker（extra_trackers 开关的追加通道）同样逐条对拍 ——
+    // 它是「UDP 受阻时多一条发现通道」的全部内容，两边漂移就等于行为不同。
+    assertEquals(FALLBACK_TRACKERS.sorted(), group("fallback_trackers")[0].jsonObject["expect"]!!.jsonArray.map { it.jsonPrimitive.content }.sorted())
     val table =
       mapOf(
         "STATE_QUEUED" to STATE_QUEUED,
