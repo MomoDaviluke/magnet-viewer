@@ -251,4 +251,4 @@ Wave 5 [串行]  集成验收：全量回归 + build.bat 出包 + gradle 出 APK
 | 2026-10-09 | W1 | A2 | 1.1 异常层级：exceptions.py(7类) + 两批收窄 132→**26**（超额于 ≤40 目标）；scheduler14/preview6/resume3/secretbox2/inbound2/cache_guard1/stream1 按真实抛出面收窄，保留 26 处全有 log+中文兜底理由注释；修复第一批过度收窄 1 处（watchdog AttributeError） | ✅ | 编排者独立实测 26、diff 抽查、回归复验中 |
 | 2026-10-09 | W1 | A5b | 安卓单测：**勘察更正**——android.yml 早已含 testDebugUnitTest、已有 334 测试方法（审查报告前提过时）；实际缺口仅 PieceMap，补 21 法（含派发层信任边界+双路径对拍）；gradlew 实测 355/355 PASS；android.yml 拆测试/构建为独立步骤 | ✅ | JUnit XML 统计 |
 | 2026-10-09 | W1 | A6 | 文档 7 件：ARCHITECTURE.md(295行,分层地图+依赖规则+并发模型+双端对应表) + ADR×4 + CONTRIBUTING + CHANGELOG；交叉验证发现并修正审查报告 4 处偏差（__all__ 不存在、noqa 4行、main_window 实测 1365 行、resolver→taskops 跨层 import 登记） | ✅ | git status + 行数实测 |
-| 2026-10-09 | W1 | 编排者 | 集成门：独立复验回归 + 分类提交（fix(core)/test(android)/docs(arch)） | 🔄 进行中 | — |
+| 2026-10-09 | W1 | 编排者 | 集成门：独立复验全量回归 26/27 PASS + throughput_test 单跑复验通过（回环测速环境抖动 flaky，114.3 vs 90.8 MB/s，与改动无关）；分类提交完成 | ✅ | 554385b fix(core) / 5cbab8d test(android) / a150545 docs(arch) |
