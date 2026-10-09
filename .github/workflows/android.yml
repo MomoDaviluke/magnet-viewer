@@ -50,8 +50,13 @@ jobs:
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Run JVM unit tests + build debug APK
-        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
+      # 测试与构建拆成两步：测试失败时 CI 界面直接定位到「Run JVM unit tests」，
+      # 不会被 APK 构建日志淹没（步骤本身原先就含 testDebugUnitTest，这里只是显式化）。
+      - name: Run JVM unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload debug APK
         if: always()
