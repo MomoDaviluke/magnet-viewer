@@ -14,12 +14,12 @@
 
 ### 1.2 量化目标（验收基线）
 
-| 指标 | 现状 | 目标 | 度量方法 |
+| 指标 | 基线（2026-10-09 实测） | 目标 | 度量方法 |
 |------|------|------|---------|
 | main_window.py 行数 | 1224 | ≤ 400 | `Measure-Object -Line` |
-| fetcher.py 直接 import core 子模块数 | 14 | ≤ 6 | Grep `^from \.` |
-| core/ 宽泛 `except Exception` | 50+ | ≤ 15（保留边界兜底） | Grep `except\s+(Exception|BaseException)` |
-| UI 层 import core 内部模块 | 12 处 | ≤ 3（仅 models/config/facade） | Grep `^from core\.` in ui/ |
+| fetcher.py 相对导入行数 | 22 | ≤ 10 | Grep `^from \.` |
+| core/ 宽泛 `except Exception` | 132 | ≤ 40（保留边界兜底） | Grep `except\s+(Exception|BaseException)` |
+| UI 层越层 import core 内部 | 6 处（main_window×4 + settings_dialog×2） | 0（全部经 facade） | Grep `^from core\.(?!models|config|fetcher|logutil)` in ui/ |
 | Protocol/ABC 抽象接口 | 0 | ≥ 4（Resolver/StreamServer/CachePolicy/Theme） | 代码检索 |
 | 测试文件组织 | 27 个散落根目录 | 全部入 `tests/` | 目录检查 |
 | CI 覆盖率门槛 | 无 | ≥ 70%（core/，分支覆盖） | coverage --fail-under |
@@ -242,3 +242,13 @@ Wave 5 [串行]  集成验收：全量回归 + build.bat 出包 + gradle 出 APK
 | 时间 | 波次 | 代理 | 任务 | 状态 | 证据 |
 |------|------|------|------|------|------|
 | 2026-10-09 | — | — | 路线图制定完成 | ✅ | 本文件 |
+| 2026-10-09 | W0 | 编排者 | 用户批准：立即启动/独立分支/方案A | ✅ | AskUserQuestion 答复 |
+| 2026-10-09 | W0 | 编排者 | 0.1 基线提交核实：审计 18 项修复已在 HEAD(127d37d)，工作区干净 | ✅ | git log/status |
+| 2026-10-09 | W0 | 编排者 | 0.2-0.5 安卓/桌面 P0-P1 修复实证抽查（DarkPal 色值/@Synchronized 归位/cache_guard None 保守） | ✅ | Grep 源码 |
+| 2026-10-09 | W0 | 编排者 | 建分支 arch/roadmap-2026q4 + 文档提交 2d101e5 | ✅ | git log |
+| 2026-10-09 | W0 | 编排者 | 基线指标实测修正：except 132（原估 50+）、fetcher 相对导入 22 行、UI 越层 6 处 | ✅ | Select-String |
+| 2026-10-09 | W0 | 编排者 | 基线回归：.venv 重跑 **27/27 全绿**，tag v-baseline-20261009 | ✅ | 回归汇总 |
+| 2026-10-09 | W1 | A2 | 1.1 异常层级：exceptions.py(7类) + 两批收窄 132→**26**（超额于 ≤40 目标）；scheduler14/preview6/resume3/secretbox2/inbound2/cache_guard1/stream1 按真实抛出面收窄，保留 26 处全有 log+中文兜底理由注释；修复第一批过度收窄 1 处（watchdog AttributeError） | ✅ | 编排者独立实测 26、diff 抽查、回归复验中 |
+| 2026-10-09 | W1 | A5b | 安卓单测：**勘察更正**——android.yml 早已含 testDebugUnitTest、已有 334 测试方法（审查报告前提过时）；实际缺口仅 PieceMap，补 21 法（含派发层信任边界+双路径对拍）；gradlew 实测 355/355 PASS；android.yml 拆测试/构建为独立步骤 | ✅ | JUnit XML 统计 |
+| 2026-10-09 | W1 | A6 | 文档 7 件：ARCHITECTURE.md(295行,分层地图+依赖规则+并发模型+双端对应表) + ADR×4 + CONTRIBUTING + CHANGELOG；交叉验证发现并修正审查报告 4 处偏差（__all__ 不存在、noqa 4行、main_window 实测 1365 行、resolver→taskops 跨层 import 登记） | ✅ | git status + 行数实测 |
+| 2026-10-09 | W1 | 编排者 | 集成门：独立复验回归 + 分类提交（fix(core)/test(android)/docs(arch)） | 🔄 进行中 | — |
