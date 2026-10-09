@@ -188,7 +188,9 @@ def alert_category_mask() -> int:
                  "tracker_notification", "connect_notification"):
         try:
             mask |= int(getattr(cat, name))
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
+            # 类别属性缺失（AttributeError）或取值无法转 int（TypeError/ValueError）
+            # 时按 0 处理，不阻断掩码构造；libtorrent 版本差异不阻塞启动
             pass
     return mask
 
@@ -341,15 +343,17 @@ class SessionCore:
         )
         try:
             ses = lt.session(settings)
-        except Exception as e:
-            # 默认端口被占用（如 6881）会直接崩溃：回退随机端口再试一次
+        except (OSError, RuntimeError) as e:
+            # OSError：端口占用等系统层失败；RuntimeError：libtorrent 绑定实测
+            # （会话构造失败时 lt 抛 RuntimeError）。默认端口被占用（如 6881）
+            # 会直接崩溃：回退随机端口再试一次
             log_warning("fetcher.start",
                         f"监听端口 {d.listen_port} 启动失败（{e}），回退随机端口")
             settings["listen_interfaces"] = \
                 f"{_listen_host(getattr(d, 'listen_interface', ''))}:0"
             try:
                 ses = lt.session(settings)
-            except Exception as e2:
+            except (OSError, RuntimeError) as e2:
                 # 审计 2026-09-29（P2）：随机端口回退的第二次构造原先裸调——
                 # 再失败（端口只是最常见原因，还有资源耗尽/参数组合等）会以
                 # 无上下文的裸异常直接崩掉启动路径。此处无法再降级（没有第三
@@ -368,6 +372,9 @@ class SessionCore:
             try:
                 d.restore_task(t)
             except Exception as e:
+                # 兜底（有意宽泛）：单任务恢复损坏绝不阻断整个启动，
+                # 异常类型不可枚举（句柄失效/清单畸形/磁盘缺失等混合），
+                # 逐个 log_exception 后继续恢复下一个任务
                 log_exception("fetcher.restore", e)
         d.last_sweep_set(time.time())
         d.running_set(True)
@@ -407,6 +414,8 @@ class SessionCore:
             try:
                 ok, reason = fn(proxy, proxycheck.DEFAULT_TIMEOUT)
             except Exception as e:
+                # 兜底（有意宽泛）：探测函数由宿主注入（socket/DNS/超时混合异常，
+                # 类型不可枚举），探测失败只丢自检信号，绝不能杀掉后台线程
                 log_warning("fetcher.proxy_check", f"代理探测异常：{e}")
                 return
             if ok:
@@ -417,11 +426,14 @@ class SessionCore:
             try:
                 d.emit_error(proxycheck.warning_text(proxy, reason))
             except Exception as e:
+                # 兜底（有意宽泛）：emit_error 是 UI 注入的回调边界（Qt 信号
+                # 发射异常类型不可枚举），报错上报失败也不能拖垮探测线程
                 log_exception("fetcher.proxy_check.emit", e)
 
         try:
             threading.Thread(target=_run, daemon=True).start()
-        except Exception as e:      # 线程都起不来也不能拖垮启动
+        except RuntimeError as e:
+            # 线程起不来（资源耗尽）实测抛 RuntimeError，不能拖垮启动
             log_warning("fetcher.proxy_check.spawn", f"{e}")
 
     # ---------- DHT 路由表持久化（性能专项 P-4） ----------
@@ -443,7 +455,10 @@ class SessionCore:
             entry = lt.bdecode(blob)
             if isinstance(entry, dict) and entry:
                 ses.load_state(entry, DHT_STATE_FLAGS)
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, AttributeError) as e:
+            # OSError：文件读取失败；RuntimeError：lt.bdecode 对畸形数据实测抛
+            # （已实测），load_state 会话失效同样 RuntimeError；ValueError 兜底；
+            # AttributeError：绑定版本无 load_state 时静默跳过（契约如此）
             log_warning("fetcher.dht_state.load", f"{e}")
 
     def _save_dht_state(self, ses) -> None:
@@ -456,7 +471,11 @@ class SessionCore:
             if not state:
                 return          # 路由表仍为空（未 bootstrap）时不必写空壳
             atomic_write_bytes(path, lt.bencode(state))
-        except Exception as e:
+        except (OSError, RuntimeError, TypeError, ValueError,
+                AttributeError) as e:
+            # OSError：原子写失败；RuntimeError：save_state/bencode 会话失效
+            # 实测抛；TypeError/ValueError：bencode 序列化畸形数据；
+            # AttributeError：绑定版本无 save_state 时静默跳过；失败仅告警
             log_warning("fetcher.dht_state.save", f"{e}")
 
     # ---------- 运行期热更新 ----------
@@ -473,7 +492,9 @@ class SessionCore:
             return
         try:
             ses.apply_settings(lt_proxy_settings(proxy))
-        except Exception as e:
+        except (RuntimeError, TypeError, ValueError) as e:
+            # RuntimeError：libtorrent 会话失效实测；TypeError/ValueError：
+            # 代理参数畸形时 lt_proxy_settings 转换失败。应用失败不影响主会话
             log_warning("fetcher.apply_proxy", f"代理设置应用失败：{e}")
         self._start_proxy_check(proxy)
 
@@ -488,7 +509,9 @@ class SessionCore:
             return
         try:
             ses.apply_settings({"download_rate_limit": max(0, int(kbps)) * 1024})
-        except Exception as e:
+        except (RuntimeError, TypeError, ValueError) as e:
+            # RuntimeError：libtorrent 会话失效实测；TypeError/ValueError：
+            # kbps 无法转 int 时 int() 失败
             log_warning("fetcher.apply_rate_limit", f"限速设置应用失败：{e}")
 
     def apply_port_mapping(self, enabled: bool) -> None:
@@ -508,7 +531,7 @@ class SessionCore:
         try:
             ses.apply_settings({"enable_upnp": bool(enabled),
                                 "enable_natpmp": bool(enabled)})
-        except Exception as e:
+        except RuntimeError as e:  # libtorrent 会话失效时实测抛 RuntimeError
             log_warning("fetcher.apply_port_mapping",
                         f"端口映射设置应用失败：{e}")
 
@@ -543,7 +566,7 @@ class SessionCore:
                     rec.handle.save_resume_data(
                         lt.save_resume_flags_t.flush_disk_cache
                         | lt.save_resume_flags_t.save_info_dict)
-                except Exception as e:
+                except RuntimeError as e:
                     log_warning("fetcher.shutdown.save_resume", f"{e}")
         # 2) 通知告警线程退出并等待其消化告警
         d.running_set(False)
@@ -551,7 +574,7 @@ class SessionCore:
         if thread is not None:
             try:
                 thread.join(timeout=SHUTDOWN_JOIN_TIMEOUT)
-            except Exception as e:
+            except RuntimeError as e:  # 线程不可 join（未启动/当前线程自身）实测抛
                 log_warning("fetcher.shutdown.join", f"{e}")
         # 3) 残留 fastresume 告警直取（可能在线程退出后才到达）
         d.drain_resume_alerts()
@@ -564,7 +587,7 @@ class SessionCore:
                     if rec.handle is not None:
                         try:
                             ses.remove_torrent(rec.handle, 0)
-                        except Exception as e:
+                        except RuntimeError as e:  # 句柄/会话失效时 lt 实测抛
                             log_warning("fetcher.shutdown.remove_torrent", f"{e}")
             d.clear_runtime_state()
             d.ses_set(None)
@@ -583,8 +606,15 @@ class SessionCore:
                     try:
                         self.handle_alert(a)
                     except Exception as e:
+                        # 兜底（最终兜底点#1：alert 循环）——有意宽泛：分发面
+                        # 覆盖全部告警类型与注入回调（on_metadata_received 等
+                        # 由宿主提供，异常类型不可枚举），任何单条异常都不得
+                        # 杀死后台线程，log_exception 后继续处理同批下一条
                         log_exception("fetcher.alert.handle", e)
             except Exception as e:
+                # 兜底（最终兜底点#1：alert 循环）——有意宽泛：pop_alerts 失败
+                # （会话销毁竞态等）不得终止循环线程，看门狗/周期脏写必须照常
+                # 执行，否则卡住的解析永远等不到超时判定
                 log_exception("fetcher.alert.pop", e)
             now = time.time()
             self.metadata_watchdog(now)
@@ -611,7 +641,9 @@ class SessionCore:
             return
         try:
             wait(int(ALERT_POLL_INTERVAL * 1000))
-        except Exception:
+        except RuntimeError:
+            # 会话销毁竞态下 wait_for_alert 实测抛 RuntimeError：退回 sleep，
+            # 下一轮循环的 ses_get 判空自然退出
             time.sleep(ALERT_POLL_INTERVAL)
 
     def handle_alert(self, a) -> None:
@@ -764,7 +796,9 @@ class SessionCore:
                 if rec.handle is not None:
                     try:
                         rec.handle.pause()
-                    except Exception as e:
+                    except (AttributeError, RuntimeError) as e:
+                        # RuntimeError：句柄失效时 lt 实测抛；AttributeError：
+                        # 替身句柄缺 pause（proxycheck_test 的 SimpleNamespace）
                         log_warning("fetcher.timeout.pause", f"{e}")
             if rec.download:
                 with d.lock:

@@ -216,7 +216,9 @@ def _norm_keep_dirs(dirs) -> frozenset | None:
     try:
         return frozenset(os.path.normcase(os.path.abspath(d))
                          for d in dirs if d)
-    except Exception:
+    except (TypeError, OSError):
+        # 收窄：可抛面 = dirs 非可迭代 / 元素非 str（TypeError）、abspath
+        # 环境异常（OSError）。返回 None 语义是「名单故障」，调用方保守中止
         return None
 
 

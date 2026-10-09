@@ -100,8 +100,8 @@ def local_ipv4s() -> list[str]:
                 found.add(ip)
         finally:
             s.close()
-    except Exception:
-        pass
+    except OSError:
+        pass      # 离线/无路由：本方法探测失败即跳过，回落主机名解析
     # 方法 2：主机名解析兜底（Windows 上通常解析到主 LAN IP；Linux 常为 127.0.1.1
     # 已被 _is_usable_ipv4 过滤，故不会污染结果）。此方法可能补出虚拟网卡 IP，
     # 仅作候选，不覆盖 primary。
@@ -112,8 +112,8 @@ def local_ipv4s() -> list[str]:
             ip = info[4][0]
             if _is_usable_ipv4(ip):
                 found.add(ip)
-    except Exception:
-        pass
+    except OSError:
+        pass      # 主机名解析失败（离线/无 DNS）：兜底方法本就允许无结果
     # primary 置顶，其余稳定排序（避免每次顺序抖动干扰 UI 对比）
     rest = sorted(ip for ip in found if ip != primary)
     return [primary, *rest] if primary is not None else rest
@@ -145,8 +145,8 @@ def probe_upnp_igd(timeout: float = 3.0) -> bool:
                     return True
         finally:
             sock.close()
-    except Exception:
-        return False
+    except OSError:
+        return False   # 建套接字/发送失败（无网络栈权限等）：探测即「不可用」
     return False
 
 
@@ -234,8 +234,11 @@ def format_hint(report: dict) -> str:
             str(r.get("hint", "")),
         ]
         return "\n".join(lines)
-    except Exception:
+    except (TypeError, AttributeError, ValueError):
+        # 收窄：try 块是纯 dict/字符串拼装，脏 report（非可迭代的 local_ips、
+        # 非 str 元素进 join 等）的可抛面就是这三类。契约「绝不冒泡到界面」
+        # （UI 线程直调）由这三类 + 下面的最坏回落完整覆盖
         try:
             return str((report or {}).get("hint", ""))
-        except Exception:
-            return ""
+        except (TypeError, AttributeError, ValueError):
+            return ""   # 收窄：同上，最坏回落空串

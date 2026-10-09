@@ -303,7 +303,9 @@ def load_tasks(cache_dir: str,
             raw = json.load(f)
     except FileNotFoundError:
         return {}
-    except Exception as e:
+    except (OSError, ValueError) as e:
+        # OSError：读文件失败；ValueError：json.JSONDecodeError 与
+        # UnicodeDecodeError 都是其子类。契约：任何损坏形态返回空表不抛
         if warn is not None:
             warn(f"任务清单损坏，已按空表处理：{e}")
         return {}

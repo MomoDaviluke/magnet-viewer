@@ -109,7 +109,10 @@ class _StreamHandler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             got = (urllib.parse.parse_qs(parsed.query).get(TOKEN_PARAM) or [""])[0]
-        except Exception:
+        except ValueError:
+            # 收窄：urllib.parse 对畸形 URL 的可抛面就是 ValueError，一律按
+            # 「无 token」处理（拒绝）；其余意外异常上抛给 HTTP handler 的
+            # 最终兜底（handle_error 有日志），不在认证路径上静默吞掉
             got = ""
         if not secrets.compare_digest(got or "", self.token or ""):
             return False
@@ -133,6 +136,9 @@ class _StreamHandler(BaseHTTPRequestHandler):
             try:
                 pm = self.pieces_cb(fp)
             except Exception as e:
+                # 兜底（最终兜底点#2：HTTP handler）——有意宽泛：pieces_cb 是
+                # 宿主注入的回调（内部触达注册表/句柄，异常类型不可枚举），
+                # 判不出可用性时按「不可用」回 503，绝不降级为整文件可用
                 log_warning("stream.availability.pieces_cb", f"{fp}: {e}")
                 return 0, None, None, False
             if pm is not None:
@@ -147,6 +153,8 @@ class _StreamHandler(BaseHTTPRequestHandler):
             try:
                 avail = max(0, min(int(self.avail_cb(fp)), logical))
             except Exception as e:
+                # 兜底（最终兜底点#2：HTTP handler）——有意宽泛：avail_cb 是
+                # 宿主注入回调，异常类型不可枚举；判不出即按「不可用」处理
                 log_warning("stream.availability.avail_cb", f"{fp}: {e}")
                 return 0, None, None, False
             return avail, None, avail, True
@@ -184,6 +192,8 @@ class _StreamHandler(BaseHTTPRequestHandler):
                 "why": str(why or ""),
             }
         except Exception as e:      # 记录失败绝不影响应答
+            # 兜底（最终兜底点#2：HTTP handler）——有意宽泛：诊断记录是旁路
+            # 功能，int()/str() 对异常取值的转换失败不得打断真实应答
             log_warning("stream.note", f"{e}")
 
     def _security_headers(self):
@@ -436,6 +446,9 @@ class _StreamHandler(BaseHTTPRequestHandler):
         try:
             self.demand_cb(self._current_path, start, end + 1)
         except Exception as e:
+            # 兜底（最终兜底点#2：HTTP handler）——有意宽泛：demand_cb 是宿主
+            # 注入的调度回调（内部触达注册表/句柄，异常类型不可枚举），
+            # 点播失败只丢一次补拉机会，客户端会靠重试自愈
             log_warning("stream.demand", f"{self._current_path} {start}-{end}: {e}")
 
     def _progressive_ready(self, pm, avail, start: int, end_excl: int) -> int:
@@ -604,10 +617,14 @@ class StreamServer:
         # （`daemon_threads=True`），所以这里的置位是它们能及时收尾的唯一信号。
         try:
             self._httpd.RequestHandlerClass.stop_evt.set()
-        except Exception:
-            pass
+        except Exception as e:
+            # 兜底（有意宽泛）：退出清理路径，属性链任何一环异常都不应
+            # 阻断后续 shutdown()；补 log 避免完全静默
+            log_warning("stream.shutdown.stop_evt", f"{e}")
         try:
             self._httpd.shutdown()
             self._httpd.server_close()
-        except Exception:
-            pass
+        except Exception as e:
+            # 兜底（有意宽泛）：进程退出清理——socket 关闭异常（已断开/
+            # 系统层错误）不影响其余资源释放；补 log 避免完全静默
+            log_warning("stream.shutdown", f"{e}")

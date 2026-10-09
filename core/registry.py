@@ -75,7 +75,7 @@ def hash_key(handle) -> str:
     """
     try:
         ih = str(handle.info_hash())
-    except Exception as e:
+    except RuntimeError as e:   # libtorrent 句柄失效时实测抛 RuntimeError
         log_warning("registry.hash_key", f"句柄取 info_hash 失败，转临时键：{e}")
         ih = ""
     ih = ih.strip().lower()
@@ -93,7 +93,7 @@ def ih_from_params(p) -> str | None:
     """从 parse_magnet_uri 的 add_torrent_params 提取 info_hash 键（未 add 前）。"""
     try:
         ih = str(p.info_hash)
-    except Exception as e:
+    except RuntimeError as e:   # libtorrent params 哈希无效时实测抛 RuntimeError
         log_warning("registry.ih_from_params", f"{e}")
         return None
     ih = ih.strip().lower()
@@ -271,14 +271,14 @@ class TaskRegistry:
             replace = (old is not None and old.handle is not None
                        and rec.handle is not None and ses is not None
                        and old.handle != rec.handle)
-        except Exception as e:
+        except RuntimeError as e:  # libtorrent 失效句柄比较实测抛 RuntimeError
             log_warning("registry.put.compare",
                         f"句柄比较异常按不替换处理：{e}")
             replace = False   # 句柄比较异常（失效句柄）按不替换处理
         if replace:
             try:
                 ses.remove_torrent(old.handle, 1)
-            except Exception as e:
+            except RuntimeError as e:  # 句柄/会话失效时 lt 实测抛 RuntimeError
                 log_warning("fetcher.register.replace", f"{e}")
         self.torrents[ih] = rec
         self._bump_struct_locked()
@@ -331,7 +331,7 @@ class TaskRegistry:
             rec.handle.pause()
             rec.handle.set_flags(lt.torrent_flags.upload_mode)
             rec.handle.unset_flags(lt.torrent_flags.auto_managed)
-        except Exception as e:
+        except RuntimeError as e:  # 句柄失效时 lt 实测抛 RuntimeError
             log_warning("fetcher.detach_record", f"{e}")
 
     def clear_resolving_locked(self) -> None:

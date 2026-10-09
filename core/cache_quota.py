@@ -118,7 +118,11 @@ def _norm_keep(
     """
     try:
         kd = keep_dirs() if callable(keep_dirs) else keep_dirs
-    except Exception:
+    except Exception as e:
+        # 兜底（有意宽泛）：keep_dirs 回调由宿主注入（现网唯一来源是
+        # registry.protected_dirs 锁内纯遍历，实际不抛），异常即「名单故障」，
+        # 返回 None 让调用方保守跳过删除——误删用户数据比漏删严重得多
+        log_warning("cache_quota.keep_dirs", f"保护名单回调异常：{e}")
         return None
     return {os.path.normcase(os.path.abspath(d))
             for d in (kd or set()) if d}
@@ -146,8 +150,10 @@ def enforce_preview_limit(
     def _warn(msg: str) -> None:
         try:
             (warn or (lambda m: log_warning("cache_quota", m)))(msg)
-        except Exception:
-            pass
+        except Exception as e:
+            # 兜底（有意宽泛）：warn 回调由宿主注入（异常类型不可枚举），
+            # 上报失败绝不能打断配额清理本身；补 log 避免完全静默
+            log_warning("cache_quota.warn", f"warn 回调异常：{e}")
 
     if keep is None:
         _warn("保护名单取用失败：本轮跳过配额删除（保守）")
@@ -177,7 +183,9 @@ def enforce_preview_limit(
                 continue
         try:
             shutil.rmtree(path, ignore_errors=True)
-        except Exception as e:
+        except OSError as e:
+            # ignore_errors=True 下仍可能抛的只有 OSError 极端形态（如路径
+            # 本身在扫描后被换成非法类型）；删除失败只跳过该目录留待下次
             _warn(f"删除预览目录失败（留待下次）：{path}：{e}")
             continue
         if os.path.isdir(path):

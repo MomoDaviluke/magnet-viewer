@@ -293,7 +293,7 @@ class PreviewScheduler:
                   else base + j * DEADLINE_STEP_MS)
             try:
                 self.handle.set_piece_deadline(p, ms)
-            except Exception as e:
+            except RuntimeError as e:  # 句柄失效时 lt 实测抛 RuntimeError
                 log_warning("scheduler.request_tail", f"piece={p}: {e}")
 
     def _have_snapshot(self, handle=None):
@@ -334,7 +334,9 @@ class PreviewScheduler:
             if have is None:
                 have = self._have_snapshot()
             return all(have(p) for p in pieces)
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # AttributeError：测试替身句柄缺 status()；RuntimeError：句柄失效
+            # 时 lt 实测抛。判不出按未就绪（False）保守处理
             log_warning(tag, f"{e}")
             return False
 
@@ -393,7 +395,9 @@ class PreviewScheduler:
                           self.file.start_piece, self.file.end_piece,
                           self.file.size, have, view=view)
             return contiguous_bytes_of(pm)
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 实测抛（status/torrent_file/绑定调用）；
+            # AttributeError：测试替身缺 piece_length()/status() 等成员
             log_warning("scheduler.contiguous_progress", f"{e}")
             return 0
 
@@ -422,7 +426,8 @@ class PreviewScheduler:
         if have is None:
             try:
                 have = self._have_snapshot()
-            except Exception as e:
+            except (AttributeError, RuntimeError) as e:
+                # RuntimeError：句柄失效时 lt 实测抛；AttributeError：替身缺 status()
                 log_warning("scheduler.gate_snapshot", f"{e}")
         return {
             "contiguous": self.contiguous_progress(have),
@@ -474,7 +479,8 @@ class PreviewScheduler:
         if self._view is not None:
             try:
                 self._view.rebuild_baseline()
-            except Exception as e:
+            except (AttributeError, RuntimeError) as e:
+                # RuntimeError：基线物化时句柄失效 lt 实测抛；AttributeError：替身缺成员
                 log_warning("scheduler.begin.view", f"{e}")
         # 先预约尾部索引块，再进入顺序窗口
         self._request_tail()
@@ -526,7 +532,8 @@ class PreviewScheduler:
             for p in range(first, last + 1):
                 self.handle.set_piece_deadline(p,
                                               (p - first) * DEADLINE_STEP_MS)
-        except Exception as e:
+        except RuntimeError as e:
+            # 句柄失效时 lt 绑定实测抛 RuntimeError（锁内 handle/file 稳定）
             log_warning("scheduler.request_range",
                         f"{start_byte}-{end_byte}: {e}")
 
@@ -570,7 +577,8 @@ class PreviewScheduler:
                 try:
                     self.handle.set_piece_deadline(
                         p, (p - piece) * DEADLINE_STEP_MS)
-                except Exception as e:
+                except RuntimeError as e:
+                    # 句柄失效时 lt 绑定实测抛 RuntimeError（锁内 handle 稳定）
                     log_warning("scheduler.seek.deadline", f"piece={p}: {e}")
             self._scheduled_to = max(self._scheduled_to, target - 1)
         self.tick()
@@ -581,7 +589,8 @@ class PreviewScheduler:
             return
         try:
             self.handle.clear_piece_deadlines()
-        except Exception as e:
+        except RuntimeError as e:
+            # 句柄失效时 lt 绑定实测抛 RuntimeError
             log_warning("scheduler.clear_deadlines", f"{e}")
 
     def _first_missing_from(self, from_piece: int, have=None) -> int:
@@ -612,7 +621,8 @@ class PreviewScheduler:
         try:
             while p <= end and self.handle.have_piece(p):
                 p += 1
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 绑定实测抛；AttributeError：替身缺 have_piece
             log_warning("scheduler.first_missing", f"{e}")
         return min(p, end)
 
@@ -649,7 +659,9 @@ class PreviewScheduler:
             return None
         try:
             return h.torrent_file()
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # 本方法 docstring 即按这两种异常设计：句柄被并发置 None（竞态窗口）
+            # 抛 AttributeError，句柄已被摘除 lt 实测抛 RuntimeError
             log_warning("scheduler.torrent_file", f"{e}")
             return None
 
@@ -678,7 +690,9 @@ class PreviewScheduler:
         have = None
         try:
             have = self._have_snapshot()
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 实测抛；AttributeError：替身缺 status()
+            # （此时 have 保持 None，下游走逐块 have_piece 回退路径）
             log_warning("scheduler.tick.snapshot", f"{e}")
         # 尾部索引窗口尚未就绪则持续补拉（探测 moov 是开播前提）
         if self._tail_pieces and not self.tail_ready(have):
@@ -700,7 +714,8 @@ class PreviewScheduler:
             try:
                 self.handle.set_piece_deadline(
                     p, (p - self._play_from) * DEADLINE_STEP_MS)
-            except Exception as e:
+            except RuntimeError as e:
+                # 句柄失效时 lt 绑定实测抛 RuntimeError（锁内 handle 稳定）
                 log_warning("scheduler.tick.deadline", f"piece={p}: {e}")
         self._scheduled_to = max(self._scheduled_to, target - 1)
 
@@ -735,7 +750,8 @@ class PreviewScheduler:
             try:
                 self.handle.set_piece_deadline(
                     p, (p - first) * DEADLINE_STEP_MS)
-            except Exception as e:
+            except RuntimeError as e:
+                # 句柄失效时 lt 绑定实测抛 RuntimeError（锁内 handle 稳定）
                 log_warning("scheduler.rearm.deadline", f"piece={p}: {e}")
 
     def buffer_progress(self) -> float:
@@ -773,7 +789,9 @@ class PreviewScheduler:
                         self.handle.prioritize_files([0] * ti.num_files())
                         self.handle.unset_flags(lt.torrent_flags.auto_managed)
                     self.handle.pause()
-            except Exception as e:
+            except (AttributeError, RuntimeError) as e:
+                # RuntimeError：句柄失效时 lt 绑定实测抛；AttributeError：
+                # 并发置 None 竞态窗口 / 替身缺 pause 等方法
                 log_warning("scheduler.stop", f"{e}")
         self.handle = None
         self.file = None

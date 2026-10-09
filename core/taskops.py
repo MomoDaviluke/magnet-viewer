@@ -123,7 +123,7 @@ class TaskOps:
         # 磁力链
         try:
             p = lt.parse_magnet_uri(source)
-        except Exception as e:
+        except RuntimeError as e:   # libtorrent 实测：非法磁力链抛 RuntimeError
             raise ValueError(f"磁力链接无效：{e}") from e
         ih = ih_from_params(p)
         reg = self.reg
@@ -175,7 +175,7 @@ class TaskOps:
                           if hasattr(p, "trackers") and p.trackers else None))
         try:
             handle = ses.add_torrent(p)
-        except Exception as e:
+        except (OSError, RuntimeError) as e:   # libtorrent 调用失败（会话满/参数非法）
             raise ValueError(f"加入 DHT 会话失败：{e}") from e
         reg = self.reg
         with reg.lock:
@@ -205,6 +205,8 @@ class TaskOps:
             try:
                 self._on_meta_ready(rec)
             except Exception as e:
+                # 兜底：宿主回调边界（resolver.on_metadata_received，横跨 lt 调用
+                # 与 emit 回调，类型不可枚举），失败最坏退化为等下一次 alert
                 log_warning("taskops.add_magnet.meta_ready", f"{e}")
         return key
 
@@ -219,7 +221,7 @@ class TaskOps:
         atp.save_path = save_dir
         try:
             handle = ses.add_torrent(atp)
-        except Exception as e:
+        except (OSError, RuntimeError) as e:   # libtorrent 调用失败
             raise ValueError(f"加入会话失败：{e}") from e
         reg = self.reg
         with reg.lock:
@@ -329,7 +331,7 @@ class TaskOps:
             if rec.priority and rec.priority > 0:
                 rec.handle.torrent_priority(lt_priority(rec.priority))
             rec.handle.resume()
-        except Exception as e:
+        except RuntimeError as e:   # libtorrent 句柄调用失败（已移除/失效）
             log_warning("fetcher.activate_download", f"{e}")
 
     # ---------- 任务操作 ----------
@@ -359,7 +361,7 @@ class TaskOps:
             rec.priority = p
             try:
                 rec.handle.torrent_priority(lt_priority(p))
-            except Exception as e:
+            except RuntimeError as e:   # libtorrent 句柄调用失败
                 log_warning("fetcher.set_priority", f"{e}")
             if key in reg.tasks:
                 reg.tasks[key]["priority"] = p
@@ -377,7 +379,7 @@ class TaskOps:
             try:
                 rec.handle.pause()
                 rec.handle.unset_flags(lt.torrent_flags.auto_managed)
-            except Exception as e:
+            except RuntimeError as e:   # libtorrent 句柄调用失败
                 log_warning("fetcher.pause_task", f"{e}")
             rec.state = STATE_PAUSED
             if key in reg.tasks:
@@ -446,7 +448,7 @@ class TaskOps:
                         # 否则 0（保留磁盘文件，目录由 delete_task_files 守卫处理）
                         ses.remove_torrent(
                             rec.handle, 1 if delete_files else 0)
-                    except Exception as e:
+                    except RuntimeError as e:   # libtorrent 句柄调用失败
                         log_warning("fetcher.remove_task.remove_torrent",
                                     f"{e}")
                 # 审计 2026-09-29（P2）：裸 del 绕过 _bump_struct_locked，
@@ -513,7 +515,7 @@ class TaskOps:
         if inside and base == key.lower():
             try:
                 shutil.rmtree(ap)
-            except Exception as e:
+            except OSError as e:   # 删目录失败（占用/权限）只可能 OSError
                 log_warning("fetcher.remove_task.delete", f"{e}")
         else:
             log_warning("fetcher.remove_task.delete",
@@ -597,8 +599,9 @@ class TaskOps:
                     rate = s.download_payload_rate
                     if total > done and rate > 0:
                         eta = (total - done) / rate
-                except Exception:
-                    pass
+                except RuntimeError:
+                    pass   # 有意静默：快照后句柄被并发移除是预期竞态，
+                           # UI 每 700ms 轮询，记日志会刷屏；按零值出快照
             if rec is not None and error:
                 t["error"] = error
             t["progress"] = (min(1.0, done / total)

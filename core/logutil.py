@@ -2,7 +2,7 @@
 
 背景
 ----
-本项目历史上多次因 `except Exception: pass` 掩盖真实缺陷，且排查成本极高：
+本项目历史上多次因宽泛捕获后静默 pass 掩盖真实缺陷，且排查成本极高：
 
 - 告警批次处理异常导致 `metadata_received_alert` 被整批丢弃（元数据永不回调）；
 - 流服务回调签名错误被吞后静默降级为「按完整静态文件服务」，
@@ -55,11 +55,11 @@ def setup(log_dir: str | None = None, *, console: bool = False) -> str:
     directory = log_dir or default_log_dir()
     try:
         os.makedirs(directory, exist_ok=True)
-    except Exception:
+    except OSError:
         directory = default_log_dir()
         try:
             os.makedirs(directory, exist_ok=True)
-        except Exception:
+        except OSError:
             _configured = True
             return ""
 
@@ -79,16 +79,16 @@ def setup(log_dir: str | None = None, *, console: bool = False) -> str:
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         log.addHandler(fh)
-    except Exception:
-        pass
+    except OSError:
+        pass      # 日志文件不可建（权限/磁盘）：降级为无文件日志，不影响主流程
     if console:
         try:
             sh = logging.StreamHandler(sys.stderr)
             sh.setLevel(logging.DEBUG)
             sh.setFormatter(fmt)
             log.addHandler(sh)
-        except Exception:
-            pass
+        except OSError:
+            pass  # 同上：控制台句柄建不起来也不影响主流程
 
     _log_path = path
     _configured = True
@@ -120,13 +120,13 @@ def _write(level: int, tag: str, msg: str, exc_info: bool = False) -> None:
             return
         log.log(level, f"[{tag}] {msg}", exc_info=exc_info)
     except Exception:
-        pass      # 日志设施绝不影响主流程
+        pass      # 兜底：日志器自身（handler emit/格式化/滚动）绝不影响主流程
 
 
 def log_exception(tag: str, exc: BaseException | None = None) -> None:
     """记录一处被吞掉的异常。tag 用「模块.函数」标明位置，便于定位。
 
-    用于 `except Exception` 分支内部，替代无声的 `pass`。
+    用于宽泛捕获分支内部，替代无声的 `pass`。
     """
     if exc is None:
         _write(logging.ERROR, tag, "异常被吞掉（未提供异常对象）", exc_info=True)

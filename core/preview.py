@@ -192,10 +192,15 @@ class PreviewCore:
             try:
                 npieces = int(ti.num_pieces())
             except Exception:
-                # 替身只实现 piece_length()（preview_test.FakeTI）：块数只作
+                # 宽泛保留（纪律例外登记）：此处只兼容**测试替身**
+                # （preview_test.FakeTI 刻意只实现 piece_length()，缺 num_pieces
+                # 抛 AttributeError）；生产 lt.torrent_info.num_pieces() 对有效
+                # ti 不会抛，异常类型不可枚举的意义仅在于替身面。块数只作
                 # 越界上限用，取「文件块范围上界」足够，绝不因此放弃整条路径
                 npieces = f.end_piece + 1
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效/无元数据时 lt 实测抛（torrent_file()）；
+            # AttributeError：替身缺成员
             log_warning("fetcher.piece_map.piece_length", f"{e}")
             return None
         if pl <= 0:
@@ -247,7 +252,9 @@ class PreviewCore:
             for p in range(first, last + 1):
                 rec.handle.set_piece_deadline(p, (p - first) * DEADLINE_STEP_MS)
             return True
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 绑定实测抛（torrent_file/set_piece_deadline）；
+            # AttributeError：替身缺成员
             log_warning("fetcher.demand_for_path", f"{disk_path}: {e}")
             return False
 
@@ -268,7 +275,8 @@ class PreviewCore:
             return False
         try:
             return bool(handle.have_piece(int(piece)))
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 绑定实测抛；AttributeError：替身缺 have_piece
             log_warning("fetcher.have_piece", f"分块查询失败 piece={piece}: {e}")
             return False
 
@@ -282,7 +290,9 @@ class PreviewCore:
             if not handle.has_metadata():
                 return None
             return handle.torrent_file().piece_length()
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 绑定实测抛（has_metadata/torrent_file）；
+            # AttributeError：替身缺成员
             log_warning("fetcher.piece_length", f"{e}")
             return None
 
@@ -307,7 +317,8 @@ class PreviewCore:
                 s = handle.status(0)
             except TypeError:
                 s = handle.status()
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 实测抛（status）；AttributeError：替身缺 status
             log_warning("fetcher.status.handle", f"{e}")
             return None
         st = {
@@ -361,7 +372,8 @@ class PreviewCore:
         st["resolving"], st["elapsed"] = reg.resolving_snapshot()
         try:
             st["file_progress"] = list(handle.file_progress())
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # RuntimeError：句柄失效时 lt 实测抛（file_progress）；AttributeError：替身缺方法
             log_warning("fetcher.status.file_progress", f"{e}")
             st["file_progress"] = []
         return st

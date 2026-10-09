@@ -58,7 +58,7 @@ def _checking_states() -> frozenset:
     """需要作废基线的 torrent 状态集合（导入失败时返回空集，不阻断）。"""
     try:
         import libtorrent as lt
-    except Exception:
+    except ImportError:  # libtorrent 未安装时返回空集（不阻断视图本身）
         return frozenset()
     ts = lt.torrent_status
     out = set()
@@ -151,12 +151,12 @@ class PieceView:
         """
         try:
             st = self._handle.status(0)
-        except TypeError:
+        except TypeError:  # 替身/旧绑定不接受 flags：退回无参调用
             try:
                 st = self._handle.status()
-            except Exception:
+            except RuntimeError:  # 句柄失效时 lt 实测抛 RuntimeError：跳过自检
                 return
-        except Exception:
+        except RuntimeError:  # 句柄失效时 lt 实测抛 RuntimeError：跳过自检
             return
         try:
             td = int(getattr(st, "total_done", 0) or 0)
@@ -198,7 +198,9 @@ class PieceView:
             return False
         try:
             bits = list(getattr(self._handle.status(), "pieces", []) or [])
-        except Exception as e:
+        except (AttributeError, TypeError, RuntimeError) as e:
+            # AttributeError/TypeError：替身缺 pieces 字段或不可迭代；
+            # RuntimeError：句柄失效时 lt 实测抛。失败按空基线保守处理
             log_warning("pieceview.baseline", f"{e}")
             bits = []
         # 与 self._n 对齐（句柄未就绪时 pieces 可能为空 → 全 False 保守）
@@ -226,7 +228,9 @@ class PieceView:
             return False
         try:
             return bool(self._handle.have_piece(p))
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # AttributeError：替身无该方法；RuntimeError：句柄失效时 lt 实测抛。
+            # 不可判定一律 False（绝不误判可读）
             log_warning("pieceview.have", f"piece={p}: {e}")
             return False
 

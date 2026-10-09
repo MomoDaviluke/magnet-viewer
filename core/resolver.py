@@ -121,6 +121,8 @@ class ResolverCore:
         try:
             return bool(self._extra_trackers_get())
         except Exception as e:
+            # 兜底：宿主回调边界（UI 注入的配置闭包，异常类型不可枚举），
+            # 读取失败按 False 回落既有 5 条 udp tracker 行为
             log_warning("resolver.extra_trackers",
                         f"读取兜底 tracker 配置失败：{e}")
             return False
@@ -179,7 +181,7 @@ class ResolverCore:
                 if rec is not None and rec.handle is not None and ses is not None:
                     try:
                         ses.remove_torrent(rec.handle, 1)
-                    except Exception as e:
+                    except RuntimeError as e:   # libtorrent 句柄/会话调用失败
                         log_warning("fetcher.begin_resolve.remove_torrent",
                                     f"{e}")
                 if rec is not None and reg.current_ih is not None:
@@ -190,7 +192,7 @@ class ResolverCore:
                 if reg.handle is not None and ses is not None:
                     try:
                         ses.remove_torrent(reg.handle, 1)
-                    except Exception as e:
+                    except RuntimeError as e:   # libtorrent 句柄/会话调用失败
                         log_warning("fetcher.begin_resolve.remove_torrent",
                                     f"{e}")
             reg.handle = None
@@ -215,7 +217,9 @@ class ResolverCore:
         reg = self.reg
         try:
             result = parse_torrent_file(path)
-        except Exception as e:
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            # 收窄：读文件失败 OSError；bencode 非法/超限 ValueError；
+            # 缺 info/length 键 KeyError；字段类型错乱 TypeError
             if gen == reg.gen:   # 旧代次的失败不打扰新会话
                 log_exception("fetcher.resolve_torrent.parse", e)
                 self._emit_error(f"种子文件解析失败：{e}")
@@ -239,7 +243,7 @@ class ResolverCore:
         try:
             handle = ses.add_torrent(atp)
             handle.pause()
-        except Exception as e:
+        except (OSError, RuntimeError) as e:   # libtorrent 调用实测抛 RuntimeError
             if gen == reg.gen:
                 log_exception("fetcher.resolve_torrent.add", e)
                 self._emit_error(f"加入会话失败：{e}")
@@ -252,7 +256,7 @@ class ResolverCore:
                 # 竞态兜底：换代后不再占用会话，句柄让位
                 try:
                     ses.remove_torrent(handle, 1)
-                except Exception as e:
+                except RuntimeError as e:   # libtorrent 句柄调用失败
                     log_warning("fetcher.resolve_torrent.genconflict", f"{e}")
                 return
             reg.register_current_locked(handle, result, gen)
@@ -262,7 +266,7 @@ class ResolverCore:
         reg = self.reg
         try:
             p = lt.parse_magnet_uri(uri)
-        except Exception as e:
+        except RuntimeError as e:   # libtorrent 实测：非法磁力链抛 RuntimeError
             log_exception("fetcher.resolve_magnet.parse", e)
             self._emit_error(f"磁力链接无效：{e}")
             return
@@ -293,7 +297,7 @@ class ResolverCore:
         ses = self._ses_get()
         try:
             handle = ses.add_torrent(p)
-        except Exception as e:
+        except (OSError, RuntimeError) as e:   # libtorrent 调用失败（会话满/参数非法）
             log_exception("fetcher.resolve_magnet.add", e)
             self._emit_error(f"加入 DHT 会话失败：{e}")
             return
@@ -305,6 +309,8 @@ class ResolverCore:
             if rec.handle is not None and rec.handle.torrent_file() is not None:
                 self.on_metadata_received(rec)
         except Exception as e:
+            # 兜底：快路径就绪驱动横跨 lt 调用与 emit 回调（宿主注入，类型不可
+            # 枚举），此处失败只丢一次「秒出文件树」优化，慢路径 alert 仍会到达
             log_warning("fetcher.resolve_magnet.ready", f"{e}")
 
     def connect_peer(self, ip: str, port: int, wait_handle: float = 5.0,
@@ -341,7 +347,7 @@ class ResolverCore:
             time.sleep(0.05)
         try:
             handle.connect_peer((ip, int(port)))
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:   # lt 调用失败 / 端口非法
             log_warning("fetcher.connect_peer", f"直连 Peer 失败：{e}")
 
     # ---------- alert 处理链（session 循环回调进来） ----------
@@ -360,14 +366,17 @@ class ResolverCore:
             if key in reg.tasks:
                 reg.tasks[key]["state"] = rec.state
                 reg.tasks[key]["finished_at"] = time.time()
-        try:
-            if rec.seed:
-                rec.handle.resume()
-            else:
-                rec.handle.pause()
-                rec.handle.unset_flags(lt.torrent_flags.auto_managed)
-        except Exception as e:
-            log_warning("fetcher.finished", f"{e}")
+        if rec.handle is not None:
+            # 显式 None 守卫（等价原「AttributeError 被宽泛捕获吞掉」的行为，
+            # 但不吞编程错误）：句柄缺失只跳过 lt 调用，落盘与 resume 请求照常
+            try:
+                if rec.seed:
+                    rec.handle.resume()
+                else:
+                    rec.handle.pause()
+                    rec.handle.unset_flags(lt.torrent_flags.auto_managed)
+            except RuntimeError as e:   # libtorrent 句柄调用失败（已移除/失效）
+                log_warning("fetcher.finished", f"{e}")
         self._persist_tasks()
         with reg.lock:
             self._request_resume(rec)
@@ -397,8 +406,12 @@ class ResolverCore:
             return
         try:
             ti = handle.torrent_file()
+            if ti is None:
+                # 显式化：原实现靠 result_from_torrent_info(None) 抛 AttributeError
+                # 被宽泛捕获兜住（正是本次重构要消灭的「吞编程错误」形态）
+                raise RuntimeError("元数据不可用（句柄已失效或未就绪）")
             result = result_from_torrent_info(ti, str(handle.info_hash()))
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as e:
             log_exception("fetcher.metadata_received", e)
             with reg.lock:
                 rec.state = STATE_FAILED

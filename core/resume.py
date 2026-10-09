@@ -58,7 +58,10 @@ def normalized_resume(data: dict) -> dict:
             if raw[:1] in (b"d", b"l"):
                 try:
                     return _norm(_bdecode(raw))
-                except Exception:
+                except (TypeError, ValueError):
+                    # ValueError：自研 bdecode 的全部失败面（index 未找到/整数
+                    # 非法/深度与长度上限）；TypeError：元组元素非数值时 int()
+                    # 失败。解不开按普通字节串原样保留
                     return raw
             return raw
         if isinstance(obj, dict):
@@ -77,7 +80,9 @@ def encode_resume(data: dict) -> bytes:
     """
     try:
         return _bencode(normalized_resume(data))
-    except Exception as e:
+    except (TypeError, ValueError) as e:
+        # 自研 bencode 只抛 TypeError（bool/不支持类型/键不可排序），
+        # normalized_resume 的元组还原只抛 ValueError（int() 非法）
         raise ValueError(f"fastresume 编码失败：{e}") from e
 
 
@@ -85,7 +90,8 @@ def decode_resume(data: bytes) -> dict | None:
     """解码 fastresume 字节 → dict；损坏（含顶层非 dict）返回 None。"""
     try:
         out = _bdecode(data)
-    except Exception:
+    except ValueError:
+        # 自研 bdecode 的全部失败面都是 ValueError（损坏数据按「解码失败」处理）
         return None
     return out if isinstance(out, dict) else None
 

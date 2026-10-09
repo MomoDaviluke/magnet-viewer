@@ -302,7 +302,7 @@ class SessionManager:
             if stale:
                 log_warning("fetcher.sweep_tmp",
                             f"清扫崩溃遗留临时文件 {stale} 个")
-        except Exception as e:
+        except OSError as e:   # 清扫只涉文件系统操作；旁路设施，失败绝不阻断启动
             log_warning("fetcher.sweep_tmp", f"{e}")
         self._sess.start(proxy, metadata_timeout)
 
@@ -347,6 +347,8 @@ class SessionManager:
         try:
             return bool(self._port_mapping_get())
         except Exception as e:
+            # 兜底：宿主回调边界（UI 注入的配置闭包，异常类型不可枚举），
+            # 读取失败按 False 回落「只收不做种」既有默认
             log_warning("fetcher.port_mapping", f"读取端口映射配置失败：{e}")
             return False
 
@@ -360,6 +362,8 @@ class SessionManager:
         try:
             return str(self._listen_interface_get() or "").strip()
         except Exception as e:
+            # 兜底：宿主回调边界（UI 注入的配置闭包，异常类型不可枚举），
+            # 读取失败按空串回落 0.0.0.0 全网卡监听既有默认
             log_warning("fetcher.listen_interface", f"读取出口网卡配置失败：{e}")
             return ""
 
@@ -527,6 +531,8 @@ class SessionManager:
             mode = str(self._cache_mode_get()
                        if self._cache_mode_get else PREVIEW_CACHE_CONVERT)
         except Exception as e:
+            # 兜底：宿主回调边界（UI 注入的配置闭包，类型不可枚举），
+            # 读取失败按默认 convert 继续
             log_warning("fetcher.stop_preview.mode", f"{e}，按默认 convert")
             mode = PREVIEW_CACHE_CONVERT
         if mode != PREVIEW_CACHE_CONVERT:
@@ -632,7 +638,8 @@ class SessionManager:
                 runs = self._runs_from_bitmap(pieces, f.start_piece,
                                               f.end_piece)
             return [self._piece_range_bytes(a, b, pl, f) for a, b in runs]
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
+            # 收窄：段计算 = lt 句柄调用（RuntimeError）+ 数值转换（ValueError/TypeError）
             log_warning("fetcher.buffered_segments", f"{e}")
             return None
 
@@ -753,6 +760,8 @@ class SessionManager:
             try:
                 self.on_metadata(result)
             except Exception as e:
+                # 兜底：UI 线程回调边界（Qt signal emit，异常类型不可枚举），
+                # 回调失败不得打断告警线程
                 log_exception("fetcher.emit_metadata", e)
 
     def _emit_error(self, msg: str):
@@ -763,4 +772,6 @@ class SessionManager:
             try:
                 self.on_error(msg)
             except Exception as e:
+                # 兜底：UI 线程回调边界（Qt signal emit，异常类型不可枚举），
+                # 回调失败不得打断告警线程
                 log_exception("fetcher.emit_error", e)

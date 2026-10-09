@@ -71,7 +71,9 @@ def protect(plain: str) -> str:
     try:
         blob = _dpapi_raw(plain.encode("utf-8"), protect=True)
         return PREFIX + base64.b64encode(blob).decode("ascii")
-    except Exception as e:
+    except OSError as e:
+        # _dpapi_raw 的全部失败面（非 Windows / CryptProtectData 返回 False）
+        # 都是显式抛出的 OSError
         log_warning("secretbox.protect", f"DPAPI 加密失败，回退明文存储: {e}")
         return plain
 
@@ -84,6 +86,8 @@ def unprotect(stored: str) -> str:
     try:
         blob = base64.b64decode(stored[len(PREFIX):], validate=True)
         return _dpapi_raw(blob, protect=False).decode("utf-8")
-    except Exception as e:
+    except (OSError, ValueError) as e:
+        # OSError：_dpapi_raw 的显式失败面；ValueError：base64 非法（binascii.Error）
+        # 与解密结果非 UTF-8（UnicodeDecodeError）都是 ValueError 子类
         log_warning("secretbox.unprotect", f"DPAPI 解密失败，返回空: {e}")
         return ""

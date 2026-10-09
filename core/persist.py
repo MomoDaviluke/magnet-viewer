@@ -106,7 +106,8 @@ def missing_resume_keys(cache_dir: str, torrents: dict) -> list:
         try:
             if os.path.isfile(resume_path(cache_dir, k)):
                 continue
-        except Exception:
+        except OSError:
+            # isfile 失败（权限/路径异常）按「未落盘」处理，不阻断筛选
             continue
         out.append(k)
     return out
@@ -199,6 +200,9 @@ class TaskPersistence:
                 snap = {k: dict(v) for k, v in d.tasks_get().items()}
             save_tasks(d.cache_dir, snap)
         except Exception as e:
+            # 兜底（有意宽泛）：本方法契约是「失败仅告警、绝不向任务操作冒泡」，
+            # 面覆盖锁、快照拷贝与 save_tasks 序列化/落盘（OSError/TypeError/
+            # RuntimeError 竞态等混合），收窄会破坏「任何落盘失败都不打扰调用方」
             log_warning("fetcher.persist_tasks", f"{e}")
 
     # ---------- fastresume ----------
@@ -226,14 +230,16 @@ class TaskPersistence:
             rec.handle.save_resume_data(
                 lt.save_resume_flags_t.flush_disk_cache
                 | lt.save_resume_flags_t.save_info_dict)
-        except Exception as e:
+        except RuntimeError as e:  # 句柄已失效时 lt 实测抛 RuntimeError
             log_warning("fetcher.request_resume", f"{e}")
 
     def write_resume_from_alert(self, a) -> None:
         d = self.deps
         try:
             rec = d.find_record(a.handle)      # 畸形告警（无 handle）也在此兜住
-        except Exception as e:
+        except (AttributeError, RuntimeError) as e:
+            # AttributeError：告警对象缺 handle 属性（畸形告警）；RuntimeError：
+            # 失效句柄查键时 lt 实测抛
             log_warning("fetcher.resume.find", f"{e}")
             return
         if rec is None:
@@ -241,7 +247,11 @@ class TaskPersistence:
         try:
             # 2.1.x：alert.resume_data 为 dict（bytes 键），libtorrent 官方格式
             write_resume(d.cache_dir, d.hash_key(a.handle), a.resume_data)
-        except Exception as e:
+        except (AttributeError, OSError, RuntimeError,
+                TypeError, ValueError) as e:
+            # AttributeError：告警缺 resume_data；OSError：落盘失败；
+            # RuntimeError：hash_key 对失效句柄实测抛；TypeError/ValueError：
+            # bencode 序列化或键非法。契约：失败仅告警不冒泡
             log_warning("fetcher.resume.write", f"{e}")
 
     def drain_resume_alerts(self, timeout: float = 3.0) -> None:
@@ -266,8 +276,10 @@ class TaskPersistence:
                             log_warning("fetcher.resume.failed",
                                         f"{d.hash_key(a.handle)[:12]}…")
                     except Exception as e:
+                        # 兜底（有意宽泛）：单条告警分发失败不得中断整批，
+                        # 面覆盖 hash_key/write_resume_from_alert 的混合异常
                         log_exception("fetcher.drain_resume", e)
-            except Exception as e:
+            except RuntimeError as e:  # pop_alerts 失败实测抛 RuntimeError
                 log_exception("fetcher.drain_resume.pop", e)
             with d.lock:
                 torrents = dict(d.torrents_get())
@@ -281,7 +293,9 @@ class TaskPersistence:
                     try:
                         r.handle.save_resume_data(
                             lt.save_resume_flags_t.flush_disk_cache)
-                    except Exception:
+                    except RuntimeError:
+                        # 句柄已失效（实测抛 RuntimeError）：重发无意义，静默跳过
+                        # ——未落盘事实由本方法末尾的超时兜底统一上报
                         pass
             time.sleep(0.2)   # 等待 flush 完成/告警到达后重试
         # 超时兜底：只告警，绝不阻断退出（下次启动按损坏/缺失重建）。
@@ -316,7 +330,7 @@ class TaskPersistence:
                                             self.deps.download_dir, ih,
                                             t.get("save_path") or "")
             os.makedirs(save_path, exist_ok=True)
-        except Exception as e:
+        except OSError as e:
             log_warning("fetcher.restore.save_path", f"{ih[:12]}… {e}")
             t["state"] = STATE_FAILED
             t["error"] = f"重启恢复失败：{e}"
@@ -332,7 +346,8 @@ class TaskPersistence:
             # 任务失败——与模块 docstring「损坏静默降级全新加入」一致。
             try:
                 rd = lt.read_resume_data(rd)
-            except Exception as e:
+            except (RuntimeError, ValueError) as e:
+                # RuntimeError：lt.read_resume_data 对损坏数据实测抛；ValueError 兜底
                 log_warning("fetcher.restore.resume",
                             f"{ih[:12]}… fastresume 损坏，静默全新加入：{e}")
                 rd = None
@@ -364,7 +379,9 @@ class TaskPersistence:
                 t["error"] = "重启恢复失败：来源不可用"
                 self.persist_tasks()
                 return False
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
+            # OSError：来源文件读取失败；RuntimeError：lt.parse_magnet_uri /
+            # lt.torrent_info 对坏链/坏种子实测抛；ValueError：路径消毒兜底
             log_warning("fetcher.restore.source", f"{ih[:12]}… {e}")
             t["state"] = STATE_FAILED
             t["error"] = f"重启恢复失败：{e}"
@@ -386,7 +403,9 @@ class TaskPersistence:
         ses = d.ses_get()
         try:
             handle = ses.add_torrent(atp)
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
+            # RuntimeError：会话失效/参数非法（如 mismatching info-hash）实测抛；
+            # OSError：落盘目录写失败
             log_warning("fetcher.restore.add", f"{ih[:12]}… {e}")
             t["state"] = STATE_FAILED
             t["error"] = f"重启恢复失败：{e}"
@@ -397,13 +416,13 @@ class TaskPersistence:
             try:
                 handle.pause()
                 handle.unset_flags(lt.torrent_flags.auto_managed)
-            except Exception as e:
+            except RuntimeError as e:  # 句柄失效时 lt 实测抛 RuntimeError
                 log_warning("fetcher.restore.pause", f"{e}")
         has_meta = handle.torrent_file() is not None
         if not has_meta and st not in (STATE_PAUSED, STATE_STOPPED):
             try:
                 handle.resume()
-            except Exception as e:
+            except RuntimeError as e:  # 句柄失效时 lt 实测抛 RuntimeError
                 log_warning("fetcher.restore.resume", f"{e}")
         rec = d.record_cls(
             handle=handle, result=None, gen=d.gen_get(),
@@ -418,7 +437,11 @@ class TaskPersistence:
             try:
                 rec.result = d.result_from_torrent_info(
                     handle.torrent_file(), ih)
-            except Exception as e:
+            except (AttributeError, OSError, RuntimeError, ValueError,
+                    KeyError, TypeError) as e:
+                # 元数据→结果转换的失败面（句柄失效 RuntimeError / 元数据对象
+                # 缺字段或方法 AttributeError / 字段缺失 KeyError / 类型不匹配
+                # TypeError / 路径净化 ValueError 等）
                 log_warning("fetcher.restore.result", f"{ih[:12]}… {e}")
             if rec.state in (STATE_META_FETCH, STATE_QUEUED, STATE_VALIDATE):
                 rec.state = STATE_DOWNLOADING

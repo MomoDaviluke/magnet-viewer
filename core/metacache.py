@@ -162,7 +162,9 @@ def encode_meta(ti, comment: str = META_COMMENT,
         return None
     try:
         sec = ti.info_section()
-    except Exception:
+    except (AttributeError, RuntimeError):
+        # AttributeError：替身/旧绑定无该方法；RuntimeError：失效 ti 实测抛。
+        # 模块契约：编解码失败静默返回 None（旁路缓存不打扰主流程）
         return None
     try:
         info = bdecode(bytes(sec)) if isinstance(sec, (bytes, bytearray)) else sec
@@ -183,13 +185,17 @@ def encode_meta(ti, comment: str = META_COMMENT,
                     urls.append(u.encode("utf-8"))
                 elif isinstance(u, (bytes, bytearray)) and u:
                     urls.append(bytes(u))
-        except Exception:
+        except (AttributeError, RuntimeError, TypeError):
+            # tracker 列表不可枚举时按「无 tracker」继续编码（缓存仍可用）
             urls = []
         if urls:
             meta[b"announce"] = urls[0]
             meta[b"announce-list"] = [[u] for u in urls[:32]]
         return bencode(meta)
-    except Exception:
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        # 自研 bencode 抛 TypeError/ValueError（类型不支持/深度炸弹）、
+        # lt 调用抛 RuntimeError/AttributeError、bytes() 抛 TypeError——
+        # 模块契约：编码失败静默返回 None
         return None
 
 
@@ -200,7 +206,9 @@ def decode_meta(blob: bytes | None):
     import libtorrent as lt            # 局部导入：纯路径层无需 libtorrent
     try:
         return lt.torrent_info(bytes(blob))
-    except Exception:
+    except (OSError, RuntimeError, TypeError, ValueError):
+        # RuntimeError：lt 对损坏种子数据实测抛；OSError/ValueError：文件层
+        # 语义；TypeError：bytes() 转换。契约：损坏返回 None（不抛）
         return None
 
 
@@ -214,12 +222,13 @@ def info_hash_of(ti) -> tuple[str, str]:
     v1 = v2 = ""
     try:
         h = ti.info_hashes()
-    except Exception:
+    except (AttributeError, RuntimeError):
+        # AttributeError：替身/旧绑定无该方法；RuntimeError：失效 ti 实测抛
         return v1, v2
     for slot in ("v1", "v2"):
         try:
             s = str(getattr(h, slot)).strip().lower()
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             continue
         if len(s) not in (40, 64) or set(s) == {"0"}:
             continue
@@ -250,7 +259,8 @@ def alias_keys(ti) -> list[str]:
     out: list[str] = []
     try:
         best = str(ti.info_hash()).strip().lower()
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        # 失效 ti 实测抛 RuntimeError；替身缺方法 AttributeError；str() 兜底
         best = ""
     if len(best) in (40, 64) and set(best) != {"0"}:
         out.append(best)
@@ -310,7 +320,8 @@ def params_from_ti(ti, save_path: str, *, upload_mode: bool = False,
     if trackers:
         try:
             atp.trackers = [str(t) for t in trackers]
-        except Exception:
+        except (TypeError, ValueError):
+            # trackers 不可迭代/元素无法转 str：放弃注入 tracker，params 仍可用
             pass
     return atp
 
