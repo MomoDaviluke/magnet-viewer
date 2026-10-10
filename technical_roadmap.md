@@ -14,18 +14,20 @@
 
 ### 1.2 量化目标（验收基线）
 
-| 指标 | 基线（2026-10-09 实测） | 目标 | 度量方法 |
-|------|------|------|---------|
-| main_window.py 行数 | 1224 | ≤ 400 | `Measure-Object -Line` |
-| fetcher.py 相对导入行数 | 22 | ≤ 10 | Grep `^from \.` |
-| core/ 宽泛 `except Exception` | 132 | ≤ 40（保留边界兜底） | Grep `except\s+(Exception|BaseException)` |
-| UI 层越层 import core 内部 | 6 处（main_window×4 + settings_dialog×2） | 0（全部经 facade） | Grep `^from core\.(?!models|config|fetcher|logutil)` in ui/ |
-| Protocol/ABC 抽象接口 | 0 | ≥ 4（Resolver/StreamServer/CachePolicy/Theme） | 代码检索 |
-| 测试文件组织 | 27 个散落根目录 | 全部入 `tests/` | 目录检查 |
-| CI 覆盖率门槛 | 无 | ≥ 70%（core/，分支覆盖） | coverage --fail-under |
-| Android CI 单元测试 | 未接入 | 已接入 android.yml | workflow 检查 |
-| 跨平台行为契约 | 无 | contract_spec.md 覆盖 6 大核心流程 | 文档评审 |
-| 回归全绿 | 25 套件 PASS | 每阶段末全绿 + 打包自检 | `python regression_run.py` |
+| 指标 | 基线（2026-10-09 实测） | 目标 | 终测（2026-10-11 Wave 5） | 度量方法 |
+|------|------|------|------|------|
+| main_window.py 行数 | 1224 | ≤ 400 | **838**（未达标，已登记合理保留：关闭路径/视图组装/22 守卫槽，见 ADR-0003） | `Measure-Object -Line` |
+| fetcher.py 相对导入行数 | 22 | ≤ 10 | **10 ✅** | Grep `^from \.` |
+| core/ 宽泛 `except Exception` | 132 | ≤ 40（保留边界兜底） | **28 ✅**（26 基础设施兜底 + A2b config 容错 1 + A3 facade 1，均有 log+理由注释） | Grep `except\s+(Exception|BaseException)` |
+| UI 层越层 import core 内部 | 6 处（实测 9） | 0（全部经 facade） | **0 ✅** | Grep `^from core\.(?!models|config|fetcher|logutil)` in ui/ |
+| Protocol/ABC 抽象接口 | 0 | ≥ 4 | **4 ✅**（Resolver/StreamTransport/CachePolicy/ThemeSource） | 代码检索 |
+| 测试文件组织 | 27 个散落根目录 | 全部入 `tests/` | **29/29 入 tests/ ✅** | 目录检查 |
+| CI 覆盖率门槛 | 无 | ≥ 70%（core/，分支覆盖） | **81% 基线，fail-under=70 硬门禁 ✅** | coverage --fail-under |
+| Android CI 单元测试 | 未接入 | 已接入 android.yml | **已接入，364/364 绿 ✅** | workflow 检查 |
+| 跨平台行为契约 | 无 | contract_spec.md 覆盖 6 大核心流程 | **6 流程 + 28 差异登记 ✅** | 文档评审 |
+| 回归全绿 | 25 套件 PASS | 每阶段末全绿 + 打包自检 | **27/27 + 双端打包 ✅** | `python regression_run.py` |
+
+**达标 9/10**；main_window 838 行为唯一未达硬指标项，经用户对齐按「行为零变化优先于行数」原则保留（拆分已完成 4 协作者抽离，剩余为 Qt 事件覆写与视图组装，硬拆将违反重构红线）。
 
 ---
 
@@ -263,4 +265,5 @@ Wave 5 [串行]  集成验收：全量回归 + build.bat 出包 + gradle 出 APK
 | 2026-10-10 | W4 | A6c | 4.1 跨平台行为契约：docs/contract_spec.md（~490 行，6 大流程伪代码+双端实现位置全读码核实）；**审计 4 项假设（#12/#13/#14/#16）核实全部已修复**（与 W3 5.2/5.3 同型，审计基线再次过时）；主动新发现 28 条差异（高1/中7/低5/豁免观察15） | ✅ | 编排者抽查 BtEngine.kt:554-577（#12 已修实证） |
 | 2026-10-10 | W4 | A4b | 3.2 覆盖率门槛：实测基线 **81%**（branch 口径，core 87.7%/ui 75.3%，27 套全跑）≥70 → 直设硬门禁 fail-under=70（无过渡期）；ci.yml 锁 coverage==7.16.0 + 新增 Coverage gate 步骤；CONTRIBUTING 补门槛决策记录+最低 5 模块爬坡建议 | ✅ | coverage report --fail-under=70 退出码 0 |
 | 2026-10-10 | W4 | A5c | 4.2 差异闭环（用户裁决=高+中必修）：C21 点播洪泛（60 块常量→windowPieces 字节口径同源）+ C41/C42/C43 fastresume 三件套（60s 周期脏写/退出 drain 去跳过+mtime 新鲜度/恢复回退 .meta）+ C11 超时 pause + C12 完成 D3 停止 + C32 双池额度分账；低优先 C22/C23/C33/C44/C45 顺带全修；C61 豁免（用户裁决双轨）、C31/C13/C34 真机待办登记；4.3 shared/task-schema.json（draft-07，15+6 字段）+ 两端 schema_version 读写（旧文件容忍） | ✅ | gradlew 364/364（+9 新用例）、桌面 persist 95/0、contract_check 208/0 |
-| 2026-10-10 | W4 | 编排者 | 集成门：A6c∥A4b 并行→A5c 串行（依赖差异清单）；AskUserQuestion 裁决修复范围（高+中）与 C61（豁免）；独立复验 C21 修复/schema 落地/豁免登记节；全量回归复验+分类提交 | 🔄 进行中 | — |
+| 2026-10-10 | W4 | 编排者 | 集成门：A6c∥A4b 并行→A5c 串行（依赖差异清单）；AskUserQuestion 裁决修复范围（高+中）与 C61（豁免）；独立复验 C21 修复/schema 落地/豁免登记节；全量回归复验+分类提交 | ✅ | 4c851dd docs(contract) / 7828b11 ci / 0c8daa6 fix(android) / e7af95e docs(roadmap) |
+| 2026-10-11 | W5 | 编排者 | 收尾验收：桌面 build.bat 重打包（onedir 104.4MB，pack_check 10/10 组件+瘦身 4/4，exe 冒烟存活）；安卓 assembleRelease（APK 20.7MB，R8+lintVital BUILD SUCCESSFUL）；指标终测 9/10 达标（main_window 838 行为已登记合理保留，见 ADR-0003/执行日志 W2-A4）；全量回归终跑 27/27 绿（smoke 首跑瞬态 10054 经单跑+重跑双复验排除）；CHANGELOG 定版 | ✅ | 见 §1.2 终测表 |

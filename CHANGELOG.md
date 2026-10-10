@@ -8,7 +8,7 @@ technical_roadmap Phase 0.1）。变更记录自 `git log` 提炼。
 
 ---
 
-## [Unreleased] — 架构重构 Wave 2 / Wave 3（arch/roadmap-2026q4）
+## [Unreleased] — 架构重构 Wave 2 / Wave 3 / Wave 4 / Wave 5（arch/roadmap-2026q4）
 
 ### 新增
 - 契约层：`core/interfaces.py`——Resolver / StreamTransport / CachePolicy /
@@ -50,6 +50,33 @@ technical_roadmap Phase 0.1）。变更记录自 `git log` 提炼。
   违反「锁内禁 I/O」纪律（2026-09-29 审计只外移了主 rescan 路径，此处
   同型漏修）；改为先锁外扫描、回锁只写结果，concurrency_test §E 同型
   AST 断言钉住防再犯。
+- 安卓跨平台行为差异闭环（Wave 4 A5c，12 项，桌面为契约基线对齐）：
+  C21 点播窗口 60 块常量→`windowPieces` 字节口径（4MB 块 240MB 洪泛→16MB）；
+  fastresume 三件套 C41 60s 周期脏写 / C42 退出 drain 去「已有文件跳过」+
+  mtime 新鲜度等待 / C43 恢复回退 `.meta` 缓存；C11 元数据超时先 pause 句柄、
+  C12 完成自动停止（D3 对齐）、C32 流服务等待/服务双池额度分账；低优先
+  C22/C23/C33/C44/C45 顺带。C61 深色板豁免（用户裁决，ADR-0004 双轨）；
+  C31/C13/C34 登记真机回归待办。gradlew `--rerun-tasks` 364/364 绿。
+
+### Wave 4 / Wave 5 新增
+- 跨平台行为契约：`docs/contract_spec.md`——6 大核心流程（解析状态机/边下边播
+  调度/Range 流语义/持久化 fastresume/缓存配额/主题令牌）平台无关伪代码 +
+  双端实现位置逐节核实；登记 28 条差异（审计旧 4 项假设核实**全部已修复**，
+  与 Wave 3 的 5.2/5.3 同型——审计基线第三次过时）。
+- 共享数据模型：`shared/task-schema.json`（draft-07，15 任务字段 + 6 文件字段）；
+  桌面 `taskstore.py` 与安卓 `TaskStore.kt` 各自读写 `schema_version`，
+  旧文件缺字段容忍（版本 0，绝不因缺字段拒读）。
+- CI 覆盖率门禁：`.github/workflows/ci.yml` 新增 `fail-under=70` 硬门禁
+  （实测基线 **81%** branch 口径，core 87.7% / ui 75.3%）；CONTRIBUTING 记录
+  门槛决策与最低 5 模块爬坡建议。
+
+### Wave 5 收尾验收
+- 桌面重打包：`build.bat` → PyInstaller onedir `dist\MagnetViewer`（104.4 MB），
+  `tests\pack_check.py` 必需组件 10 项齐全 / 瘦身 4/4 剔除，exe 冒烟启动存活。
+- 安卓重打包：`gradlew assembleRelease` → `app-release.apk`（20.7 MB），
+  R8 混淆 + lintVital 通过，BUILD SUCCESSFUL。
+- 全量回归终态：27/27 全绿（smoke_test 首跑瞬态 `ConnectionResetError 10054`
+  经单跑 + 重跑双重复验为环境瞬态，非代码缺陷）。
 
 ## [2026-10-09] — 架构路线图启动（Wave 0）
 
