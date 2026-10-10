@@ -8,6 +8,49 @@ technical_roadmap Phase 0.1）。变更记录自 `git log` 提炼。
 
 ---
 
+## [Unreleased] — 架构重构 Wave 2 / Wave 3（arch/roadmap-2026q4）
+
+### 新增
+- 契约层：`core/interfaces.py`——Resolver / StreamTransport / CachePolicy /
+  ThemeSource 四个 `runtime_checkable` Protocol（16 方法签名，只声明不重构、
+  实现零改动）；contract_check [5] 增加结构满足 + 签名指纹对拍门禁（ADR-0005）。
+- 配置注册机制：`core/config.py` `register_config_key(key, default,
+  validator=None)`——新键经注册入口进 DEFAULTS；validator 只在读取侧生效、
+  非法值回落 default 绝不抛；重复注册首注册者胜（ADR-0006；既有键集中
+  声明不物理分散，权衡见 ADR）。
+- 主题注册表：`ui/theme.py` `THEMES` dict + `register_theme(name, palette)`
+  ——LIGHT/DARK 走注册路径进表，未来自定义主题同走此入口；键集校验挡在
+  注册点、重复名首注册者胜（与配置注册同一纪律）；`PALETTES` 保留为同一
+  对象别名。
+- 文档：ARCHITECTURE.md 定稿更新（Wave 2/3 演进同步，行数/计数全部
+  2026-10-10 实测复核）+ ADR-0005/0006/0007；ADR-0001/0002/0003/0004
+  过时快照修正（taskops 行号漂移、facade 瘦身落地状态、越层收敛现状、
+  对拍夹具计数）。
+
+### 变更
+- fetcher facade 化（7008cda）：相对 import 22→10；删纯历史再导出
+  （STATE_*/taskstore 函数/METADATA_TIMEOUT 等，调用方改直连源模块）；
+  定义 `__all__`（7 符号）；SessionManager 补 7 薄委托方法
+  （preview_root / enforce_preview_cache_limit / preview_downloaded_bytes /
+  proxy_hint / inbound_selfcheck / inbound_hint_text / create_stream_server），
+  UI 越层 import 9→**0**（§2.2 白名单落地）。
+- main_window 拆分（fe71a02）：1365→838 行，按内聚簇抽出四协作者
+  `ui/cache_host.py`（CacheHost：清理/配额/占用）、`ui/stream_host.py`
+  （StreamHost：流服务生命周期/开播门控/重试链）、`ui/task_controller.py`
+  （TaskController：添加下载/任务 CRUD 槽）、`ui/inbound_host.py`
+  （InboundHost：入站探测链含 `_InboundBridge`）；行为零变化，白盒测试
+  spy 路径同步迁移。
+- 测试目录化（e5d794c）：29 个套件脚本迁入 `tests/`（SUITES 27 套 +
+  live_test + pack_check）；`regression_run.py` / `test_support.py` /
+  `coverage_run.py` / `diag_*` 留仓库根；31 处路径引导修复。
+
+### 修复
+- metacache 剪枝锁内 I/O（Phase 5.1 残留，Wave 3 A7）：`maybe_prune`
+  剪枝后的重扫计数 `_count_entries`（scandir）原写在 `_PRUNE_LOCK` 段内，
+  违反「锁内禁 I/O」纪律（2026-09-29 审计只外移了主 rescan 路径，此处
+  同型漏修）；改为先锁外扫描、回锁只写结果，concurrency_test §E 同型
+  AST 断言钉住防再犯。
+
 ## [2026-10-09] — 架构路线图启动（Wave 0）
 
 ### 新增

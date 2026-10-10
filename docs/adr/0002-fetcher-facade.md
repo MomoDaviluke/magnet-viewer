@@ -1,13 +1,15 @@
 # ADR-0002：fetcher.py 作为 SessionManager facade 的枢纽决策与瘦身方向
 
-- **状态**：Accepted（现状确认）+ 瘦身计划 Pending（路线图 Phase 1.2，Wave 1 A2 实施中）
-- **日期**：2026-10-09
+- **状态**：Accepted（现状确认）+ 瘦身计划**已落地**（Wave 2，7008cda，2026-10-10；
+  仅决策 ③ `_bootstrap()` 抽取未实施，见「落地状态」节）
+- **日期**：2026-10-09（2026-10-10 定稿更新）
 - **来源**：architecture_review_report §2.2「fetcher.py 枢纽反模式」、
   technical_roadmap Phase 1.2 / 3.2、`core/fetcher.py` 文件头注释
 
 ## 背景
 
-`core/fetcher.py`（实测 766 行；审查报告登记的 635 行为审计修复前快照）是 UI 唯一直接触达的 core 入口：`SessionManager`
+`core/fetcher.py`（Wave 1 快照 766 行，Wave 2 瘦身后实测 892 行——瘦身删再导出
+的同时补了 facade 委托方法；审查报告登记的 635 行为审计修复前快照）是 UI 唯一直接触达的 core 入口：`SessionManager`
 组装 libtorrent 会话、注册表、调度器、解析器、任务 CRUD、持久化、预览桥
 等全部子系统，并以薄委托 + property 代理（`_lock`/`_torrents`/`_tasks` 等
 转发到 registry）对外暴露能力。
@@ -40,6 +42,25 @@ barrel export，但无 `__all__` 声明，公共 API 边界不明确。
 3. **组装期依赖注入不变**：子系统间仍用 getter/回调注入会被重绑的宿主状态
    （ses_get / scheduler_get / emit），引用稳定的一次性注入直接传服务对象
    （taskops 头注释定死的规则）——瘦的是 fetcher 的 import 面，不是 DI 结构。
+
+## 落地状态（2026-10-10 Wave 2 复核，7008cda）
+
+- ① **已落地**：纯历史再导出（STATE_*/STATE_NAMES/DOWNLOAD_STATES/
+  BOOTSTRAP_TRACKERS/taskstore 函数/METADATA_TIMEOUT）全部移除，调用方改直连
+  源模块；仅存 2 行 `noqa: F401` 是 **facade 契约再导出**（cache_guard 显式
+  path 参数符号 + cache_mode 两常量），语义已从「历史兼容」转为「UI 白名单
+  取值来源」，头注释如实登记；`persist_*/registry_*/resolver_*` 注入别名
+  8 个保留（委托方法体在用，persist_test/resolver_test 以 monkeypatch
+  fetcher 模块属性验证委托路由）。
+- ② **已落地**：`__all__` 7 符号（SessionManager + 6 个契约再导出符号，
+  fetcher.py:887 实测）。
+- ③ **部分落地**：facade 方法面经 7 个薄委托方法（preview_root /
+  enforce_preview_cache_limit / preview_downloaded_bytes / proxy_hint /
+  inbound_selfcheck / inbound_hint_text / create_stream_server）收敛，UI 越层
+  9→0（路线图 1.4 同步验收）；但「内部组装逻辑移入 `_bootstrap()`」**未实施**
+  ——Grep `_bootstrap` 全仓 0 命中，`__init__` 组装段（L100-221）仍内联。
+- ④ **已落地**：相对 import 22→**10** 行（Grep `^from \.` 实测），达成
+  本 ADR 的 ≤10 验收线（路线图 1.2 原文 ≤6 未达，Wave 2 按本 ADR 基线验收）。
 
 ## 后果
 

@@ -1,6 +1,8 @@
 # magnet-viewer 架构文档
 
 > 制定日期：2026-10-09（arch/roadmap-2026q4，Phase 3.4 / 方案 A 交付物）
+> 定稿更新：2026-10-10（Wave 3 A6b——同步 Wave 2 facade 化/协作者拆分/tests 目录化
+> 与 Wave 3 Protocol/配置注册/主题表/metacache 锁修；行数与计数均为当日实测）
 > 依据：architecture_review_report.md（综合评分 2.8/5）+ technical_roadmap.md Phase 2.4 方案 A
 > 维护规则：core/ 模块增删或依赖方向变化时，本文「分层地图」必须同步更新；
 > 与源码冲突时以源码为准并回改本文。
@@ -11,8 +13,8 @@
 
 magnet-viewer 是磁力链实时解析 / 边下边播 / 下载管理工具，**双端独立实现**：
 
-- **桌面端**：Python 3.13 + PySide6（Qt6）+ libtorrent（`core/` 24 模块 + `ui/` 11 模块）
-- **安卓端**：Kotlin + Jetpack Compose + libtorrent4j（`android/`，30+ Kotlin 文件）
+- **桌面端**：Python 3.13 + PySide6（Qt6）+ libtorrent（`core/` 26 模块 + `ui/` 15 模块，均不含 `__init__.py`，2026-10-10 实测）
+- **安卓端**：Kotlin + Jetpack Compose + libtorrent4j（`android/`，main 源集 59 个 Kotlin 文件，2026-10-10 实测）
 
 ### 1.1 双端架构图
 
@@ -20,7 +22,12 @@ magnet-viewer 是磁力链实时解析 / 边下边播 / 下载管理工具，**�
 ┌────────────────────── 桌面端 ──────────────────────┐
 │ main.py                                            │
 │   └─ ui/main_window.py (MainWindow, _Bridge)      │
-│        │ 只应依赖 ▼（Wave 2 收敛目标，见 §2.3）    │
+│        │ ├─ ui/cache_host.py    (CacheHost)       │
+│        │ ├─ ui/stream_host.py   (StreamHost)      │
+│        │ ├─ ui/task_controller.py (TaskController)│
+│        │ └─ ui/inbound_host.py  (InboundHost,     │
+│        │      含 _InboundBridge)  ← Wave 2 协作者 │
+│        │ 只依赖 facade/白名单 ▼（已收敛 0 越层）  │
 │ core/fetcher.py (SessionManager — facade/hub)     │
 │   ├─ session.py    (SessionCore: libtorrent 会话) │
 │   ├─ registry.py   (TaskRegistry: 单锁+注册表)    │
@@ -29,10 +36,11 @@ magnet-viewer 是磁力链实时解析 / 边下边播 / 下载管理工具，**�
 │   ├─ taskops.py    (TaskOps: 任务 CRUD)           │
 │   ├─ persist.py    (TaskPersistence: 落盘/恢复)   │
 │   ├─ preview.py    (PreviewCore: 预览桥/快照)     │
-│   └─ 数据/设施: taskstore / metacache / resume /  │
-│      parser / models / states / logutil / config /│
-│      cache_guard / cache_quota / cache_mode /     │
-│      secretbox / proxycheck / inbound             │
+│   ├─ 数据/设施: taskstore / metacache / resume /  │
+│   │  parser / models / states / logutil / config /│
+│   │  cache_guard / cache_quota / cache_mode /     │
+│   │  secretbox / proxycheck / inbound / exceptions│
+│   └─ 契约: interfaces.py (4 Protocol, 纯声明)     │
 │ core/stream_server.py (本地 HTTP Range 流服务)    │
 └───────────────────────────────────────────────────┘
 
@@ -84,9 +92,9 @@ magnet-viewer 是磁力链实时解析 / 边下边播 / 下载管理工具，**�
 
 ## 二、桌面端分层地图（方案 A 核心交付物）
 
-`core/` 保持**扁平文件结构**（24 个 .py，不做物理分包），以下逻辑分层即本项目的
-分层契约。实测依赖依据各文件 import 语句与文件头注释推导（详见
-architecture_review_report.md §2.1）。
+`core/` 保持**扁平文件结构**（26 个 .py（不含 `__init__.py`），不做物理分包），
+以下逻辑分层即本项目的分层契约。实测依赖依据各文件 import 语句与文件头注释
+推导（详见 architecture_review_report.md §2.1）。
 
 ### 2.1 六层划分与模块职责
 
@@ -101,6 +109,8 @@ architecture_review_report.md §2.1）。
 | `core/logutil.py` | 统一日志入口：log_warning / log_exception，让静默失败留痕 | 绝不因日志本身抛异常、绝不向调用方传播；高危路径禁止 `except Exception: pass` 式吞错 |
 | `core/parser.py` | bencode 编解码 + .torrent/magnet 解析（纯实现，零额外依赖） | 不得移除 DoS 防御上限（MAX_TORRENT_SIZE / MAX_BENCODE_DEPTH / MAX_INT_DIGITS） |
 | `core/secretbox.py` | 凭据保护：Windows DPAPI 对称封装代理密码 | 注册表（QSettings）不得存明文密码；解密失败返回空串而非抛异常 |
+| `core/interfaces.py` | 契约声明：Resolver / StreamTransport / CachePolicy / ThemeSource 四个 `runtime_checkable` Protocol（共 16 个方法签名，Wave 3 引入，见 ADR-0005） | 纯声明层、运行时零依赖（不碰 libtorrent/Qt，跨模块类型只在 TYPE_CHECKING 块引用）；不得加实现代码，也不得让实现显式继承 Protocol（结构化类型，满足性由 contract_check [5] 结构检查+签名指纹对拍守门） |
+| `core/exceptions.py` | 业务异常层级：MagnetError → ParseError / SessionError / DownloadError / CacheError / StreamError / StorageError（7 类，Wave 1 引入） | 只定义层级不做转换——既有对外契约的 ValueError/RuntimeError（抛出侧）不在层级内，收窄的是捕获侧 |
 
 #### 数据层（任务状态与磁盘表示）
 
@@ -151,29 +161,54 @@ architecture_review_report.md §2.1）。
 1. **只允许上层依赖下层**（编排→服务→逻辑→数据→设施/基础），禁止反向 import。
    各文件头注释已把「不反向依赖 fetcher」写为纪律（session.py / persist.py /
    taskops.py / resolver.py）。
-2. **已知偏差（现状，收敛排期见路线图）**：
-   - `resolver.py`（服务层）import `taskops.py`（编排层）——resolver 头注释自认
-     「persist/taskops 无环下游」，属登记在案的层间例外，Wave 3 Protocol 化后重审；
-   - `session.py`（服务层）import `config.py`（设施层）——设施层是横切底座，
+2. **已知偏差（登记在案）**：
+   - `resolver.py`（服务层）import `taskops.py`（编排层，resolver.py:39 实证）——
+     resolver 头注释自认「persist/taskops 无环下游」，属登记在案的层间例外；
+     Wave 3 Protocol 化（ADR-0005）只声明不重构，本例外**维持原状**、未消除；
+   - `session.py`（服务层）import `config.py`（设施层，session.py:31
+     `from .config import lt_proxy_settings`）——设施层是横切底座，
      视为合法的下行依赖。
-3. **UI 层 import 白名单（Wave 2 收敛目标，先立规矩）**：`ui/*.py` 只准
+3. **UI 层 import 白名单（已落地，2026-10-10 Wave 2 实测 0 越层）**：`ui/*.py` 只准
    import `core.models` / `core.config` / `core.fetcher`（facade）/ `core.logutil`。
-   现状越层实证：`ui/main_window.py` 直连 `cache_guard`、`cache_mode`、`cache_quota`、
-   `stream_server`、`proxycheck`、`inbound`（延迟导入）；`ui/settings_dialog.py` 直连
-   `cache_guard`、`cache_mode`——这些调用改经 facade 代理方法后即为 0 越层
-   （路线图 1.4，验收 Grep `^from core\.(?!models|config|fetcher|logutil)` in ui/ = 0）。
+   曾经的越层实证（main_window 直连 cache_guard/cache_mode/cache_quota/stream_server/
+   proxycheck/inbound，settings_dialog 直连 cache_guard/cache_mode，共 9 处）已全部
+   收敛：SessionManager 补 7 个薄委托方法（preview_root /
+   enforce_preview_cache_limit / preview_downloaded_bytes / proxy_hint /
+   inbound_selfcheck / inbound_hint_text / create_stream_server，fetcher.py
+   L426-484 实证），cache_guard/cache_mode
+   显式 path 参数符号经 facade 模块级再导出（`__all__` 7 符号）。
+   验收 Grep（ui/ 内 `^(from|import) core\.` 去掉白名单四类）= 0 命中，2026-10-10 复核。
+4. **契约层例外**：`core/interfaces.py` 是纯声明层（4 个 Protocol，运行时零依赖、
+   不 import 任何实现模块），可被任何层安全 import 而不构成层间边——当前生产码
+   无 import 点（满足性检查在 tests/contract_check.py），属「先立契约、后接消费」
+   的预留接口面（ADR-0005）。
 
-### 2.3 UI 层（ui/，11 模块）
+### 2.3 UI 层（ui/，15 模块，不含 `__init__.py`；Wave 2 拆分后）
 
 | 模块 | 职责 |
 |------|------|
-| `ui/main_window.py` | MainWindow：视图接线 + `_Bridge`/`_InboundBridge`（QObject Signal，跨线程回调转 UI 线程）；实测 1365 行（审查报告登记 1224 行为审计修复前快照），Phase 1.3 拆分目标 ≤400 行（controllers/stream_host/cache_host 三个协作者） |
-| `ui/theme.py` | 全局设计系统：LIGHT/DARK 调色板 + SP_* 间距 + QSS（见 §6） |
+| `ui/main_window.py` | MainWindow：core 装配 + 视图组装 + `_Bridge`（QObject Signal，跨线程回调转 UI 线程）信号槽接线 + 停机守卫入口槽 + 关闭路径；实测 838 行（Wave 2 拆分前 1365 行；未达 ≤400 目标——关闭路径为 Qt 事件覆写必须留子类、视图装配与 22 个守卫入口槽留在本类，继续硬拆违反行为零变化，路线图执行日志 2026-10-10 诚实登记） |
+| `ui/cache_host.py` | CacheHost：缓存清理入口（手动/退出共用）、活任务保护名单、LRU 配额触发、状态栏「缓存占用」刷新；宿主成员晚绑定（不快照 cache_dir/cfg/session） |
+| `ui/stream_host.py` | StreamHost：StreamServer 实例构造/启停（经 facade `create_stream_server` 工厂）、磁盘路径→文件映射回调、开播门控、播放失败指数退避重试、流侧会话状态（pending_video/stream_url 等由本类持有） |
+| `ui/task_controller.py` | TaskController：添加下载流程 + 任务 CRUD 槽（暂停/恢复/删除/优先级/打开目录）；停机守卫仍在 MainWindow 入口槽首行，本类方法是守卫通过后的执行体 |
+| `ui/inbound_host.py` | InboundHost：入站能力探测链（后台线程 SSDP 探测 → `_InboundBridge` 信号回主线程 → 弹窗 → 复位按钮）；探测调用经 facade `inbound_selfcheck`/`inbound_hint_text` |
+| `ui/theme.py` | 全局设计系统：THEMES 注册表（LIGHT/DARK 经 `register_theme` 进表，Wave 3）+ SP_* 间距 + QSS（见 §6） |
 | `ui/style.py` | ChevronStyle：下拉/微调箭头基样式（须在 apply_theme 之前安装） |
 | `ui/preview_pane.py` / `preview_player.py` | 预览面板 / 内嵌 QMediaPlayer 播放 |
 | `ui/downloads_pane.py` / `file_tree.py` / `status_panel.py` | 下载列表 / 文件树 / 状态栏 |
 | `ui/add_download_dialog.py` / `settings_dialog.py` | 添加下载 / 设置面板 |
 | `ui/gallery.py` | 图片画廊（按需下载 + 缩略图 + 大图缩放） |
+
+### 2.4 测试布局（Wave 2 目录化，2026-10-10）
+
+- **`tests/`**：29 个套件脚本全部迁入（`regression_run.py` SUITES 登记的
+  27 套 + `live_test` + `pack_check`）。套件脚本自带双层 dirname 的
+  sys.path 引导，从 tests/ 内直接运行与经运行器调度等价。
+- **仓库根**：`regression_run.py`（全量回归运行器）、`coverage_run.py`、
+  `test_support.py`（共享夹具）、`diag_*.py` / `probe_gate_redesign.py` /
+  `ui_shot.py`（诊断与工具脚本）留根——它们不是 pytest 套件而是入口/工具。
+- 门禁断言（contract_check / theme_check / concurrency_test AST 扫描等）
+  锚定源码路径的写法随目录化同步修复（路线图执行日志 W2 A7）。
 
 ---
 
@@ -184,7 +219,7 @@ architecture_review_report.md §2.1）。
 
 1. **单锁归属**：`TaskRegistry.lock`（`threading.Lock`，registry.py:120）是
    全项目**唯一任务锁**；SessionManager 的 `_lock` 只是它的 property 代理
-   （fetcher.py:215-217）。taskops/resolver/preview 一律借用这一把锁。
+   （fetcher.py:227-229）。taskops/resolver/preview 一律借用这一把锁。
    调度器另持**私有短锁** `scheduler._lock`，PieceView 持 `_lock`，
    PreviewCore 持 `_views_lock`（叶子锁）——均为对象私有，不参与任务锁序。
 2. **`*_locked` 命名纪律**：「一次调用一个锁段」——公开方法自持锁；名字以
@@ -193,25 +228,37 @@ architecture_review_report.md §2.1）。
 3. **锁序（单向，必须遵守）**：`reg.lock` → `scheduler._lock` → `PieceView._lock`。
    scheduler 是锁序末端：其锁段内绝不取 reg.lock / 落盘。历史锁序边
    （持 reg.lock 调 scheduler.stop，审计 R-10）已在 taskops.py 出锁修复
-   （L436-442 记标志、L471-474 出锁再停；L545-548 同款），由
-   concurrency_test §F 静态检查钉住。
+   （remove_task：L434-444 锁内记 `stop_sched` 标志、L473-476 出锁再停；
+   set_focus：L541-550 同款）。scheduler 侧不变式（锁段内不调 `_LOCK_TAKING`
+   七入口、begin/seek_to_byte 调 tick 前必须已放锁）由 concurrency_test §F
+   静态检查 + 确定性反例自检钉住。
 4. **锁内禁 I/O**：任务锁段内禁止落盘 / fsync / `remove_torrent` 等阻塞调用；
    `tasks()` 快照锁内只做字典浅拷贝，`handle.status()` 等 libtorrent 绑定调用
    移出锁外派生（R-3）。scheduler 锁内的 libtorrent 调用是**登记在案的例外**
    （非阻塞状态变更、私有短锁、热路径非阻塞取锁跳过本拍），前提「锁内只做
    非阻塞状态变更」，若引入阻塞调用例外即失效。
+   私有锁同样受此纪律约束：`core/metacache.py` 剪枝锁 `_PRUNE_LOCK` 的
+   `_count_entries`（scandir I/O）两处路径——主 rescan 路径 2026-09-29 审计
+   已外移；剪枝后重扫计数是**同型漏修点**，2026-10-10（Wave 3 A7，Phase 5.1）
+   改为先锁外扫描、再回锁只写结果（metacache.py:456-466），由
+   concurrency_test §E 的同型 AST 断言（敏感名单 `_count_entries` ×
+   锁名 `_PRUNE_LOCK`）钉住防再犯。
 5. **跨线程回调走 `_Bridge` Signal**：core 层不 import Qt；后台线程
    （alert 循环、流服务请求线程、inbound 探测线程）的回调经
-   `ui/main_window.py` 的 `_Bridge` / `_InboundBridge`（QObject + Signal）
-   marshal 回 UI 线程。拆分 main_window 时 `_Bridge` 模式保留、不新增 Qt
-   线程模型（路线图 3.1）。
+   `ui/main_window.py` 的 `_Bridge`（main_window.py:60）与 `ui/inbound_host.py`
+   的 `_InboundBridge`（inbound_host.py:21，Wave 2 拆分随入站探测链迁入协作者）
+   （QObject + Signal）marshal 回 UI 线程。拆分 main_window 时 `_Bridge` 模式
+   保留、不新增 Qt 线程模型（路线图 3.1）。
 
 ---
 
 ## 四、错误处理策略
 
-现状：core/ 宽泛 `except Exception` 实测 132 处（路线图 Wave 0 基线修正值）。
-两类场景区分对待（规则本体来自路线图 3.4 节「异常层级替换的边界」）：
+现状（2026-10-10 实测）：core/ 宽泛捕获（`except Exception`/`except BaseException`
+代码行）从 Wave 0 基线 132 处收窄至 **27 处**（Wave 1 A2 两批收窄，路线图
+执行日志登记 26 处为当时代码口径，本次复核含 taskstore 原子写清理的
+1 处 `except BaseException` 共 27）。两类场景区分对待（规则本体来自
+路线图 3.4 节「异常层级替换的边界」）：
 
 1. **业务分支捕获必须收窄**：解析、任务操作、持久化等可预期失败路径，
    应捕获具体异常类型，防止 TypeError/AttributeError 等编程错误被当作
@@ -220,11 +267,16 @@ architecture_review_report.md §2.1）。
    alert 循环、清理路径等「进程不可因单请求/单任务崩溃」的边界，保留
    `except Exception` 但必须记录（`core/logutil.py` 头注释：历史上多次因
    `except Exception: pass` 掩盖真实缺陷）。宽泛兜底点须注释说明为何宽泛。
+   保留的 27 处分布（按文件）：stream_server 6 / fetcher 5 / session 5 /
+   cache_quota 2 / persist 2 / resolver 2 / config 1 / logutil 1 / preview 1 /
+   taskops 1 / taskstore 1——全部有 log + 中文兜底理由注释。
 
-**异常层级（实施中）**：A2 代理正在建 `core/exceptions.py`
-（MagnetError → ParseError / SessionError / DownloadError / CacheError / StreamError），
-按模块分批替换宽泛捕获，目标保留 ≤15 处合理兜底。该文件落地后本节补链接，
-并补「异常层级」ADR（Wave 2）。
+**异常层级（已落地，Wave 1）**：`core/exceptions.py`（7 类：MagnetError →
+ParseError / SessionError / DownloadError / CacheError / StreamError /
+StorageError）已入库（554385b）。纪律：收窄的是**捕获侧**；既有对外契约
+的 ValueError/RuntimeError（抛出侧，如 `TaskOps.add_task` 空源、会话未启动）
+**不转换**，保持回归基线。层级类当前主要作领域语义预留，业务分支按
+真实抛出面收窄为具体内置异常。
 
 ---
 
@@ -251,7 +303,9 @@ architecture_review_report.md §2.1）。
 | `theme/Theme.kt` + `Color.kt` + `Spacing.kt` + `Type.kt` | `ui/theme.py` | 语义对齐（见 §6） |
 | `service/DownloadService.kt` | （无对应） | 安卓特有：dataSync 前台服务灭屏继续下载 |
 
-**一致性保障**：跨语言对拍夹具（`android/tools/gen_parity_fixtures.py`，13 组/155 条）
+**一致性保障**：跨语言对拍夹具（`android/tools/gen_parity_fixtures.py`，
+当前夹具 `android/app/src/test/resources/parity/parity.json` 实测 14 组/156 条，
+2026-10-10 复核；初版 523fd1c 为 13 组/155 条，S6/S8 审计修复后新增分组成员）
 冻结 PieceMap/连续前缀语义；Phase 4 行为契约文档（`docs/contract_spec.md`，待产出）
 覆盖 6 大核心流程。双轨策略的取舍见 ADR-0004。
 
@@ -264,6 +318,14 @@ architecture_review_report.md §2.1）。
 
 ### 6.1 桌面端（ui/theme.py）
 
+- **调色板注册表（Wave 3）**：`THEMES: dict`（主题名 → 调色板 dict），内置
+  `LIGHT` / `DARK` 均经 `register_theme(name, palette)` 进表；未来自定义主题
+  同走该入口，无需改 `apply_theme`。注册纪律：键集必须覆盖
+  `_REQUIRED_PALETTE_KEYS`（缺键在注册点抛 ValueError，挡在热切换 KeyError
+  之前）；重复名**拒绝、首注册者胜**（与 core.config.register_config_key 同一
+  纪律，防生效主题取决于注册顺序）。`PALETTES` 为 THEMES 的同一对象别名
+  （既有读法不受影响）。`THEMES` 满足 `core.interfaces.ThemeSource` 契约面
+  （模块本体即实现，contract_check [5]/[7] 守门）。
 - **双调色板**：`LIGHT`（默认）/ `DARK`，两套键集完全一致——固定 17 键
   （bg / bg_panel / bg_input / bg_hover / bg_selected / border / border_strong /
   text / text_muted / text_dim / accent / accent_hover / accent_pressed / ok /
