@@ -55,7 +55,7 @@ build.bat          :: 一键：清旧产物 -> PyInstaller 构建 -> pack_check 
 ```bash
 .venv\Scripts\pip install pyinstaller
 .venv\Scripts\python -m PyInstaller --noconfirm magnet-viewer.spec
-.venv\Scripts\python pack_check.py        :: 产物自检（退出码 0/1/2，同测试约定）
+.venv\Scripts\python tests\pack_check.py   :: 产物自检（退出码 0/1/2，同测试约定）
 # 产物：dist\MagnetViewer\MagnetViewer.exe（整个目录拷走即可运行）
 ```
 
@@ -150,28 +150,42 @@ magnet-viewer/
 │   └── add_download_dialog.py # 添加下载对话框
 ├── REVIEW.md             # 上一轮全面审查报告（含修复记录）
 ├── audit_report.md       # 本轮团队全面审查报告与修复进度
-├── contract_check.py     # 对外契约自检（秒级，重构 fetcher 的安全网）
-├── theme_check.py        # 主题门禁：色值/内联样式只允许出现在 ui/theme.py（秒级）
 ├── ui_shot.py            # UI 截图工具（offscreen 四张 PNG，改造前后人工对照）
-├── persist_test.py       # 持久化专项（假依赖，秒级）
-├── session_test.py       # 会话核心专项（假依赖，秒级）
-├── registry_test.py      # 注册表与锁归属专项（含 R-1 锁探针，秒级）
-├── taskops_test.py       # 任务 CRUD 专项（含 R-3 出锁派生探针，秒级）
-├── resolver_test.py      # 解析与元数据编排专项（假会话，秒级）
-├── preview_test.py       # 预览桥与状态专项（假句柄，秒级）
-├── inbound_test.py       # 入站能力自检（内网 IP 枚举 / SSDP 探测 / 手动转发文案，纯标准库）
-├── proxycheck_test.py    # 代理可用性自检（SOCKS5 真握手 / 会话接线 / 超时文案根因提示）
-├── hybrid_v2_test.py     # 入口矩阵混合 v2 列（两入口端到端）
-├── regression_run.py     # 一键回归（27 套）
+├── regression_run.py     # 一键回归（27 套；套件脚本在 tests/，reg_*.log 写本目录）
+├── coverage_run.py       # 覆盖率报告（快速集/全量，只报告不设门禁）
+├── test_support.py       # 测试共享基建（本机做种端、种子构造、磁盘快照、轮询等待）
 ├── magnet-viewer.spec    # PyInstaller 打包配置（onedir，产物 dist/MagnetViewer/）
-├── build.bat             # 一键打包（清旧产物 → 构建 → pack_check 自检）
-├── pack_check.py         # 打包产物自检（必需组件 / 瘦身是否失效 / 体积哨兵）
-├── smoke_test.py         # 无 GUI 冒烟测试（python smoke_test.py）
-├── local_magnet_test.py  # 本机闭环验证：做种端 + 磁力链解析 + 边下边播（无需外网）
-├── moov_stream_test.py   # moov 尾部优先端到端验证（ffprobe/ffmpeg 实际探测，无 GUI）
-├── qt_stream_open_test.py# QMediaPlayer（FFmpeg 后端）offscreen 实测开播
-├── gui_feature_test.py   # GUI 交互校验：拖放 / 输入历史 / 文件树展开（offscreen）
-├── live_test.py          # 真实 DHT 磁力链验证（需能访问 BT 网络）
+├── build.bat             # 一键打包（清旧产物 → 构建 → tests/pack_check 自检）
+├── tests/                # 回归测试套件（regression_run.py 的 SUITES 逐一在此）
+│   ├── contract_check.py     # 对外契约自检（秒级，重构 fetcher 的安全网）
+│   ├── theme_check.py        # 主题门禁：色值/内联样式只允许出现在 ui/theme.py（秒级）
+│   ├── persist_test.py       # 持久化专项（假依赖，秒级）
+│   ├── session_test.py       # 会话核心专项（假依赖，秒级）
+│   ├── registry_test.py      # 注册表与锁归属专项（含 R-1 锁探针，秒级）
+│   ├── taskops_test.py       # 任务 CRUD 专项（含 R-3 出锁派生探针，秒级）
+│   ├── resolver_test.py      # 解析与元数据编排专项（假会话，秒级）
+│   ├── preview_test.py       # 预览桥与状态专项（假句柄，秒级）
+│   ├── playback_window_test.py # 播放窗口按字节+deadline 递增专项
+│   ├── smoke_test.py         # 无 GUI 冒烟测试（python tests/smoke_test.py）
+│   ├── local_magnet_test.py  # 本机闭环验证：做种端 + 磁力链解析 + 边下边播（无需外网）
+│   ├── local_torrent_test.py # 本地 .torrent 闭环验证（无需外网）
+│   ├── single_file_test.py   # 单文件种子 × 本地种子/磁力链两入口
+│   ├── hybrid_v2_test.py     # 入口矩阵混合 v2 列（两入口端到端）
+│   ├── gui_feature_test.py   # GUI 交互校验：拖放 / 输入历史 / 文件树展开（offscreen）
+│   ├── moov_stream_test.py   # moov 尾部优先端到端验证（ffprobe/ffmpeg 实际探测，无 GUI）
+│   ├── qt_stream_open_test.py# QMediaPlayer（FFmpeg 后端）offscreen 实测开播
+│   ├── download_mgr_test.py  # 下载管理模块验收（约 2 分钟，本机做种闭环）
+│   ├── cache_mode_e2e_test.py# 缓存模式真链路：转正/续传/清理保护（真 libtorrent）
+│   ├── close_lag_test.py     # 关窗异步化与硬超时专项
+│   ├── perf_cache_test.py    # 缓存与吞吐性能专项
+│   ├── wait_timeout_test.py  # 等待超时专项
+│   ├── pieceview_test.py     # 块可用性视图专项
+│   ├── throughput_test.py    # 千兆吞吐专项
+│   ├── concurrency_test.py   # 并发安全专项
+│   ├── inbound_test.py       # 入站能力自检（内网 IP 枚举 / SSDP 探测 / 手动转发文案，纯标准库）
+│   ├── proxycheck_test.py    # 代理可用性自检（SOCKS5 真握手 / 会话接线 / 超时文案根因提示）
+│   ├── live_test.py          # 真实 DHT 磁力链验证（需能访问 BT 网络）
+│   └── pack_check.py         # 打包产物自检（必需组件 / 瘦身是否失效 / 体积哨兵）
 ├── requirements.txt
 └── start.bat             # 一键启动
 ```
@@ -190,7 +204,7 @@ magnet-viewer/
    - 间距：`SP_XS/SM/MD/LG/XL` = 4/8/12/16/24；圆角：`R_SM/MD/LG` = 6/8/12；字号：`FS_CAPTION/FS_BODY/FS_TITLE/FS_DISPLAY`
    - 命名控件：`#topBar` `#urlInput` `#primary` `#ghost` `#playButton` `#card` `#sectionTitle` `#fieldNote` `#hint` `#metaLabel` `#emptyHint` `#thumbList` `#imageViewer` `#playerTitle`（+ `[error="true"]`）`#statusBar` `#fileTree` `#taskList` `#bufferBar` `#shutdownOverlay` `#shutdownLabel` `#shutdownBar`
 5. **自检与对照**：
-   - `.venv/Scripts/python theme_check.py` → `=== 主题门禁：OK ===`（退出码 0 通过 / 1 违规 / 2 环境异常）
+   - `.venv/Scripts/python tests/theme_check.py` → `=== 主题门禁：OK ===`（退出码 0 通过 / 1 违规 / 2 环境异常）
    - `.venv/Scripts/python ui_shot.py [输出目录]` → offscreen 产出 `01-empty / 02-files / 03-preview / 04-downloads` 四张 PNG（默认 `.hermes/shots/`），用于"改造前 / 改造后"人工对照
 
 ## 验证状态
@@ -218,7 +232,7 @@ magnet-viewer/
 | `hybrid_v2_test.py`：**入口矩阵混合 v2 列补齐**（P0-2/P1-1 防回归）：默认产种（meta version=2）× 本地 .torrent / 磁力链两条入口 | 通过（19/19）：造种自检 parser hash==lt.info_hash()（SHA-256 截断 20 字节）、两入口 info_hash 与造种端一致、多文件层级 root/inner、预览下载完成、流服务 206、纯 v2 明确 ValueError（剥 files 键构造）|
 | `download_mgr_test.py`：下载管理模块验收（MVP 7 + 增强 2 + 边界 5 + 流服务安全） | **通过（80/80，退出码 0）**：添加磁力链→下载中 / 暂停（5s 磁盘字节快照不变）/ 恢复（**进度续增**为主判据——暂停快照可能已因分块乱序到达而等于全长，此时字节数本就无法再增，故字节续增降级为条件断言）/ 删除任务（目录释放、重添无残留）/ 退出重启续传（`.tasks.json`+fastresume 读回、上传增量证不重下）/ 完成（落盘=声明值）/ 双任务并发 100% / 限速 ±20% / 边界（重复 hash·per-task 看门狗·防穿越·resume 损坏重建·缓存被清不崩溃）/ 下载中任务流服务安全（分块级可用性，绝不整文件喂零数据） |
 | `perf_cache_test.py`：缓存与吞吐性能专项（本机做种闭环） | **通过（69 项）**：元数据缓存编解码往返/防穿越/**损坏自愈**/LRU 淘汰/命中率统计 / **冷解析 vs 热解析实测（0.31s → 0.005s，同一磁力链二次解析零网络往返）** / 下载任务命中缓存跳过 META_FETCH / **重启恢复 fastresume 含 info 段（不再全体重拉元数据）** / 会话吞吐参数构造值+真会话回读 / **告警响应 A/B（固定 sleep 107ms → wait_for_alert ~0ms）** / DHT 路由表读写容错 / 清理保留名单 |
-| `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python live_test.py` 复核。 |
+| `live_test.py`：公网 DHT | **沙箱内不可用** —— 该环境仅允许 HTTP(S) 走代理，BT/UDP 出站被屏蔽（`dht_nodes` 恒为 0）。请在正常 BT 网络下执行 `python tests/live_test.py` 复核。 |
 
 > 测试退出码约定：`0`=通过，`1`=失败，`2`=SKIP（依赖缺失时显式跳过，绝不假装通过）。
 > 一键回归：`python regression_run.py`（27 套：`contract_check` 契约自检 + `theme_check` 主题门禁 + 6 套重构专项（persist/session/registry/taskops/resolver/preview，假依赖秒级）+ `close_lag_test` 关窗异步化 + 9 套旧测试（含混合 v2 入口矩阵）+ 下载管理模块验收 + 7 套专项护栏（`perf_cache_test` 缓存与吞吐参数 / `wait_timeout_test` 门控与等待超时 / `pieceview_test` 块可用性视图 / `throughput_test` 千兆吞吐 / `concurrency_test` 并发安全 / `inbound_test` 入站能力自检 / `proxycheck_test` 代理可用性自检）；也可 `python regression_run.py smoke` 按名字前缀单跑）。

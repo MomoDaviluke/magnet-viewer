@@ -260,7 +260,7 @@ architecture_review_report.md §2.1）。
 ## 六、主题令牌体系
 
 一手来源：`ui/theme.py` 头注释、`android/.../theme/Theme.kt` 头注释。
-机器门禁：`theme_check.py`（回归套件之一）。
+机器门禁：`tests/theme_check.py`（回归套件之一）。
 
 ### 6.1 桌面端（ui/theme.py）
 
@@ -275,7 +275,7 @@ architecture_review_report.md §2.1）。
   不得 `from ui.theme import X` 固化导入期快照。
 - **间距令牌**：`SP_XS, SP_SM, SP_MD, SP_LG, SP_XL = 4, 8, 12, 16, 24`（8px 网格）；
   控件圆角 8、卡片/分组框/容器圆角 10；正文 14px、次级 13px、标题 16px。
-- **硬规则（theme_check.py 强制）**：
+- **硬规则（tests/theme_check.py 强制）**：
   1. `ui/theme.py` 之外任何 `ui/*.py` **不得出现 hex 色值**；
   2. 不得调 `setStyleSheet`——局部样式一律 `setObjectName` + theme.py 内
      QSS 规则（动态属性选择器，改属性后 `style().unpolish/polish`）；

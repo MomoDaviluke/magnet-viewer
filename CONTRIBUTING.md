@@ -58,7 +58,7 @@ cd android
 
 ## 二、测试规范
 
-- **套件构成**：`regression_run.py` 的 `SUITES` 清单为准，当前 **27 套**
+- **套件构成**：`regression_run.py` 的 `SUITES` 清单为准（套件脚本在 `tests/`），当前 **27 套**
   （第 1 套 `contract_check` 为对外契约自检，秒级，必须最先跑；含旧测试
   兼容契约 8 套、下载管理验收、GUI/主题门禁、并发/性能/入站/代理专项等）。
 - **退出码语义**（全项目统一约定，README 与 regression_run.py 头注释同源）：
@@ -109,7 +109,7 @@ cd android
    **必须 `log_exception` + 注释说明为何宽泛**——`except Exception: pass`
    在本项目是明令禁止的反模式（logutil.py 头注释登记了它掩盖过的三起
    真实缺陷）。异常层级 `core/exceptions.py` 实施中，新代码优先用其类型。
-4. **UI 裸 hex / setStyleSheet 禁令**（theme_check.py 机器门禁强制）：
+4. **UI 裸 hex / setStyleSheet 禁令**（tests/theme_check.py 机器门禁强制）：
    `ui/theme.py` 之外任何 `ui/*.py` 不得出现 hex 色值、不得调
    `setStyleSheet`；局部样式用 `setObjectName` + theme.py QSS 规则；
    尺寸走间距令牌 `SP_XS/SM/MD/LG/XL = 4/8/12/16/24`；自绘控件必须在
@@ -135,7 +135,7 @@ build.bat
 - 产物：`dist\MagnetViewer\MagnetViewer.exe`（onedir，整目录拷走即可运行）；
   spec 为 `magnet-viewer.spec`（含瘦身过滤黑名单），onefile 备用
   `magnet-viewer-onefile.spec`。
-- `pack_check.py` 把「砍过头（缺 DLL）」和「没砍动（体积回升）」两类
+- `tests/pack_check.py` 把「砍过头（缺 DLL）」和「没砍动（体积回升）」两类
   打包回归钉在交付之前——退出码沿用 0/1/2 约定（2 = 产物目录不存在，
   还没打包，不假装通过）。**改了依赖、Qt 版本或 spec 过滤名单后必须
   重跑打包 + pack_check**。
