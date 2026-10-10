@@ -27,10 +27,14 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog,
                                QLineEdit, QMessageBox, QPushButton,
                                QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
-from core.cache_guard import (CACHE_MARKER, clear_cache_contents,
-                              ensure_cache_dir, guard_ok_for_cleanup)
-from core.cache_mode import PREVIEW_CACHE_MODES
+# §2.2 UI 依赖规则：ui/* 只准 import core.models / core.config / core.fetcher
+# （facade）/ core.logutil。cache_guard 的守卫/清理函数与 cache_mode 常量经
+# facade 模块级再导出取用（它们接受显式 path 参数——作用于「编辑框里尚未
+# 保存的新目录」，不是 SessionManager 成员操作，故不走委托方法）。
 from core.config import AppConfig
+from core.fetcher import (CACHE_MARKER, PREVIEW_CACHE_MODES,
+                          clear_cache_contents, ensure_cache_dir,
+                          guard_ok_for_cleanup)
 from ui.theme import (SP_LG, SP_MD, SP_SM, THEME_MODES, apply_theme)
 
 PROXY_LABELS = [("none", "不使用代理（直连）"),
