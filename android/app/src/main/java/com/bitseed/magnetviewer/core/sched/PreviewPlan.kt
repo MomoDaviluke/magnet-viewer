@@ -122,7 +122,12 @@ fun ascendingPlan(
 
 /**
  * 按字节区间即时点播（文件内相对偏移，[endByteExcl] 为开区间）；
- * 单次点播上限 [LOOKAHEAD_PIECES] 块，且**不移动顺序锚点**。
+ * 单次点播上限与顺序窗口**同源**（16MB 字节预算换算块数，夹 [4,60]，
+ * 对齐桌面 core/scheduler.py:528-531），且不移动顺序锚点。
+ *
+ * C21 修复：旧实现用 [LOOKAHEAD_PIECES]=60 块的**块数口径**封顶——4MB 块下
+ * 一次拖动点播 = 240MB 全 ASAP 洪泛（正是桌面 plan/07 阶段 1 实证修掉的
+ * 「连续前缀凑不出、缓冲恒 0.0%」成因）。改为 [windowPieces] 字节口径。
  */
 fun rangePlan(
   file: TorrentFile,
@@ -135,7 +140,10 @@ fun rangePlan(
   val pl = pieceLength.toLong()
   val first = maxOf(file.startPiece.toLong(), file.startPiece.toLong() + maxOf(0L, startByte) / pl)
   var last = minOf(file.endPiece.toLong(), file.startPiece.toLong() + maxOf(0L, endByteExcl - 1) / pl)
-  last = minOf(last, first + LOOKAHEAD_PIECES - 1)
+  // 与顺序窗口同源：16MB 字节预算换算的块数（夹 [4,60]）。
+  // 4MB 块 → 4 块（16MB）；16KB 块 → 60 块（仍是旧行为的 960KB）。
+  val n = maxOf(1, windowPieces(pieceLength))
+  last = minOf(last, first + n.toLong() - 1)
   if (last < first) return emptyList()
   return (first..last).map { p -> PieceDeadline(p.toInt(), ((p - first) * stepMs).toInt()) }
 }

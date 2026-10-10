@@ -108,6 +108,15 @@ fun isTaskCompleted(
 fun stateAfterResume(download: Boolean, selected: List<String>): String =
   if (download || selected.isNotEmpty()) STATE_DOWNLOADING else STATE_PAUSED
 
+/**
+ * fastresume **周期脏写**的目标筛选（C41，对齐桌面 `core/session.py:823-827`
+ * `resume_sweep`）：只有「下载型 + 正在下载中」的任务进周期脏写名单——
+ * 暂停/完成/失败态没有新进度，等元数据的任务 result 未就绪（`requestResumeDataFor`
+ * 的 C44 守卫同样会挡下，这里按桌面 sweep 的口径先行筛掉）。
+ */
+fun resumeSweepNeeded(download: Boolean, state: String): Boolean =
+  download && state == STATE_DOWNLOADING
+
 /** 「仅解析任务：未选择要下载的文件」的用户提示（VM 暴露给屏幕的字段见 `MagnetUiState.parseOnlyNote`）。 */
 const val PARSE_ONLY_NO_SELECTION_NOTE: String =
   "仅解析任务：未选择要下载的文件（点「转正」或预览某个文件才会开始下载）"

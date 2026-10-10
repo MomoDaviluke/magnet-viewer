@@ -6,6 +6,7 @@ import com.bitseed.magnetviewer.core.http.contentTypeFor
 import com.bitseed.magnetviewer.core.http.parseRangeHeader
 import com.bitseed.magnetviewer.core.http.unsatisfiedRangeHeader
 import com.bitseed.magnetviewer.core.model.PieceMap
+import com.bitseed.magnetviewer.core.model.contiguousBytesOf
 import com.bitseed.magnetviewer.core.model.rangeAvailableOf
 import com.bitseed.magnetviewer.core.model.readyUntilOf
 import com.bitseed.magnetviewer.core.model.safeRelPath
@@ -100,6 +101,15 @@ class StreamServer(
    * 现在改成有界队列 + `AbortPolicy`：拒绝时由 accept 循环回 **503 +
    * `Retry-After`**（可重试），绝不静默断连。队列给 16 —— 播放器正常只会
    * 并发 1~3 个请求，留出足够吸收突发。
+   *
+   * **C32（对齐桌面 core/stream_server.py:315-354 等待/服务两类额度分账）**：
+   * 本池只承担「请求解析 + 无需等待即可服务」的快路径；一旦判定请求需要
+   * 等数据（区间未就绪），就移交 [waitPool]，服务线程**立即归还**——
+   * 旧实现里等待（最长 20s）直接占住服务线程，8 个慢等待者就能饿死所有
+   * 可即时服务的请求（桌面 S2 专项修掉的正是这个）。与桌面的差距：桌面是
+   * 每连接一线程 + 信号量记账（serving 16 / waiting 64），安卓是有界双池
+   * （serving maxConcurrency / waiting maxConcurrency×4，同 ×4 比例派生）；
+   * 准入语义一致（等待不占服务额度、超限立即 503 overloaded）。
    */
   private val pool =
     ThreadPoolExecutor(
@@ -108,6 +118,22 @@ class StreamServer(
       0L,
       TimeUnit.MILLISECONDS,
       ArrayBlockingQueue(maxOf(1, queueCapacity)),
+      ThreadPoolExecutor.AbortPolicy(),
+    )
+
+  /**
+   * 等待池（C32）：只跑「等数据就绪 → 写响应」的慢路径。线程按需创建、
+   * 空闲 60s 回收（等待线程的代价只是一个休眠线程，与桌面 wait_limiter
+   * 的休眠 handler 线程同构）；饱和（maxConcurrency×4）即 503 overloaded。
+   */
+  private val waitPool =
+    ThreadPoolExecutor(
+      0,
+      maxOf(1, maxConcurrency) * 4,
+      60L,
+      TimeUnit.SECONDS,
+      java.util.concurrent.SynchronousQueue(),
+      { r -> Thread(r, "stream-wait").apply { isDaemon = true } },
       ThreadPoolExecutor.AbortPolicy(),
     )
   private val running = AtomicBoolean(false)
@@ -209,6 +235,9 @@ class StreamServer(
     running.set(false)
     runCatching { server.close() }
     pool.shutdownNow()
+    // C32：等待线程也要中断（waitForReady 捕获 InterruptedException → 立即交出
+    // 已就绪前缀返回，等效桌面 stop_evt 的「等待中的请求立即交出、不耗满 20s」）
+    waitPool.shutdownNow()
     writeWatchdog.shutdownNow()
     acceptThread?.interrupt()
   }
@@ -221,61 +250,126 @@ class StreamServer(
 
   // ---------------------------------------------------------------- 请求处理
 
+  /**
+   * 服务额度信号量（C32，对齐桌面 `stream_server.py:542` `limiter = BoundedSemaphore(16)`）：
+   * **写 body** 的全局并发上限（快路径与服务线程、等待线程共用一个口径），
+   * 抢不到即 503 overloaded——与桌面 `_enter_serving` 返回 False 的分支同语义。
+   */
+  private val servingPermits = java.util.concurrent.Semaphore(maxOf(1, maxConcurrency))
+
+  /** 转入「写 body」阶段（对齐桌面 `_enter_serving`）：额度已满 → 503 overloaded。 */
+  private fun enterServing(out: OutputStream): Boolean {
+    if (servingPermits.tryAcquire()) return true
+    writeNotReady(out, why = "overloaded")
+    return false
+  }
+
+  /**
+   * C32 判定：该请求**是否需要等数据**（就绪快照口径，与 waitForReady 首轮判定同源）。
+   * true → 移交等待池（服务线程立即归还，对齐桌面「等待不占服务额度」）；
+   * false → 快路径就地服务（其后的 waitForReady 首轮即返回，不阻塞）。
+   * 可用性判不出（PieceMap null）按「需要等」处理（绝不降级为整文件可用）。
+   */
+  private fun needsWait(file: File, rangeHeader: String?): Boolean {
+    val logical = file.length()
+    return when (val spec = parseRangeHeader(rangeHeader, logical)) {
+      is RangeSpec.Unsatisfiable -> false
+      is RangeSpec.None -> {
+        val pm = pieceMapOf(file) ?: return true
+        !rangeAvailableOf(pm, 0L, minOf(logical, openingMinBytes))
+      }
+      is RangeSpec.Bounded -> {
+        if (spec.start >= logical) return false
+        val end = if (spec.openEnded) minOf(logical - 1, spec.start + openEndedCapBytes - 1) else spec.endInclusive
+        val pm = pieceMapOf(file) ?: return true
+        !rangeAvailableOf(pm, spec.start, end + 1)
+      }
+    }
+  }
+
   private fun handle(socket: Socket) {
+    var handedOff = false
     try {
-      socket.use { s ->
-        s.tcpNoDelay = true
-        // S5（2026-09-18）：读请求阶段的 socket 超时 —— 防「连上却不发请求」的
-        // 僵尸连接**永久占住线程**。固定线程池下 N 条这种连接即可冻结整个服务，
-        // 且并发上限根本约束不到它们（限额是在请求处理里才抢的）。
-        // 取值对齐桌面 `_StreamHandler.timeout = 15s`；测试可经构造参数调小。
-        s.soTimeout = maxOf(1, readTimeoutMs)
-        val input = s.getInputStream().buffered()
-        val requestLine = readLine(input) ?: return
-        val headers = readHeaders(input)
-        // 请求读完 → **取消读超时**：写 body 期间播放器可能长时间暂停不读，
-        // 带超时的 write 到点会把传输截断（与桌面 `_send_file` 同款处理）。
-        // 但写阶段完全无超时的代价是：对端停止读取时 write 永久阻塞在 TCP
-        // 发送缓冲满，固定线程池被逐步占满（soTimeout 管不了写）。改为
-        // 「soTimeout=0 + 写空闲看门狗」：60s 无写出由 sweepWrites close 连接，
-        // 阻塞中的 write 抛 SocketException 走下方 catch 收场。
-        s.soTimeout = 0
-        val lastWriteNs = AtomicLong(System.nanoTime())
-        activeWrites[s] = lastWriteNs
-        val out = FeedDogOutputStream(BufferedOutputStream(s.getOutputStream(), 64 * 1024), lastWriteNs)
-        val parts = requestLine.trim().split(" ")
-        if (parts.size < 2) {
-          writeStatus(out, 400, "Bad Request")
-          return
+      socket.tcpNoDelay = true
+      // S5（2026-09-18）：读请求阶段的 socket 超时 —— 防「连上却不发请求」的
+      // 僵尸连接**永久占住线程**。固定线程池下 N 条这种连接即可冻结整个服务，
+      // 且并发上限根本约束不到它们（限额是在请求处理里才抢的）。
+      // 取值对齐桌面 `_StreamHandler.timeout = 15s`；测试可经构造参数调小。
+      socket.soTimeout = maxOf(1, readTimeoutMs)
+      val input = socket.getInputStream().buffered()
+      val requestLine = readLine(input) ?: return
+      val headers = readHeaders(input)
+      // 请求读完 → **取消读超时**：写 body 期间播放器可能长时间暂停不读，
+      // 带超时的 write 到点会把传输截断（与桌面 `_send_file` 同款处理）。
+      // 但写阶段完全无超时的代价是：对端停止读取时 write 永久阻塞在 TCP
+      // 发送缓冲满，固定线程池被逐步占满（soTimeout 管不了写）。改为
+      // 「soTimeout=0 + 写空闲看门狗」：60s 无写出由 sweepWrites close 连接，
+      // 阻塞中的 write 抛 SocketException 走下方 catch 收场。
+      socket.soTimeout = 0
+      val lastWriteNs = AtomicLong(System.nanoTime())
+      activeWrites[socket] = lastWriteNs
+      val out = FeedDogOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024), lastWriteNs)
+      val parts = requestLine.trim().split(" ")
+      if (parts.size < 2) {
+        writeStatus(out, 400, "Bad Request")
+        return
+      }
+      val method = parts[0].uppercase(Locale.ROOT)
+      val target = parts[1]
+      if (method != "GET" && method != "HEAD") {
+        writeStatus(out, 405, "Method Not Allowed")
+        return
+      }
+      if (!authorized(target, headers)) {
+        writeStatus(out, 403, "Forbidden")
+        return
+      }
+      val resolved = resolvePath(target)
+      if (resolved == null) {
+        writeStatus(out, 403, "Forbidden")
+        return
+      }
+      val file = File(resolved)
+      if (!file.isFile) {
+        writeStatus(out, 404, "Not Found")
+        return
+      }
+      val rangeHeader = headers["range"]
+      val sendBody = method == "GET"
+      // C32（对齐桌面 stream_server.py:315-354 两类额度分账）：需要等数据的请求
+      // 移交等待池，**服务线程立即归还**——8 个慢等待者不再饿死可即时服务的请求。
+      // 等待池饱和（maxConcurrency×4）→ 503 overloaded（绝不无界排队）。
+      if (needsWait(file, rangeHeader)) {
+        try {
+          waitPool.execute { serveOnWaitThread(socket, out, file, rangeHeader, sendBody) }
+          handedOff = true
+        } catch (e: RejectedExecutionException) {
+          writeNotReady(out, why = "overloaded")
         }
-        val method = parts[0].uppercase(Locale.ROOT)
-        val target = parts[1]
-        if (method != "GET" && method != "HEAD") {
-          writeStatus(out, 405, "Method Not Allowed")
-          return
-        }
-        if (!authorized(target, headers)) {
-          writeStatus(out, 403, "Forbidden")
-          return
-        }
-        val resolved = resolvePath(target)
-        if (resolved == null) {
-          writeStatus(out, 403, "Forbidden")
-          return
-        }
-        val file = File(resolved)
-        if (!file.isFile) {
-          writeStatus(out, 404, "Not Found")
-          return
-        }
-        serveFile(out, file, headers["range"], sendBody = method == "GET")
+      } else {
+        serveFile(out, file, rangeHeader, sendBody)
       }
     } catch (e: Throwable) {
       // 播放器中断请求属正常行为（连接被对端关闭/超时），静默即可。
       // 写空闲看门狗 close 连接引发的 SocketException 也走这里收场。
       log("连接异常（忽略）：${e.javaClass.simpleName}: ${e.message}")
     } finally {
+      if (!handedOff) {
+        activeWrites.remove(socket)
+        runCatching { socket.close() }
+      }
+    }
+  }
+
+  /** 等待池线程：慢路径（等数据就绪 → 写响应）。socket 由本线程负责关闭。 */
+  private fun serveOnWaitThread(socket: Socket, out: OutputStream, file: File, rangeHeader: String?, sendBody: Boolean) {
+    try {
+      serveFile(out, file, rangeHeader, sendBody)
+    } catch (e: Throwable) {
+      log("等待线程连接异常（忽略）：${e.javaClass.simpleName}: ${e.message}")
+    } finally {
       activeWrites.remove(socket)
+      runCatching { socket.close() }
     }
   }
 
@@ -302,18 +396,35 @@ class StreamServer(
         // 渐进服务：拿到「从 start 起真正就绪到哪」，而不是死等整段落盘。
         val ready = waitForReady(file, start, end + 1, logical)
         if (ready <= start) {
-          writeNotReady(out, readyBytes = ready)
+          // C33（对齐桌面 core/stream_server.py:433-438）起点无数据的细分：
+          // 整文件连头部前缀都没有 → 503（可重试）；有前缀但**请求起点**未就绪 → 416
+          // （区间不满足，播放器据此换请求而不是无脑重试同一段）。
+          val pm = pieceMapOf(file)
+          val contig = if (pm != null) contiguousBytesOf(pm) else 0L
+          if (contig > 0L) {
+            writeStatus(
+              out, 416, "Range Not Satisfiable",
+              listOf("Content-Range" to unsatisfiedRangeHeader(logical), "X-Why" to "range"),
+            )
+          } else {
+            writeNotReady(out, readyBytes = ready)
+          }
           return
         }
-        if (ready >= end + 1) {
-          // 目标区间已就绪：开区间可以顺带多发一些（`ready` 是以 logical 为界
-          // 的连续前缀，这是既有语义，别退化）；闭区间必须停在请求上界。
-          if (spec.openEnded) end = maxOf(end, minOf(logical - 1, ready - 1))
-        } else {
-          // 就绪不足：只回就绪部分 —— **合法短区间**，Content-Length 说实话。
-          end = ready - 1
+        if (!enterServing(out)) return
+        try {
+          if (ready >= end + 1) {
+            // 目标区间已就绪：开区间可以顺带多发一些（`ready` 是以 logical 为界
+            // 的连续前缀，这是既有语义，别退化）；闭区间必须停在请求上界。
+            if (spec.openEnded) end = maxOf(end, minOf(logical - 1, ready - 1))
+          } else {
+            // 就绪不足：只回就绪部分 —— **合法短区间**，Content-Length 说实话。
+            end = ready - 1
+          }
+          writeRange(out, file, start, end, logical, sendBody)
+        } finally {
+          servingPermits.release()
         }
-        writeRange(out, file, start, end, logical, sendBody)
       }
     }
   }
@@ -336,10 +447,15 @@ class StreamServer(
       writeNotReady(out)
       return
     }
-    if (ready >= logical) {
-      writeFull(out, file, logical, sendBody)
-    } else {
-      writeRange(out, file, 0, ready - 1, logical, sendBody)
+    if (!enterServing(out)) return
+    try {
+      if (ready >= logical) {
+        writeFull(out, file, logical, sendBody)
+      } else {
+        writeRange(out, file, 0, ready - 1, logical, sendBody)
+      }
+    } finally {
+      servingPermits.release()
     }
   }
 

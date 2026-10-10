@@ -37,6 +37,16 @@ const val TASK_FILE_NAME: String = ".tasks.json"
 /** 清单结构版本（与桌面 `SCHEMA_VERSION` 同为 1；版本不符一律拒读，静默重建）。 */
 const val TASK_SCHEMA_VERSION: Int = 1
 
+/**
+ * 共享契约版本（Wave 4 / 4.3，见 `shared/task-schema.json`；对齐桌面
+ * `core/taskstore.py` 的 `SHARED_SCHEMA_VERSION`）。
+ *
+ * 与 [TASK_SCHEMA_VERSION]（清单**结构**版本，不符即拒读）是两回事：这里标记的是
+ * 「这份文件遵循的跨端字段契约」版本。[encodeTasks] 恒写当前值；[loadTasks]
+ * **缺字段容忍**（旧文件 = 版本 0），静默兼容、绝不因缺字段拒读（B3 语义）。
+ */
+const val SHARED_SCHEMA_VERSION: Int = 1
+
 /** fastresume 子目录（桌面 `core/resume.py: RESUME_SUBDIR` 同名同布局）。 */
 const val RESUME_SUBDIR: String = ".resume"
 
@@ -170,6 +180,8 @@ fun encodeTasks(tasks: Map<String, TaskRecord>): String {
     Jv.Obj(
       linkedMapOf(
         "version" to Jv.Num(TASK_SCHEMA_VERSION.toDouble()),
+        // 4.3 共享数据模型：顶层 schema_version（loadTasks 缺字段容忍，旧文件=版本 0）
+        "schema_version" to Jv.Num(SHARED_SCHEMA_VERSION.toDouble()),
         "tasks" to Jv.Obj(LinkedHashMap(tasks.mapValues { encodeTask(it.value) })),
       )
     )
@@ -190,11 +202,25 @@ fun encodeTasks(tasks: Map<String, TaskRecord>): String {
  * - 同一目标文件的写操作在进程内**串行化**（按绝对路径加锁）：并发调用只会看到完整快照。
  */
 fun atomicWriteBytes(target: File, data: ByteArray): File {
-  val lock = writeLocks.computeIfAbsent(target.absolutePath) { Any() }
+  val lock = writeLockFor(target.absolutePath)
   return synchronized(lock) { writeLocked(target, data) }
 }
 
-private val writeLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+/**
+ * 写锁分片（C45，对齐桌面 core/taskstore.py:165-189 `_WRITE_SHARDS=64`）：
+ * 旧实现按路径建 ConcurrentHashMap 锁——`.meta` 写也走此路径（MetaCache），
+ * 锁对象随「看过的种子数」**无界增长**（桌面注释点名正是安卓这个做法后改的分片）。
+ * 同路径恒落同一片（互斥语义不变），代价是不同路径偶发共锁（写盘频率极低，无影响）。
+ */
+private const val WRITE_SHARDS = 64
+private val WRITE_LOCKS = Array(WRITE_SHARDS) { Any() }
+
+/** 路径 → 分片锁（同路径恒得同一把；internal 供单测断言「有界 + 确定性」）。 */
+internal fun writeLockFor(path: String): Any =
+  WRITE_LOCKS[(path.lowercase().hashCode() and Int.MAX_VALUE) % WRITE_SHARDS]
+
+/** 分片数（测试可见；对齐桌面 `_WRITE_SHARDS`）。 */
+internal const val WRITE_LOCK_SHARDS: Int = WRITE_SHARDS
 
 private fun writeLocked(target: File, data: ByteArray): File {
   val dir = target.parentFile ?: throw IOException("目标没有父目录：$target")
@@ -309,6 +335,8 @@ fun loadTasks(cacheDir: File, warn: (String) -> Unit = {}): Map<String, TaskReco
     warn("任务清单版本不符（${obj.strOr("version", "?")} ≠ $TASK_SCHEMA_VERSION），拒读并重建")
     return emptyMap()
   }
+  // 4.3 共享数据模型：顶层 `schema_version` **不参与判定**——缺失（旧文件 = 版本 0）
+  // 或取值不同都静默容忍（对齐桌面 load_tasks），只有结构版本 version 不符才拒读。
   val raw = obj.field("tasks")
   val tasksObj = raw.asObj()
   if (tasksObj == null) {

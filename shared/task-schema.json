@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://magnet-viewer.local/schemas/task-schema.json",
+  "title": "magnet-viewer 任务清单共享数据模型（Wave 4 / 4.3）",
+  "description": "双端（桌面 core/taskstore.py 与安卓 data/TaskStore.kt）`.tasks.json` 的共享契约。字段面 = 两端交集（14 个桌面字段）+ 安卓扩展并集（download）。顶层文档 version=1 为结构版本（两端同值、不符拒读）；schema_version 为本契约版本（save 写入，load 缺字段容忍=旧文件、静默兼容）。",
+  "type": "object",
+  "required": ["version", "tasks"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "清单结构版本（桌面 SCHEMA_VERSION / 安卓 TASK_SCHEMA_VERSION 同为 1；不符一律拒读、静默重建）。"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "共享契约版本（shared/task-schema.json 的版本）。save 时写 1；load 缺该字段按旧文件（版本 0）容忍，绝不因缺字段拒读。"
+    },
+    "tasks": {
+      "type": "object",
+      "description": "键 = info_hash（40/64 位 hex 小写，normalize_info_hash 强校验，防 fastresume 文件名注入）；值 = 单条任务记录。",
+      "additionalProperties": { "$ref": "#/definitions/task" }
+    }
+  },
+  "definitions": {
+    "task": {
+      "type": "object",
+      "required": ["info_hash"],
+      "properties": {
+        "info_hash": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+          "description": "唯一键（v1 SHA-1 40 hex / v2 SHA-256 64 hex，小写）。两端同名同校验。"
+        },
+        "source": {
+          "type": "string",
+          "description": "来源原文：magnet: URI 或 .torrent 路径；缺失时桌面归一化为 \"unknown\"。"
+        },
+        "name": {
+          "type": "string",
+          "description": "资源显示名；缺失时两端回退 info_hash。"
+        },
+        "total_size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "总字节数（排除 .pad；桌面 task_from_result 用 int()，安卓 Long）。"
+        },
+        "files": {
+          "type": "array",
+          "description": "全量文件表（含 .pad——索引必须与 libtorrent 一致，重启后靠它直接展示清单）。",
+          "items": { "$ref": "#/definitions/file" }
+        },
+        "selected": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "勾选文件路径集（MVP 默认全选 = 全部可见文件路径）。"
+        },
+        "state": {
+          "type": "string",
+          "description": "任务状态，取值与两端 core/states 的 STATE_* 常量一致（QUEUED/META_FETCH/VALIDATE/DOWNLOADING/PAUSED/COMPLETED/STOPPED/FAILED/SEEDING/DELETED/READY/unknown）；磁盘值不校验枚举（B3：逐字段钳制、非法不炸）。"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3,
+          "description": "任务优先级（0..3，两端 clampTaskPriority 同口径）。"
+        },
+        "save_path": {
+          "type": "string",
+          "description": "落盘目录；恢复时经 safe_task_save_path / safeTaskSavePath 消毒（逃出受管范围回落默认目录）。"
+        },
+        "error": {
+          "type": "string",
+          "description": "失败原因文本（正常态为空串）。"
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "重试计数。"
+        },
+        "created_at": {
+          "type": ["number", "null"],
+          "description": "创建时刻（epoch 秒，浮点；桌面 time.time() / 安卓 System.currentTimeMillis()/1000.0）。null=未知。"
+        },
+        "finished_at": {
+          "type": ["number", "null"],
+          "description": "完成时刻（epoch 秒；未完成为 null）。"
+        },
+        "seed": {
+          "type": "boolean",
+          "description": "完成后是否做种（决策 D3 默认 false；桌面 normalize_task 兼容 1/\"true\"/\"yes\" 等写法）。"
+        },
+        "download": {
+          "type": "boolean",
+          "description": "安卓扩展字段（桌面 review 任务根本不进清单，安卓把「仅解析」也持久化并靠该字段恢复为 upload_mode；桌面读取时忽略未知键，双端互读兼容。缺省 true。"
+        }
+      },
+      "additionalProperties": false
+    },
+    "file": {
+      "type": "object",
+      "required": ["index", "path", "size", "offset", "start_piece", "end_piece"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "description": "libtorrent 文件索引（与 file_progress 对齐）。" },
+        "path": { "type": "string", "description": "相对路径（含根段；两端均经 safeRelPath 净化防穿越）。" },
+        "size": { "type": "integer", "minimum": 0, "description": "文件字节数。" },
+        "offset": { "type": "integer", "minimum": 0, "description": "在 torrent 内的起始字节偏移。" },
+        "start_piece": { "type": "integer", "minimum": 0, "description": "起始块（闭区间）。" },
+        "end_piece": { "type": "integer", "minimum": 0, "description": "结束块（闭区间）。" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

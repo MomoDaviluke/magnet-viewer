@@ -329,6 +329,9 @@ class BtEngine(private val listener: Listener) : EngineControl {
   /** 预览缓存模式：`convert`（默认，桌面 config 默认值）/ `hold`；只由 setPreviewCacheMode 改。 */
   @Volatile private var cacheMode: String = PREVIEW_CACHE_CONVERT
 
+  /** 上次 fastresume 周期脏写时刻（毫秒；C41，对齐桌面 session.py `last_resume_sweep`）。 */
+  @Volatile private var lastResumeSweepMs = 0L
+
   // ---- 元数据阶段（解析）状态：超时判定用 ----
   @Volatile private var metaFetching = false
   @Volatile private var metaFetchStartMs = 0L
@@ -543,15 +546,21 @@ class BtEngine(private val listener: Listener) : EngineControl {
   }
 
   /**
-   * 退出前尽力让 fastresume 落盘：请求 + **有界等待**（默认 1.5s）文件真的出现。
+   * 退出前尽力让 fastresume 落盘：请求 + **有界等待**（默认 3s，对齐桌面
+   * `persist.py:257` drain 预算；C46 建议随 C42 修复同步放宽）。
    * 超时只告警，绝不阻断退出（下次启动按「无 resume」处理，元数据会重新拉）。
    *
    * 审计 2026-09-29（P2）：原先只给焦点任务落 fastresume（`currentHandle ?: return`），
    * 多任务下从未经历暂停/预览/转正事件的非焦点任务没有任何落盘触发点
    * （[requestResumeDataFor] 只在 pause/resume/preview/promote 时调用），正常退出
    * 也丢续传。改为对**全部下载型任务**逐个请求 + 统一等待（预算不变，均摊给多任务）。
+   *
+   * C42（对齐桌面 core/session.py:550-570）：旧实现在收集名单时**跳过已有
+   * fastresume 文件的任务**（`target.isFile → continue`）——只补「从未落过盘」的，
+   * 已有旧文件的不刷新。桌面语义是「周期脏写保证新（C41），退出 drain **兜底全部**」：
+   * 事件点之外新下的进度，退出时同样要重新请求一次。去掉跳过逻辑。
    */
-  private fun drainResumeBeforeShutdown(timeoutMs: Long = 1500L) {
+  private fun drainResumeBeforeShutdown(timeoutMs: Long = 3000L) {
     val root = cacheRoot ?: return
     // 锁内只收集待落盘名单（ih + target 路径），请求与等待都在锁外——
     // requestResumeDataFor 自己不取 taskLock，等待轮询也不该占着锁。
@@ -564,12 +573,18 @@ class BtEngine(private val listener: Listener) : EngineControl {
         if (!t.download) continue   // 仅解析任务无下载进度，fastresume 无续传价值
         val h = t.handle ?: continue
         if (!isHandleUsable(h)) continue
+        // 对齐桌面 shutdown 的 pending 过滤（session.py:553-555）：result 就绪才值得请求
+        // （requestResumeDataFor 的 C44 守卫同样会挡下它，这里不收集免做无谓等待）
+        if (t.result == null) continue
         val target = ResumeStore.path(root, ih) ?: continue
-        if (target.isFile && target.length() > 0) continue  // 已有落盘，不重复
         pending.add(Pending(ih, target))
       }
     }
     if (pending.isEmpty()) return
+    // 记下各目标文件的**请求前 mtime**（不存在 = 0）：C42 之后 drain 会刷新已有文件，
+    // 只有 mtime **变新**才算「本次落盘完成」——否则旧文件会让等待循环第一拍就误判成功。
+    val baseline = HashMap<String, Long>(pending.size)
+    for (p in pending) baseline[p.ih] = if (p.target.isFile) p.target.lastModified() else 0L
     synchronized(taskLock) {
       for (p in pending) {
         taskMap[p.ih]?.let { requestResumeDataFor(it, "会话关闭") }
@@ -583,7 +598,8 @@ class BtEngine(private val listener: Listener) : EngineControl {
       while (it.hasNext()) {
         val ih = it.next()
         val f = ResumeStore.path(root, ih)
-        if (f != null && f.isFile && f.length() > 0) {
+        val base = baseline[ih] ?: 0L
+        if (f != null && f.isFile && f.length() > 0 && f.lastModified() > base) {
           log("退出前 fastresume 已确认落盘：${f.path}")
           it.remove()
         }
@@ -1303,18 +1319,29 @@ class BtEngine(private val listener: Listener) : EngineControl {
       null
     }
 
+  /** [buildRestoreParams] 的结果：参数 + 是否注入了 .meta 缓存（C43：加种失败要能摘缓存退基线）。 */
+  private data class RestoreParams(val atp: AddTorrentParams, val metaInjected: Boolean)
+
   /**
    * 按恢复计划拼 `AddTorrentParams`。
    *
    * resume 参数优先（含 info-hash / 分块位图 / 文件优先级），但**磁力链里的
    * tracker 与 `x.pe` peer 提示要保住**（`AddTorrentParams` 没有 url 访问器，
    * 所以用「磁力链参数 + resume 参数」合并的方式补回来）。
+   *
+   * C43（对齐桌面 core/persist.py:399-402，性能专项 P-1c）：**没有续传数据可丢**
+   * （resume 缺失/损坏）时回退查 `.meta` 元数据缓存注入 ti——免掉一次
+   * 「重启 = 全体任务重新向网络索取元数据」的雪崩（90s 超时风险）。
+   * 有 resume 时**绝不注入**：续传数据里的分块位图必须保住，且混合 v1+v2 种子的
+   * 续传数据钉着两个 info-hash，塞只带 v1 的 ti 会撞 `mismatching info-hash`
+   * （桌面 2.1.1 实测，同 persist.py:394-398 注释）。
    */
   private fun buildRestoreParams(
     plan: RestorePlan,
     resume: AddTorrentParams?,
     dir: File,
-  ): AddTorrentParams? {
+    cacheDir: File?,
+  ): RestoreParams? {
     if (plan.source == RestoreSource.TORRENT_FILE) {
       val ti =
         try {
@@ -1326,7 +1353,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
       val atp = resume ?: AddTorrentParams()
       atp.setTorrentInfo(ti)
       atp.setSavePath(dir.path)
-      return atp
+      return RestoreParams(atp, metaInjected = false)
     }
     val magnet =
       try {
@@ -1345,8 +1372,15 @@ class BtEngine(private val listener: Listener) : EngineControl {
     if (resume != null) {
       val peers = magnet.peers()
       if (!peers.isNullOrEmpty()) atp.peers(peers)
+      return RestoreParams(atp, metaInjected = false)
     }
-    return atp
+    // 无 resume（缺失或损坏降级）→ P-1c：查 .meta 缓存
+    val cachedTi = cacheDir?.let { readCachedTorrentInfo(it, plan.infoHash) }
+    if (cachedTi != null) {
+      alignParamsToTorrentInfo(atp, cachedTi)
+      return RestoreParams(atp, metaInjected = true)
+    }
+    return RestoreParams(atp, metaInjected = false)
   }
 
   /**
@@ -1420,8 +1454,8 @@ class BtEngine(private val listener: Listener) : EngineControl {
         out.add(RestoredTask(plan.infoHash, t.name, STATE_FAILED, error = msg, note = plan.note))
         continue
       }
-      val atp = buildRestoreParams(plan, decoded, dir)
-      if (atp == null) {
+      val built = buildRestoreParams(plan, decoded, dir, cacheDir)
+      if (built == null) {
         failed++
         val msg = "重启恢复失败：来源不可用/参数构造失败"
         log(msg)
@@ -1429,14 +1463,31 @@ class BtEngine(private val listener: Listener) : EngineControl {
         out.add(RestoredTask(plan.infoHash, t.name, STATE_FAILED, error = msg, note = plan.note))
         continue
       }
+      var atp = built.atp
       if (plan.pauseAfterAdd) {
         // 加种即暂停：不留「加完先下一会儿再暂停」的窗口
         atp.setFlags(atp.getFlags().or_(TorrentFlags.PAUSED))
       }
       val added =
         try {
-          val ec = ErrorCode(org.libtorrent4j.swig.error_code())
-          val h = SessionHandle(manager.swig()).addTorrent(atp, ec)
+          var ec = ErrorCode(org.libtorrent4j.swig.error_code())
+          var h = SessionHandle(manager.swig()).addTorrent(atp, ec)
+          if (ec.isError && built.metaInjected) {
+            // C43（对齐加种路径 addMagnet 的同款兜底）：.meta 注入失败（如混合种子的
+            // info-hash 未能对齐）→ 摘掉缓存退回基线重试。缓存只加速，
+            // 不允许把原本能恢复的任务变成失败。
+            log("恢复：元数据缓存注入未成功（${ec.getMessage()}）——摘掉缓存退回基线重试")
+            val rebuilt = buildRestoreParams(plan, decoded, dir, cacheDir = null)
+            if (rebuilt != null) {
+              if (plan.pauseAfterAdd) rebuilt.atp.setFlags(rebuilt.atp.getFlags().or_(TorrentFlags.PAUSED))
+              val ec2 = ErrorCode(org.libtorrent4j.swig.error_code())
+              val h2 = SessionHandle(manager.swig()).addTorrent(rebuilt.atp, ec2)
+              if (!ec2.isError) {
+                ec = ec2
+                h = h2
+              }
+            }
+          }
           if (ec.isError) {
             log("恢复加种失败：${ec.getMessage()}")
             null
@@ -1832,7 +1883,24 @@ class BtEngine(private val listener: Listener) : EngineControl {
           t.state = STATE_COMPLETED
           t.error = ""
         }
-        log("任务完成：${t.infoHash.take(12)}…（下载 $downloaded 字节 / 选中 $selBytes 字节 / 选中已落 $doneBytes 字节）")
+        // C12（对齐桌面 core/resolver.py:355-383 `on_download_finished` 的 D3 语义）：
+        // 完成默认**自动停止做种**——pause 句柄 + 撤 auto_managed（桌面 seed=False 分支
+        // `handle.pause(); handle.unset_flags(auto_managed)`）。旧实现只改内存状态，
+        // 句柄继续做种/announce 占上行与电量。安卓无 seed_after_complete 设置入口，
+        // 桌面该设置默认 False = 两端基线语义一致，这里恒走「完成后停止」。
+        // （桌面 seed=True 分支 = SEEDING + resume；安卓如需做种属新特性，另行裁决。）
+        val hc = t.handle
+        if (hc != null && isHandleUsable(hc)) {
+          try {
+            hc.pause()
+            hc.unsetFlags(TorrentFlags.AUTO_MANAGED)
+          } catch (e: Throwable) {
+            log("完成后自动停止异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+          }
+        }
+        // 桌面完成路径同样落盘 + 请求 fastresume（清单落盘由 VM 的状态变化回调完成）
+        requestResumeDataFor(t, "任务完成")
+        log("任务完成：${t.infoHash.take(12)}…（下载 $downloaded 字节 / 选中 $selBytes 字节 / 选中已落 $doneBytes 字节；已按 D3 自动停止做种）")
         listener.onTaskStateChanged(t.infoHash, STATE_COMPLETED)
       } else if (finished && !isTaskCompleted(finished, t.download, selBytes, doneBytes) && t.state == STATE_DOWNLOADING) {
         // 虚真 finished 的留痕（原来这类情况会直接误判完成，现在只记一行日志）
@@ -2189,9 +2257,12 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /** 按任务请求 fastresume（多任务：不再假设「当前焦点就是它」）。 */
   private fun requestResumeDataFor(t: EngineTask, reason: String) {
+    // C44（对齐桌面 core/persist.py:225-227）：仅「下载型且元数据（result）就绪」的任务才值得
+    // 写 fastresume——仅解析任务没有下载进度，落了也只是 .resume 杂物、无续传价值。
+    if (!t.download || t.result == null) return
     val h = t.handle ?: return
     if (!isResumeKey(t.infoHash)) return
-    if (h == null || !isHandleUsable(h)) return
+    if (!isHandleUsable(h)) return
     try {
       h.setFlags(TorrentFlags.NEED_SAVE_RESUME)
       h.saveResumeData(TorrentHandle.SAVE_INFO_DICT.or_(TorrentHandle.FLUSH_DISK_CACHE))
@@ -2285,6 +2356,19 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /** 当前预览目标在清单里的文件下标（无预览任务 → -1）。 */
   fun previewFileIndex(): Int = previewFile?.index ?: -1
+
+  /**
+   * **重试前催数据**（C23，对齐桌面 `scheduler.rearm` + `stream_host.on_stream_failed→rearm`）：
+   * 开播门控超时后用户点「重试」时，无条件重刷尾窗 + 播放位置窗口，
+   * 避免慢链路上重试首轮因「窗口看起来充裕、tick 防抖不补窗」再次超时。
+   */
+  fun rearmPreview() {
+    try {
+      if (scheduler.active) scheduler.rearm()
+    } catch (e: Throwable) {
+      log("预览 rearm 异常：" + (e.message ?: e.javaClass.simpleName))
+    }
+  }
 
   /**
    * **当前预览文件的下载读数**（A 项要的「该文件的下载进度」）。
@@ -2704,7 +2788,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /**
    * 心跳（前台服务每秒调用一次，UI 轮询里也会间接走到）：
-   * 1. 推进预览窗口；2. 元数据超时判定；3. 刷新活动态快照。
+   * 1. 推进预览窗口；2. 元数据超时判定；3. 刷新活动态快照；4. fastresume 周期脏写。
    */
   override fun tick() {
     try {
@@ -2713,7 +2797,35 @@ class BtEngine(private val listener: Listener) : EngineControl {
       log("心跳 tick 异常：" + (e.message ?: e.javaClass.simpleName))
     }
     checkMetadataTimeout()
+    sweepResumeDirty()
     publishActivity()
+  }
+
+  /**
+   * fastresume **周期脏写**（C41，对齐桌面 core/session.py:816-827 `resume_sweep`）：
+   * 每 [RESUME_SWEEP_INTERVAL_MS]（60s，libtorrent 建议间隔 ≥1min）给全部「下载中」
+   * 任务逐个请求 save_resume_data。
+   *
+   * 为什么必须有：安卓此前只在事件点（暂停/继续/预览/转正/App onStop/退出）落盘——
+   * 长时间连续下载中进程被杀，恢复点回退到最后一个事件，进度可丢数小时。
+   * 桌面正是靠这条周期脏写保证「新」（退出 drain 只是兜底）。
+   * 守卫（download/result 就绪）在 [requestResumeDataFor] 内（C44），与桌面
+   * `request_resume` 的守卫同源；这里只按桌面 sweep 的「仅 DOWNLOADING」筛选。
+   */
+  private fun sweepResumeDirty() {
+    val now = System.currentTimeMillis()
+    if (lastResumeSweepMs != 0L && now - lastResumeSweepMs < RESUME_SWEEP_INTERVAL_MS) return
+    lastResumeSweepMs = now
+    val tasks: List<EngineTask> = synchronized(taskLock) {
+      taskMap.values.filter { resumeSweepNeeded(it.download, it.state) }
+    }
+    for (t in tasks) {
+      try {
+        requestResumeDataFor(t, "周期脏写")
+      } catch (e: Throwable) {
+        log("周期 fastresume 异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+      }
+    }
   }
 
   /**
@@ -2740,6 +2852,16 @@ class BtEngine(private val listener: Listener) : EngineControl {
       }
     }
     for (t in timedOut) {
+      // C11（对齐桌面 core/session.py:795-802）：超时任务先 pause 句柄再上报失败——
+      // 旧实现只置 FAILED 不动句柄，超时的解析任务仍在后台无限 DHT/announce 占资源。
+      val h = t.handle
+      if (h != null && isHandleUsable(h)) {
+        try {
+          h.pause()
+        } catch (e: Throwable) {
+          log("元数据超时 pause 句柄异常（${t.infoHash.take(12)}…）：" + (e.message ?: e.javaClass.simpleName))
+        }
+      }
       val msg = t.error
       log("元数据超时（${t.infoHash.take(12)}…）：$msg")
       listener.onTaskStateChanged(t.infoHash, STATE_FAILED)
@@ -2879,5 +3001,7 @@ class BtEngine(private val listener: Listener) : EngineControl {
     const val SHA1_HEX_LEN = 40
     const val MAX_LOGGED_FILES = 8
     const val FGS_TIMEOUT_TEXT = "前台服务已到系统时限，下载已暂停"
+    /** fastresume 周期脏写间隔（对齐桌面 core/session.py:39 `RESUME_SWEEP_INTERVAL=60`）。 */
+    const val RESUME_SWEEP_INTERVAL_MS: Long = 60_000L
   }
 }

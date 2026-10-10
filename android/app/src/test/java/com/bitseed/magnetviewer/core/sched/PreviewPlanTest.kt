@@ -127,15 +127,21 @@ class PreviewPlanTest {
     assertEquals(emptyList<PieceDeadline>(), ascendingPlan(5, 4))
   }
 
+  // ------------------------------------------------------------ rangePlan（C21：字节口径夹取）
+
   @Test
-  fun rangePlan_capsAt60Pieces_andKeepsAnchor() {
+  fun rangePlan_capsAtWindowPieces_andKeepsAnchor() {
+    // 4MB 块：夹取口径 = windowPieces(4MB)=4 块（16MB 预算），不是旧的 60 块=240MB 洪泛
     val f = file(4_100_000_000L, 4194304, ".mp4")
     val plan = rangePlan(f, 4194304, startByte = 0, endByteExcl = 4_100_000_000L)
-    assertEquals(LOOKAHEAD_PIECES, plan.size) // 单次上限 60 块（拖动进度条不洪泛）
+    assertEquals(4, plan.size)
     assertEquals(0, plan.first().piece)
-    assertEquals(59, plan.last().piece)
+    assertEquals(3, plan.last().piece)
     assertEquals(0, plan.first().deadlineMs)
-    assertEquals(59 * 400, plan.last().deadlineMs)
+    assertEquals(3 * 400, plan.last().deadlineMs)
+    // 16KB 小块：窗口 60 块封顶（与旧行为逐字一致，契约冻结）
+    val small = file(4_100_000_000L, 16384, ".mp4")
+    assertEquals(60, rangePlan(small, 16384, 0, 4_100_000_000L).size)
     // 区间中点播：首块立即（0ms），后续递增
     val mid = rangePlan(f, 4194304, startByte = 100 * 4194304L, endByteExcl = 101 * 4194304L)
     assertEquals(listOf(100), mid.map { it.piece })

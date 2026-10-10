@@ -424,6 +424,39 @@ class PreviewScheduler(private val log: (String) -> Unit = {}) {
   }
 
   /**
+   * **无条件**重刷「尾部索引窗 + 播放位置窗口」的预约（C23，对齐桌面
+   * `core/scheduler.py:722-755` `rearm`）：开播门控超时/播放器打开失败时，
+   * 重试前把这两块立刻置回最高优先级（deadline 覆盖式写入，幂等），
+   * 把「等数据」变成「催数据」。
+   *
+   * 与 [tick] 的区别：tick 有「窗口仍充裕即返回」的防抖（`first_missing <=
+   * scheduled_to - slack`），失败重试要的恰恰是无条件重刷。
+   * 有界性：只覆盖 `[播放位置, 播放位置+窗口块数)` 与尾窗，不刷全文件
+   * （论证同桌面 request_range / rearm docstring）。
+   *
+   * 阻塞取锁（桌面 `@_exclusive` 默认 blocking=True——重试必须真正生效）。
+   */
+  fun rearm() {
+    if (paused || released) return
+    val h = usable(handle, "rearm") ?: return
+    val f = file ?: return
+    if (pieceLength <= 0) return
+    var first = 0
+    var target = -1
+    lock.withLock {
+      requestTail()
+      val n = if (headN > 0) headN else windowPieces(pieceLength)
+      first = maxOf(f.startPiece, playFrom)
+      target = minOf(f.endPiece, first + n - 1)
+      for (d in ascendingPlan(first, target, anchor = first, stepMs = DEADLINE_STEP_MS)) {
+        safe("rearm.deadline piece=${d.piece}") { h.setPieceDeadline(d.piece, d.deadlineMs) }
+      }
+      scheduledTo = maxOf(scheduledTo, target - 1)
+    }
+    logcat("rearm: 已无条件重刷尾窗 + 播放位置窗口 $first..$target（催数据）")
+  }
+
+  /**
    * 周期调用：从**播放位置**起按下载进度向前滚动预约窗口；
    * 尾部窗口未齐时持续补拉（入口就绪不取消整尾窗）。
    */

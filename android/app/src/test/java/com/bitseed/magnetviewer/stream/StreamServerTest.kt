@@ -139,6 +139,87 @@ class StreamServerTest {
   }
 
   /**
+   * C33（对齐桌面 stream_server.py:433-438）：**有前缀但请求起点未就绪 → 416**，
+   * 而不是旧安卓的一律 503。头 8KB 就绪、请求从 16KB 起 → 起点无数据但整文件
+   * 有前缀 → 416 + `X-Why: range`（播放器据此换请求，而不是无脑重试同一段）。
+   */
+  @Test
+  fun prefixExistsButStartMissing_returns416_not503() {
+    availablePieces = (0..1).toSet() // 头 8KB 就绪；16384 起未就绪
+    val resp = request("/video.mp4?t=${server.token}", range = "bytes=16384-32767")
+    assertEquals("有前缀但起点未就绪必须细分成 416（C33）", 416, resp.status)
+    assertEquals("range", resp.header("x-why"))
+    assertEquals("bytes */${content.size}", resp.header("content-range"))
+  }
+
+  /**
+   * C32（对齐桌面 stream_server.py:315-354 等待/服务两类额度分账）：
+   * **慢等待者不得饿死可即时服务的请求**。
+   *
+   * 构造（不靠 sleep 猜时序）：`maxConcurrency=1` → 服务额度只有 1；
+   * 先把等待池（上限 1×4=4）用 4 个「起点未就绪」的 video 请求占满（它们
+   * 移交等待池后**服务线程立即归还**）；此时对全就绪的 instant.bin 的请求
+   * 必须仍能走服务线程快速拿到 200/206 —— 旧实现（固定池 8、等待即占线程）
+   * 在这里会被 4 个等待者冻死。第 5 个等待请求 → 503 overloaded（等待额度满）。
+   */
+  @Test
+  fun waitingRequests_doNotStarveServiceableRequests() {
+    val instant = File(root, "instant.bin")
+    instant.writeBytes(ByteArray(8192) { i -> (i and 0xFF).toByte() })
+    val srv =
+      StreamServer(
+        roots = listOf(root),
+        pieceSource =
+          object : PieceSource {
+            override fun pieceMap(diskPath: String): PieceMap? {
+              if (diskPath.endsWith("instant.bin")) {
+                return PieceMap(4096, 0L, 0, 1, instant.length()) { true }
+              }
+              if (!diskPath.endsWith("video.mp4")) return null
+              // video 只有头 1 块就绪：任何 ≥4096 起点的请求都要等
+              return PieceMap(pieceLength, 0L, 0, lastPiece, content.size.toLong()) { p -> p == 0 }
+            }
+
+            override fun onDemand(diskPath: String, start: Long, endExcl: Long) {}
+          },
+        waitTimeoutMs = 3_000L,
+        pollMs = 50L,
+        maxConcurrency = 1,
+        queueCapacity = 4,
+      )
+    srv.start()
+    try {
+      // 4 个慢等待请求占满等待池（它们会阻塞到 waitTimeout，异步发出）
+      val waiters =
+        (1..4).map {
+          val t =
+            Thread {
+              runCatching { request("/video.mp4?t=${srv.token}", "bytes=4096-8191", srv = srv, readTimeoutMs = 6_000) }
+            }
+          t.isDaemon = true
+          t.start()
+          t
+        }
+      // 给等待池一点时间把 4 个线程建起来
+      Thread.sleep(300)
+      // 关键断言：服务额度（1）没被等待者占用 → instant.bin 请求必须立即可服务
+      val t0 = System.currentTimeMillis()
+      val instantResp = request("/instant.bin?t=${srv.token}", srv = srv, readTimeoutMs = 2_000)
+      val elapsed = System.currentTimeMillis() - t0
+      assertTrue("instant 必须 200/206（实际 ${instantResp.status}）", instantResp.status == 200 || instantResp.status == 206)
+      assertTrue("等待者不得饿死服务请求：instant 应即时返回，实测 ${elapsed}ms", elapsed < 1_500)
+      // 第 5 个等待请求：等待池饱和 → 503 overloaded（绝不无界排队）
+      val fifth = request("/video.mp4?t=${srv.token}", "bytes=4096-8191", srv = srv, readTimeoutMs = 2_000)
+      assertEquals("等待额度满必须立即 503", 503, fifth.status)
+      assertEquals("overloaded", fifth.header("x-why"))
+      waiters.forEach { it.join(10_000) }
+    } finally {
+      srv.close()
+      instant.delete()
+    }
+  }
+
+  /**
    * 过载（S4）：worker 占满且队列也满时，多出的请求必须回 **503 + Retry-After**，
    * 而不是**静默断连**（旧实现的队列无界，根本不会走到这条；而静默断连会被
    * ExoPlayer 当成「流异常结束」且不重试，比一个可重试状态码难排查得多）。

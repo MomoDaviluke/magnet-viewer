@@ -210,6 +210,17 @@ class TaskProgressTest {
     assertTrue(PARSE_ONLY_NO_SELECTION_NOTE.contains("未选择"))
   }
 
+  // ------------------------------------------------------------ C41 周期脏写筛选（对齐桌面 resume_sweep）
+
+  @Test
+  fun resumeSweepNeeded_onlyDownloadingTasks() {
+    // 桌面 core/session.py:823-827：仅「download 且 state == DOWNLOADING」进周期脏写名单
+    assertTrue(resumeSweepNeeded(download = true, state = STATE_DOWNLOADING))
+    assertFalse("暂停态没有新进度", resumeSweepNeeded(download = true, state = STATE_PAUSED))
+    assertFalse("完成态同样不再脏写", resumeSweepNeeded(download = true, state = STATE_COMPLETED))
+    assertFalse("仅解析任务不落 fastresume（C44 守卫同口径）", resumeSweepNeeded(download = false, state = STATE_DOWNLOADING))
+  }
+
   // ------------------------------------------------------------ TaskSnapshot 收口（C-02）
 
   @Test

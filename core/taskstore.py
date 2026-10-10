@@ -34,6 +34,11 @@ from .models import TorrentFile
 
 TASK_FILE_NAME = ".tasks.json"
 SCHEMA_VERSION = 1
+# 共享契约版本（Wave 4 / 4.3，见 shared/task-schema.json）。
+# 与 SCHEMA_VERSION（清单结构版本，不符即拒读）是**两回事**：这里标记的是
+# 「这份文件遵循的跨端字段契约」版本。save 恒写当前值；load **缺字段容忍**
+# （旧文件 = 版本 0），静默兼容、绝不因缺字段拒读（B3：任何损坏形态不阻断启动）。
+SHARED_SCHEMA_VERSION = 1
 
 
 def task_file_path(cache_dir: str) -> str:
@@ -283,8 +288,14 @@ def _dump_task(t: dict) -> dict:
 
 
 def save_tasks(cache_dir: str, tasks: Mapping[str, dict]) -> str:
-    """原子写任务清单；返回写出的文件路径。失败向上抛 OSError（调用方展示）。"""
+    """原子写任务清单；返回写出的文件路径。失败向上抛 OSError（调用方展示）。
+
+    4.3 共享数据模型：顶层附带 `schema_version`（shared/task-schema.json 的契约
+    版本）。`load_tasks` 对该字段**缺失容忍**（旧文件 = 版本 0，静默兼容），
+    结构版本 `version` 的拒读语义不变。
+    """
     payload = {"version": SCHEMA_VERSION,
+               "schema_version": SHARED_SCHEMA_VERSION,
                "tasks": {k: _dump_task(v) for k, v in tasks.items()}}
     text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
     return atomic_write_bytes(task_file_path(cache_dir), text.encode("utf-8"))
@@ -296,6 +307,9 @@ def load_tasks(cache_dir: str,
 
     任何损坏形态都返回空表（绝不抛异常、绝不阻断启动）；
     部分损坏只丢弃非法记录，``warn`` 回调逐条上报。
+
+    4.3 共享数据模型：顶层 `schema_version` **不参与判定**——缺失（旧文件 =
+    版本 0）或取值不同都静默容忍，只有结构版本 `version` 不符才拒读。
     """
     path = task_file_path(cache_dir)
     try:

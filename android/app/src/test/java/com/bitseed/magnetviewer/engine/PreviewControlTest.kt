@@ -210,6 +210,45 @@ class PreviewControlTest {
     assertEquals("释放后分块可用性查询照旧（流服务还在读）", 16384L, sched.contiguousProgress())
   }
 
+  // ------------------------------------------------------------ C23 rearm：无条件重刷（催数据）
+
+  @Test
+  fun rearm_unconditionallyReschedulesTailAndPlayWindow() {
+    val ops = FakeHandleOps()
+    val sched = PreviewScheduler()
+    sched.begin(ops, file())
+    ops.calls.clear()
+
+    sched.rearm()
+
+    // 对齐桌面 scheduler.py:722-755：不 clear、直接覆盖式重下 deadline
+    assertFalse("rearm 不得 clearPieceDeadlines（桌面同样只覆盖）", ops.calls.contains("clearPieceDeadlines"))
+    val deadlines = ops.calls.filter { it.startsWith("setPieceDeadline") }
+    assertTrue("rearm 必须重刷播放位置窗口（首块 deadline=0）", deadlines.contains("setPieceDeadline(0,0)"))
+    // 尾窗（入口块）与头窗都必须在名单里：夹具文件 5 块全部是尾窗+入口+头窗的并集
+    assertTrue("必须覆盖到文件尾块", deadlines.any { it.startsWith("setPieceDeadline(4,") })
+    assertTrue("头窗必须递增（piece1 → 400ms）", deadlines.contains("setPieceDeadline(1,400)"))
+  }
+
+  @Test
+  fun rearm_pausedOrReleased_doesNothing() {
+    val ops = FakeHandleOps()
+    val sched = PreviewScheduler()
+    sched.begin(ops, file())
+    sched.pause()
+    ops.calls.clear()
+    sched.rearm()
+    assertTrue("暂停期间 rearm 不得动句柄", ops.calls.isEmpty())
+
+    val ops2 = FakeHandleOps()
+    val sched2 = PreviewScheduler()
+    sched2.begin(ops2, file())
+    sched2.stop(releaseOnly = true)
+    ops2.calls.clear()
+    sched2.rearm()
+    assertTrue("convert 释放后 rearm 不得动句柄", ops2.calls.isEmpty())
+  }
+
   // ------------------------------------------------------------ seek：先 clear 再重建
 
   @Test

@@ -41,6 +41,8 @@ import com.bitseed.magnetviewer.engine.ProxyDecision
 import com.bitseed.magnetviewer.engine.decideEffectiveProxy
 import com.bitseed.magnetviewer.engine.previewGateFailedStatus
 import com.bitseed.magnetviewer.engine.previewGateTimeoutNote
+import com.bitseed.magnetviewer.engine.PREVIEW_GATE_CONTIG_BYTES
+import com.bitseed.magnetviewer.engine.PREVIEW_GATE_TIMEOUT_MS
 import com.bitseed.magnetviewer.engine.TaskSnapshot
 import com.bitseed.magnetviewer.engine.deriveImageState
 import com.bitseed.magnetviewer.engine.stateAfterResume
@@ -1404,13 +1406,16 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
           }
       server = srv
       val url = srv.urlFor(file.path)
-      // 开播门控：文件头有连续数据 + 尾部入口块就绪（MP4 的 moov 在最末尾）
+      // 开播门控：头部连续前缀 ≥ min(1MB, 文件大小) + 尾部入口块就绪（MP4 的 moov 在最末尾）
+      // C22（对齐桌面 ui/stream_host.py:256-258）：旧判据 `bufferedBytes() > 0` 过早放行 →
+      // 播放器探测失败率升高；超时同步对齐桌面 60s（PREVIEW_GATE_TIMEOUT_MS）。
       val ready =
         withContext(Dispatchers.IO) {
+          val gateContigMin = minOf(PREVIEW_GATE_CONTIG_BYTES, file.size)
           val deadline = System.currentTimeMillis() + PREVIEW_GATE_TIMEOUT_MS
           while (System.currentTimeMillis() < deadline) {
             engine.previewTick()
-            if (engine.bufferedBytes() > 0 && engine.tailEntryReady()) return@withContext true
+            if (engine.bufferedBytes() >= gateContigMin && engine.tailEntryReady()) return@withContext true
             delay(300)
           }
           false
@@ -1442,6 +1447,10 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
    * **重试上一次失败的预览**（D-01；屏幕的重试按钮接它）。
    *
    * 失败原因不清（无做种/源慢）时用户反复点也应该安全：这里只是重放 [preview]。
+   *
+   * C23（对齐桌面 `ui/stream_host.py:319-356` on_stream_failed→`scheduler.rearm`）：
+   * 重试前若调度器仍在场（播放器打开失败但预览未释放的形态），先无条件重刷
+   * 尾窗 + 播放位置窗口「催数据」，慢链路上重试首轮不再白等 tick 防抖。
    */
   fun retryPreview() {
     val idx = lastPreviewFileIndex
@@ -1450,7 +1459,10 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
       return
     }
     log("重试预览：fileIndex=$idx")
-    preview(idx)
+    viewModelScope.launch {
+      withContext(Dispatchers.IO) { engine.rearmPreview() }
+      preview(idx)
+    }
   }
 
   /** 暂停预览（冻结：缓冲读数不动；「继续」原地恢复）。 */
@@ -1907,7 +1919,6 @@ class MagnetViewModel(private val appContext: Context, settingsStore: SettingsSt
   private fun nowSeconds(): Double = System.currentTimeMillis() / 1000.0
 
   private companion object {
-    const val PREVIEW_GATE_TIMEOUT_MS = 30_000L
     const val TAG = "MagnetViewer"
 
     /** 缓存占用（目录字节统计）每 N 秒刷一次（统计要遍历目录，不必每秒）。 */

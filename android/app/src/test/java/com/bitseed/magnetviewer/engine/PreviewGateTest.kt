@@ -45,7 +45,10 @@ class PreviewGateTest {
   }
 
   @Test
-  fun gateTimeout_isThirtySeconds() {
-    assertEquals(30_000L, PREVIEW_GATE_TIMEOUT_MS)
+  fun gateTimeout_isSixtySeconds_alignedDesktop() {
+    // C22：对齐桌面 ui/stream_host.py:167 GATE_WAIT_TIMEOUT_MS=60s（旧值 30s 的注释已过时）
+    assertEquals(60_000L, PREVIEW_GATE_TIMEOUT_MS)
+    // C22：头部连续前缀阈值上限 1MB（实际取 min(1MB, 文件大小)，对齐 stream_host.py:257）
+    assertEquals(1024L * 1024L, PREVIEW_GATE_CONTIG_BYTES)
   }
 }

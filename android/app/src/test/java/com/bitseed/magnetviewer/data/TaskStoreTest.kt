@@ -420,6 +420,67 @@ class TaskStoreTest {
     assertTrue(threw)
   }
 
+  // ------------------------------------------------------------ C45 写锁分片（内存有界）
+
+  @Test
+  fun writeLocks_areShardedAndBounded() {
+    // C45（对齐桌面 core/taskstore.py:165-189）：锁必须固定 64 分片，**不随路径数增长**
+    // （旧实现按路径建 ConcurrentHashMap，`.meta` 写也走它 → 锁对象随「看过的种子数」无界膨胀）
+    assertEquals(64, WRITE_LOCK_SHARDS)
+    // 同路径恒得同一把（互斥语义不变）
+    val p = "/data/cache/.tasks.json"
+    assertTrue(writeLockFor(p) === writeLockFor(p))
+    assertTrue(writeLockFor(p) === writeLockFor(p.uppercase()))
+    // 大量不同路径只落在 ≤64 个锁对象上（有界性）
+    val distinct = HashSet<Any>()
+    for (i in 0 until 5000) distinct.add(writeLockFor("/meta/$i.torrent"))
+    assertTrue("锁对象必须 ≤ 分片数（实得 ${distinct.size}）", distinct.size <= WRITE_LOCK_SHARDS)
+  }
+
+  // ------------------------------------------------------------ 4.3 共享数据模型（schema_version）
+
+  @Test
+  fun savedFile_carriesSharedSchemaVersion() {
+    val dir = tempDir("schemaver")
+    saveTasks(dir, mapOf(SAMPLE_IH to sampleRecord(SAMPLE_IH)))
+    val text = taskFilePath(dir).readText(Charsets.UTF_8)
+    assertTrue("顶层必须写 schema_version（shared/task-schema.json 契约版本）",
+      text.contains("\"schema_version\": $SHARED_SCHEMA_VERSION"))
+    assertEquals("带 schema_version 的文件必须正常读回", mapOf(SAMPLE_IH to sampleRecord(SAMPLE_IH)), loadTasks(dir))
+    dir.deleteRecursively()
+  }
+
+  @Test
+  fun legacyFile_withoutSchemaVersion_isTolerated() {
+    // 旧文件（缺 schema_version = 版本 0）：静默兼容，绝不因缺字段拒读（对齐桌面 load_tasks）
+    val dir = tempDir("legacy")
+    taskFilePath(dir).writeText(
+      "{\"version\": 1, \"tasks\": {\"$SAMPLE_IH\": ${encodeTask(sampleRecord(SAMPLE_IH)).encode()}}}",
+      Charsets.UTF_8,
+    )
+    val warns = ArrayList<String>()
+    val loaded = loadTasks(dir) { warns.add(it) }
+    assertEquals("缺 schema_version 的旧文件必须照常读回", setOf(SAMPLE_IH), loaded.keys)
+    dir.deleteRecursively()
+  }
+
+  @Test
+  fun schemaVersionMismatch_isTolerated_butStructVersionStillRejects() {
+    // schema_version 取值不同（未来契约）→ 容忍；结构版本 version 不符 → 拒读（语义不变）
+    val dir = tempDir("svtol")
+    taskFilePath(dir).writeText(
+      "{\"version\": 1, \"schema_version\": 99, \"tasks\": {\"$SAMPLE_IH\": ${encodeTask(sampleRecord(SAMPLE_IH)).encode()}}}",
+      Charsets.UTF_8,
+    )
+    assertEquals("schema_version 超前也必须容忍读回", setOf(SAMPLE_IH), loadTasks(dir).keys)
+    taskFilePath(dir).writeText(
+      "{\"version\": 2, \"schema_version\": 1, \"tasks\": {}}",
+      Charsets.UTF_8,
+    )
+    assertEquals("结构版本不符仍一律拒读", emptyMap<String, TaskRecord>(), loadTasks(dir))
+    dir.deleteRecursively()
+  }
+
   private companion object {
     const val SAMPLE_IH = "444b8b5c9a69b388a5013d85a42caef060f03225"
     const val IH2 = "0123456789abcdef0123456789abcdef01234567"

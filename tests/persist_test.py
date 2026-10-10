@@ -336,6 +336,30 @@ def section_task_list(ck: ts.Checker) -> None:
         ck.check(IH in load_tasks(ws.cache),
                  "persist_tasks：写失败后旧清单未被破坏")
 
+        # ---- 4.3 共享数据模型（shared/task-schema.json）：schema_version 读写 ----
+        import json as _json
+        from core.taskstore import (SHARED_SCHEMA_VERSION, TASK_FILE_NAME,
+                                    save_tasks)
+        save_tasks(ws.cache, tasks)
+        with open(os.path.join(ws.cache, TASK_FILE_NAME), encoding="utf-8") as f:
+            doc = _json.load(f)
+        ck.check(doc.get("schema_version") == SHARED_SCHEMA_VERSION,
+                 "save_tasks：顶层写入 schema_version（共享契约版本）")
+        ck.check(IH in load_tasks(ws.cache),
+                 "load_tasks：带 schema_version 的新文件正常读回")
+        # 旧文件（缺 schema_version）= 版本 0：必须静默容忍，绝不拒读
+        doc.pop("schema_version")
+        with open(os.path.join(ws.cache, TASK_FILE_NAME), "w", encoding="utf-8") as f:
+            _json.dump(doc, f)
+        ck.check(IH in load_tasks(ws.cache),
+                 "load_tasks：缺 schema_version 的旧文件容忍读回（版本 0 兼容）")
+        # 结构版本 version 的拒读语义不受影响（回归护栏）
+        doc["version"] = SHARED_SCHEMA_VERSION + 99
+        with open(os.path.join(ws.cache, TASK_FILE_NAME), "w", encoding="utf-8") as f:
+            _json.dump(doc, f)
+        ck.check(load_tasks(ws.cache) == {},
+                 "load_tasks：结构版本 version 超前仍一律拒读（语义不变）")
+
 
 # --------------------------------------------------------------------------
 # §C fastresume 请求与落盘
