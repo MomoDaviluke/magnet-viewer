@@ -32,14 +32,15 @@ import threading
 import time
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt  # noqa: F401
 
     import test_support as ts
     from core import proxycheck, session
-    from core.fetcher import STATE_META_FETCH
+    # Wave 2：fetcher 不再再导出 STATE_META_FETCH（本体在 core.states）
+    from core.states import STATE_META_FETCH
 except ImportError as e:    # 依赖缺失：显式 SKIP；语法/逻辑错误会正常冒泡为失败
     print(f"依赖缺失，无法执行 proxycheck 专项验收：{e}")
     sys.exit(2)

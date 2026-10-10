@@ -7,7 +7,7 @@
 （把未下载的稀疏零数据喂给播放器）。
 
 本测试在 127.0.0.1 上同时启动做种端与解析端，无需外网。
-用法：python local_torrent_test.py
+用法：python tests/local_torrent_test.py
 """
 import os
 import shutil
@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import libtorrent as lt  # noqa: E402
 

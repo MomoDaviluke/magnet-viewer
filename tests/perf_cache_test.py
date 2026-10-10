@@ -13,7 +13,7 @@
   §G P-4  DHT 路由表状态读写的容错与落盘路径
   §H      缓存清理保留名单（.meta / .dht_state 不被误删）
 
-用法：.\\.venv\\Scripts\\python.exe perf_cache_test.py
+用法：.\\.venv\\Scripts\\python.exe tests/perf_cache_test.py
 退出码：0=通过 1=失败 2=SKIP（依赖缺失，绝不假装通过）
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt  # noqa: E402

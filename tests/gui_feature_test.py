@@ -1,7 +1,7 @@
 """GUI 功能校验：主窗口实例化 + 拖放 + 输入历史自动补全 + 文件树展开。
 
 无头运行：QT_QPA_PLATFORM=offscreen
-用法：.\\.venv\\Scripts\\python.exe gui_feature_test.py
+用法：.\\.venv\\Scripts\\python.exe tests/gui_feature_test.py
 """
 from __future__ import annotations
 
@@ -16,13 +16,15 @@ from PySide6.QtCore import (QModelIndex, QItemSelectionModel, QMimeData,  # noqa
                             QStringListModel, QUrl)
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config import RECENT_LIMIT, AppConfig, DEFAULTS  # noqa: E402
 from core.parser import parse_torrent_file  # noqa: E402
 from ui.add_download_dialog import AddDownloadDialog  # noqa: E402
 from ui.downloads_pane import COL_NAME, DownloadsPane  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
+# Wave 2 拆分：开播门控状态/常量移居 ui/stream_host.py（协作者）
+from ui.stream_host import StreamHost  # noqa: E402
 
 OK, FAIL = [], []
 
@@ -408,7 +410,6 @@ def main() -> int:
     # _live_cache_dirs 空集兜底（fail-open，只该服务手动清理入口）在 LRU
     # 路径上会把「名单故障」放大成「全部活目录无保可删」，方向相反。
     print("\n[4b-4] LRU keep 回调 fail-closed（D0）")
-    import ui.main_window as _mw  # noqa: E402
     quota_cache = os.path.join(tmp, "cache_d0")
     proot = os.path.join(quota_cache, ".preview")
     os.makedirs(proot, exist_ok=True)
@@ -420,7 +421,12 @@ def main() -> int:
             _f.write(b"x" * 900 * 1024)          # 两份都超 1MB 上限
         os.utime(_fp, (_mt, _mt))
     orig_cd, orig_lim = w.cache_dir, w.cfg.get("cache_limit_mb")
+    # Wave 2：预览根目录改由 facade（SessionManager.preview_root → session
+    # .cache_dir）派生，故测试重定向须同步改 session 侧，否则 preview_root
+    # 指向真实缓存、isdir 早退 → 两个断言都「假通过」。
+    orig_scd = w.session.cache_dir
     w.cache_dir = quota_cache
+    w.session.cache_dir = quota_cache
     w.cfg.set("cache_limit_mb", 1)
     try:
         def _boom_dirs():
@@ -436,14 +442,15 @@ def main() -> int:
               "protected_dirs 抛异常：LRU 本轮零删除（fail-closed，活目录全幸存）")
 
         # 白盒：装配进 cache_quota 的闭包确实透传异常（UI 层不吞）。
-        # spy 截获 enforce_preview_limit 收到的 keep 回调后单独引爆。
+        # Wave 2：UI 走 facade（SessionManager.enforce_preview_cache_limit），
+        # spy 截获 facade 收到的 keep 回调后单独引爆。
         captured: dict = {}
-        _orig_enforce = _mw.enforce_preview_limit
+        _orig_enforce = w.session.enforce_preview_cache_limit
 
-        def _spy(root, limit_mb, keep_dirs=None, warn=None):
+        def _spy(limit_mb, keep_dirs=None, warn=None):
             captured["keep"] = keep_dirs
             return 0, 0
-        _mw.enforce_preview_limit = _spy
+        w.session.enforce_preview_cache_limit = _spy
         w.session.protected_dirs = _boom_dirs
         raised = False
         try:
@@ -454,13 +461,14 @@ def main() -> int:
             except RuntimeError:
                 raised = True
         finally:
-            _mw.enforce_preview_limit = _orig_enforce
+            w.session.enforce_preview_cache_limit = _orig_enforce
             w.session.protected_dirs = _orig_pd
         check("keep" in captured and raised,
               "_enforce_cache_quota 透传的 keep 闭包裸调 protected_dirs："
               "异常上抛给 cache_quota（不经 _live_cache_dirs 空集兜底）")
     finally:
         w.cache_dir = orig_cd
+        w.session.cache_dir = orig_scd
         w.cfg.set("cache_limit_mb", orig_lim)
 
     # ---- [4b-5] 设置对话框：预览缓存模式下拉（阶段 D D2）----
@@ -508,7 +516,8 @@ def main() -> int:
     # ---- [4b-6] convert 档播放中「后台缓存完整文件」文案（阶段 D D3）----
     # 纯函数产文案，播放位置优先语义只在 convert 档出现；hold 档文案不变。
     print("\n[4b-6] convert 档后台缓存文案（D3）")
-    from ui.main_window import background_cache_text  # noqa: E402
+    # Wave 2 拆分：纯函数文案移居 ui/cache_host.py（缓存治理协作者）
+    from ui.cache_host import background_cache_text  # noqa: E402
     from ui.preview_player import VideoPreviewWidget  # noqa: E402
     from core.models import TorrentFile as _TF  # noqa: E402
     pf_d3 = _TF(1, "root/big.mkv", 1000, 0, 0, 0)
@@ -541,7 +550,8 @@ def main() -> int:
     # 开播门控文案区分「等数据」与「等索引块」（此前只有一句合并文案）。
     print("\n[4b-6c] 缓存占用口径改已下载字节 + 门控文案区分（阶段 3）")
     from core.cache_quota import downloaded_bytes  # noqa: E402
-    from ui.main_window import cache_usage_text  # noqa: E402
+    # Wave 2 拆分：纯函数文案移居 ui/cache_host.py（缓存治理协作者）
+    from ui.cache_host import cache_usage_text  # noqa: E402
     from ui.preview_player import (WAIT_BOTH, WAIT_DATA, WAIT_INDEX,  # noqa: E402
                                    waiting_text)
     _gi = 1024 ** 3
@@ -590,7 +600,9 @@ def main() -> int:
 
     # 受控单测：主窗口开播门控按「缺数据 / 缺索引」分别下发阶段文案，
     # 且门控放行判据与文案彼此独立（文案不得反过来驱动门控）。
-    _orig_pending = w._pending_video
+    # Wave 2 拆分：门控状态与判据移居 ui/stream_host.py（w.stream_host.*）。
+    sh = w.stream_host
+    _orig_pending = sh.pending_video
     _orig_status = w.session.status
     try:
         _gp = _TF(0, "root/big.mp4", 8 * 1024 * 1024, 0, 0, 0)
@@ -600,7 +612,7 @@ def main() -> int:
         _streamed = []
         w.preview.video.set_waiting_stage = lambda s: _stages.append(s)
         w.preview.video.set_stream = lambda *a, **k: _streamed.append(a)
-        w._pending_video = (_gp, "http://x/big")
+        sh.pending_video = (_gp, "http://x/big")
         _base = {"num_seeds": 0, "num_peers": 0, "preview_file": None}
         w.session.status = lambda: dict(
             _base, contiguous=0, tail_entry_ready=False,
@@ -618,44 +630,44 @@ def main() -> int:
             _base, contiguous=8 * 1024 * 1024, tail_entry_ready=True,
             buffer=1.0, download_rate=0, file_progress=[])
         w._refresh_status()
-        check(bool(_streamed) and w._pending_video is None,
+        check(bool(_streamed) and sh.pending_video is None,
               "数据+索引齐 → 放行开播（门控与文案解耦）")
 
         # C3（2026-09-18）：等到上限必须**停止空转** + 给出可归因结论，
         # 而不是无限停在「等待数据/索引块就绪」（旧实现就是这样）。
-        _orig_since = w._pending_video_since
+        _orig_since = sh.pending_video_since
         _orig_show_error = w.preview.video.show_error
         _errs = []
         w.preview.video.show_error = lambda m: _errs.append(m)
         try:
-            w._pending_video = (_gp, "http://x/big")
-            w._pending_video_since = time.monotonic() - (
-                MainWindow.GATE_WAIT_TIMEOUT_MS / 1000.0 + 1.0)
+            sh.pending_video = (_gp, "http://x/big")
+            sh.pending_video_since = time.monotonic() - (
+                StreamHost.GATE_WAIT_TIMEOUT_MS / 1000.0 + 1.0)
             w.session.status = lambda: dict(
                 _base, contiguous=0, tail_entry_ready=False, buffer=0.0,
                 download_rate=0, file_progress=[], state="DOWNLOADING")
             w._refresh_status()
-            check(w._pending_video is None and bool(_errs)
+            check(sh.pending_video is None and bool(_errs)
                   and "等待开播数据超时" in _errs[-1],
                   f"门控等待超时 → 停止空转 + 上屏可归因结论（errs={len(_errs)}）")
-            # 兜底：**直接赋值** `_pending_video`（不设时间戳）不得被当成
+            # 兜底：**直接赋值** pending_video（不设时间戳）不得被当成
             # 「已等很久」——否则超时判据会立刻触发、把正常的等待期打断。
-            w._pending_video = (_gp, "http://x/big")
-            w._pending_video_since = 0.0
+            sh.pending_video = (_gp, "http://x/big")
+            sh.pending_video_since = 0.0
             _errs.clear()
             _stages.clear()
             w._refresh_status()
-            check(w._pending_video is not None and not _errs
+            check(sh.pending_video is not None and not _errs
                   and _stages[-1:] == [WAIT_DATA],
                   "无时间戳的待播状态按「刚开始等」处理（不误报超时）")
         finally:
             w.preview.video.show_error = _orig_show_error
-            w._pending_video_since = _orig_since
+            sh.pending_video_since = _orig_since
     finally:
         w.preview.video.set_waiting_stage = _orig_stage
         w.preview.video.set_stream = _orig_setstream
         w.session.status = _orig_status
-        w._pending_video = _orig_pending
+        sh.pending_video = _orig_pending
         w.preview.reset()
 
     # ---- [4b-7] D4 Minor：顶层 listdir 失败语义 + closeEvent 单次读配置 ----
@@ -1285,7 +1297,7 @@ def main() -> int:
           "浅/深两套 QSS 各自指向对应 SVG（浅→-light、深→-dark，不串色）")
 
     # ui/style.py 已删净箭头/分区绘制（源码级：这些名字一个都不许留）
-    _style_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+    _style_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
                                    "ui", "style.py"), encoding="utf-8").read()
     _dead = [t for t in ("PE_IndicatorArrow", "PE_IndicatorSpin", "COMPARTMENT_W",
                          "_compartment_rect", "_half_rect", "_paint_compartment",

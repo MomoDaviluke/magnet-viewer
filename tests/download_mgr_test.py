@@ -18,7 +18,7 @@ plan/t4_acceptance_plan.md。判定复用本机做种端闭环（seed_mode + Ses
       resume 损坏静默重建 / 缓存被外部清理不崩溃
 
 退出码约定（README.md:90）：0=通过，1=失败，2=SKIP（依赖缺失显式跳过）。
-用法：python download_mgr_test.py（与 regression_run.py 分开跑；两脚本都跑
+用法：python tests/download_mgr_test.py（与 regression_run.py 分开跑；两脚本都跑
 通过 = D4 验收闭环）。
 """
 from __future__ import annotations
@@ -28,14 +28,16 @@ import shutil
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import libtorrent as lt  # noqa: E402
 
 import test_support as ts  # noqa: E402
-from core.fetcher import (STATE_COMPLETED, STATE_DOWNLOADING,  # noqa: E402
-                          STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
-                          STATE_QUEUED, SessionManager)
+from core.fetcher import SessionManager  # noqa: E402
+# Wave 2：fetcher 不再再导出 STATE_*（本体在 core.states，直连源头）
+from core.states import (STATE_COMPLETED, STATE_DOWNLOADING,  # noqa: E402
+                         STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
+                         STATE_QUEUED)
 from core.models import contiguous_bytes, human_size  # noqa: E402
 from core.resume import resume_path  # noqa: E402
 from core.taskstore import task_file_path  # noqa: E402

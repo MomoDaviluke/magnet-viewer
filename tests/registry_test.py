@@ -33,7 +33,7 @@ import threading
 import time
 from importlib import reload
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt
@@ -385,14 +385,18 @@ def section_facade(ck):
         import shutil
         shutil.rmtree(ws, ignore_errors=True)
 
-    # 再导出冻结：fetcher 与测试模块顶层 import 的必须是同一个类对象
-    # （fetcher 若自带复制定义，is 立即假）。不做 reload——reload 会产生新类
-    # 对象使跨模块 is 必然假红（session_test §I 教训的反向应用）。
+    # Wave 2 facade 契约：fetcher 只保留组装/委托真实依赖的 registry 符号
+    # （TaskRecord/TaskRegistry/*_SUBDIR 在 __init__ 与 enforce_preview_cache_limit
+    # 注入线在用），is 同一对象断言仍须成立（若 fetcher 自带复制定义，is 立即假）。
+    # 纯历史再导出 METADATA_TIMEOUT 已删——本测试直连 core.registry 取它
+    # （fetcher 侧 hasattr 必须为假，防兼容层复活）。
     import core.fetcher as fm
     ck.check(fm.TaskRecord is TaskRecord and fm.TaskRegistry is TaskRegistry,
-             "fetcher 再导出 TaskRecord/TaskRegistry 同一对象（无复制定义）")
-    ck.check(fm.PREVIEW_SUBDIR == ".preview" and fm.DOWNLOADS_SUBDIR == "downloads",
-             "子目录常量再导出值不变")
+             "fetcher 保留 TaskRecord/TaskRegistry 同一对象（真实依赖，无复制定义）")
+    ck.check(registry.PREVIEW_SUBDIR == ".preview" and registry.DOWNLOADS_SUBDIR == "downloads",
+             "子目录常量直连 core.registry 取值不变")
+    ck.check(not hasattr(fm, "METADATA_TIMEOUT"),
+             "fetcher 不再再导出 METADATA_TIMEOUT（Wave 2 瘦身）")
 
 
 def main() -> int:

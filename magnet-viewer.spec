@@ -79,7 +79,7 @@ a = Analysis(
 
 # ---------------- 瘦身过滤（2026-09-08） ----------------
 # 原则：只砍「本应用确定用不到」的大件，每条写清依据；砍完必须重跑
-#       `pack_check.py` + 三层实测 + 开播探针（build.bat 已串好）。
+#       `tests/pack_check.py` + 三层实测 + 开播探针（build.bat 已串好）。
 #
 # 1) opengl32sw.dll（20MB）：Mesa 软件 OpenGL，只服务 Qt Quick 的渲染后端。
 #    本应用是纯 QtWidgets，视频画面走 Qt Multimedia 自己的渲染路径，不碰它。

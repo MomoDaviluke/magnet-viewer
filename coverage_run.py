@@ -51,7 +51,7 @@ def main() -> int:
         r = subprocess.call(
             [py, "-m", "coverage", "run", "--parallel-mode",
              "--rcfile", os.path.join(HERE, ".coveragerc"),
-             f"{s}.py"], cwd=HERE,
+             os.path.join(HERE, "tests", f"{s}.py")], cwd=HERE,
             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         print(f"  {s}: {r}")
         rc_all = rc_all or (r == 1)

@@ -19,7 +19,7 @@
   §J（Minor 9 / I4）遮罩随 resize 跟动 + 遮罩真的画出来了（像素级绘制断言）。
 
 无头运行：QT_QPA_PLATFORM=offscreen
-用法：.venv/Scripts/python close_lag_test.py     （退出码 0=PASS / 1=FAIL / 2=SKIP）
+用法：.venv/Scripts/python tests/close_lag_test.py     （退出码 0=PASS / 1=FAIL / 2=SKIP）
 """
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ import threading
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QMimeData, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QDropEvent  # noqa: E402
@@ -45,6 +45,12 @@ from core.models import ParseResult, TorrentFile  # noqa: E402
 from core.registry import TaskRecord  # noqa: E402
 from test_support import Checker  # noqa: E402
 import ui.main_window as mq  # noqa: E402
+# Wave 2 拆分：任务添加/CRUD 执行体移居 ui/task_controller.py——添加流程的
+# 对话框（QInputDialog/AddDownloadDialog）在 tc 模块命名空间实例化，停机
+# 窗口 spy 必须同步补丁该模块，否则「窗口期内起了新工作」会漏检。
+import ui.task_controller as tc  # noqa: E402
+# 同理：播放失败重试的 QTimer.singleShot 现在在 ui/stream_host.py 命名空间。
+import ui.stream_host as sh  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
 from ui.theme import BG, QSS  # noqa: E402
 
@@ -493,11 +499,17 @@ def main() -> int:
 
         # 上游替身：会话/流服务/预览/状态栏/历史——任何一次调用都是「窗口期内
         # 起了新工作或做了用户可见动作」的铁证。
+        # Wave 2 拆分：_add_download_flow/_confirm_add_task/_task_* 的执行体移居
+        # ui/task_controller.py，QInputDialog/AddDownloadDialog 在 tc 命名空间
+        # 实例化——必须同步补丁 tc，否则守卫失效时弹窗漏检（假绿）。
+        # 按「模块实际持有的名字」列补丁面：mq 不再有 QInputDialog/AddDownloadDialog。
         targets = []
         for obj, name, ret in (
                 (mq, "QMessageBox", None), (mq, "QFileDialog", None),
-                (mq, "QInputDialog", None), (mq, "SettingsDialog", None),
-                (mq, "AddDownloadDialog", None), (mq, "QTimer", None),
+                (mq, "SettingsDialog", None), (mq, "QTimer", None),
+                (tc, "QMessageBox", None), (tc, "QInputDialog", None),
+                (tc, "AddDownloadDialog", None),
+                (sh, "QTimer", None),
                 (w5.session, "resolve", None), (w5.session, "stop_preview", None),
                 (w5.session, "start_preview", None), (w5.session, "add_task", None),
                 (w5.session, "pause_task", None), (w5.session, "resume_task", None),
@@ -569,7 +581,8 @@ def main() -> int:
                  f"页签未被切换（仍 {w5.tabs.currentIndex()}）")
         ck.check(w5.status_panel.state.text() == state_before,
                  "状态栏文案未被改写")
-        ck.check(w5._pending_video is None and w5._preview_file is None,
+        # Wave 2 拆分：待播/预览状态移居 stream_host（w5.stream_host.pending_video）
+        ck.check(w5.stream_host.pending_video is None and w5._preview_file is None,
                  "预览/开播状态未被改动")
         ck.check(w5.result is not None and w5._last_source.startswith("magnet:"),
                  "解析结果/来源未被覆盖（早退在赋值之前）")

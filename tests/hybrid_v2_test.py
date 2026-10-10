@@ -12,7 +12,7 @@ info_hash 为 SHA-256 截断前 20 字节（P0-2 修复的分支）；历史上�
 
 另附纯 v2 明确报错断言（P1-1 方案 a：拒绝而非 KeyError）。
 
-用法：python hybrid_v2_test.py
+用法：python tests/hybrid_v2_test.py
 退出码：0=通过，1=失败，2=SKIP（libtorrent 版本过旧无 v2 支持）。
 """
 import os
@@ -23,7 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt

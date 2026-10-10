@@ -7,7 +7,7 @@ libtorrent 直接存为 ``save_path/name``，而多文件种子是 ``save_path/r
   - 主窗口「磁盘路径 → 文件」映射键错位，_pieces_map / _demand_range 全部落空；
   - 流服务 url_for(f.path) 请求 404，预览彻底打不开。
 
-用法：python single_file_test.py
+用法：python tests/single_file_test.py
 """
 import os
 import shutil
@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import libtorrent as lt  # noqa: E402
 

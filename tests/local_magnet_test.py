@@ -6,7 +6,7 @@
   B) 解析端（SessionManager，只用磁力链，手动 connect_peer 直连 A）
 
 从而完整验证：磁力链 → ut_metadata 获取元数据 → 单文件优先级 + 分块顺序下载。
-用法：python local_magnet_test.py
+用法：python tests/local_magnet_test.py
 """
 import os
 import shutil
@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import libtorrent as lt  # noqa: E402
 

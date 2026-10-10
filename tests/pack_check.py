@@ -6,8 +6,8 @@
 打包之后、交付之前。
 
 用法：
-    python pack_check.py                     # 默认查 dist/MagnetViewer
-    python pack_check.py dist/OtherName      # 指定产物目录
+    python tests/pack_check.py                     # 默认查 dist/MagnetViewer
+    python tests/pack_check.py dist/OtherName      # 指定产物目录
 
 退出码沿用项目约定：
     0 = 通过（含体积告警）

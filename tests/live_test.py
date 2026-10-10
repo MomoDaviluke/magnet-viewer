@@ -1,7 +1,7 @@
 """真实链路验证：用磁力链（非 .torrent）从 DHT 网络获取元数据。
 
 用法：
-    python live_test.py <torrent文件的info_hash或torrent路径>
+    python tests/live_test.py <torrent文件的info_hash或torrent路径>
 
 不传参数时默认使用 Ubuntu 24.04 官方种子（合法分发）生成磁力链做验证。
 仅获取元数据（文件清单），不下载资源本体。
@@ -13,7 +13,7 @@ import time
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.fetcher import SessionManager  # noqa: E402
 from core.models import human_size  # noqa: E402

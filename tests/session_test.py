@@ -33,16 +33,19 @@ import threading
 import time
 from importlib import reload
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt
 
     import test_support as ts
     from core import session
-    from core.fetcher import (SessionManager, TaskRecord, STATE_COMPLETED,
-                              STATE_DOWNLOADING, STATE_FAILED,
-                              STATE_META_FETCH, STATE_PAUSED, STATE_STOPPED)
+    from core.fetcher import SessionManager
+    # Wave 2：fetcher 不再再导出 TaskRecord（本体 core.registry）/ STATE_*
+    # （本体 core.states），直连源头
+    from core.registry import TaskRecord
+    from core.states import (STATE_COMPLETED, STATE_DOWNLOADING, STATE_FAILED,
+                             STATE_META_FETCH, STATE_PAUSED, STATE_STOPPED)
 except ImportError as e:    # 依赖缺失（模块/导出不存在）：显式 SKIP；
                             # 语法错误/逻辑错误不是 ImportError，会正常冒泡为失败
     print(f"依赖缺失，无法执行 session 专项验收：{e}")

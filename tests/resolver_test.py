@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt
@@ -692,8 +692,8 @@ def section_facade(ck):
                  and pkg.resolver.result_from_torrent_info
                  is fm.resolver_result_from_ti,
                  "_result_from_torrent_info 委托到 resolver 模块级纯函数（单源）")
-        ck.check(fm.STATE_NAMES is pkg.preview.STATE_NAMES,
-                 "STATE_NAMES 再导出同一对象（本体在 preview）")
+        ck.check(not hasattr(fm, "STATE_NAMES"),
+                 "fetcher 不再再导出 STATE_NAMES（Wave 2 瘦身，本体在 preview）")
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 

@@ -32,14 +32,16 @@ import threading
 import time
 from importlib import reload
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt
 
     import test_support as ts
     from core import persist
-    from core.fetcher import SessionManager, TaskRecord
+    from core.fetcher import SessionManager
+    # Wave 2：fetcher 不再再导出 TaskRecord（本体在 core.registry）
+    from core.registry import TaskRecord
     from core.parser import bdecode, bencode
     from core.persist import PersistDeps, TaskPersistence
     from core.resume import RESUME_SUBDIR, resume_dir, resume_path, write_resume

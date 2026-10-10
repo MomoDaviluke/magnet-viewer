@@ -19,7 +19,7 @@ taskops / persist / preview 六个模块，`SessionManager` 降级为 Facade。
 
 用法
 ----
-    .\\.venv\\Scripts\\python.exe contract_check.py
+    .\\.venv\\Scripts\\python.exe tests/contract_check.py
 
 退出码：`0` 契约一致 · `1` 契约被破坏 · `2` 环境/依赖缺失。
 不启 libtorrent 会话、不联网，秒级完成，可在每个重构阶段随时一键自检。
@@ -31,7 +31,7 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     from core import (cache_guard, cache_quota, models, parser, persist,
@@ -140,7 +140,7 @@ def main() -> int:
     # R-4（阶段 6 收编）：UI 不再直写私有 _metadata_timeout —— 源码级冻结，
     # 谁改回去这里就红。_metadata_timeout 兼容 property 仍保留（测试直读）。
     import io as _io
-    mw = _io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+    mw = _io.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "ui", "main_window.py"),
                   encoding="utf-8").read()
     check("._metadata_timeout" not in mw,
@@ -335,10 +335,16 @@ def main() -> int:
                "_result", "_resolving", "_resolve_started", "_gen",
                "_metadata_timeout")),
           "fetcher 10 个注册表别名全为 property 代理（单源，无第二份数据）")
+    # Wave 2 facade 契约：fetcher 只保留**组装/委托真实依赖**的 registry 符号
+    # （TaskRecord 是 PersistDeps.record_cls、TaskRegistry/DOWNLOADS_SUBDIR/
+    # PREVIEW_SUBDIR 在 __init__ 与 enforce_preview_cache_limit 委托用），
+    # 纯历史再导出 METADATA_TIMEOUT 已删——调用方一律直连 core.registry。
     check(all(hasattr(fetcher_mod, n) for n in
-              ("TaskRecord", "TaskRegistry", "METADATA_TIMEOUT",
-               "DOWNLOADS_SUBDIR", "PREVIEW_SUBDIR")),
-          "core.fetcher 仍再导出 TaskRecord/TaskRegistry/常量（历史 import 不破）")
+              ("TaskRecord", "TaskRegistry", "DOWNLOADS_SUBDIR",
+               "PREVIEW_SUBDIR")),
+          "core.fetcher 保留真实依赖 TaskRecord/TaskRegistry/*_SUBDIR")
+    check(not hasattr(fetcher_mod, "METADATA_TIMEOUT"),
+          "core.fetcher 不再再导出 METADATA_TIMEOUT（Wave 2 瘦身）")
     # resolver（阶段 5 抽出）：解析与元数据编排。alert 双回调是 session
     # 注入线，begin_resolve 换代语义是 P1-10/11 竞态修复机制——全冻结。
     sig_check("resolver", resolver, {
@@ -373,9 +379,13 @@ def main() -> int:
     check(hasattr(preview, "LOOKAHEAD_PIECES")
           and preview.LOOKAHEAD_PIECES == scheduler.LOOKAHEAD_PIECES == 60,
           "preview.LOOKAHEAD_PIECES 绑定 scheduler 常量且取值 60（A1）")
-    check(all(hasattr(fetcher_mod, n) for n in
-              ("STATE_NAMES", "resolver_result_from_ti")),
-          "core.fetcher 仍再导出 STATE_NAMES / resolver 纯函数别名")
+    # Wave 2：STATE_NAMES 纯历史再导出已删（本体 core.preview，调用方直连）；
+    # resolver_result_from_ti 是注入别名（_result_from_torrent_info 委托在用，
+    # 且本文件 resolver_test 白盒断言依赖），保留。
+    check(not hasattr(fetcher_mod, "STATE_NAMES"),
+          "core.fetcher 不再再导出 STATE_NAMES（Wave 2 瘦身）")
+    check(hasattr(fetcher_mod, "resolver_result_from_ti"),
+          "core.fetcher 保留 resolver 纯函数注入别名（委托方法体在用）")
     # taskops（阶段 4 抽出）：任务 CRUD 全量签名冻结。fetcher 的 7 个任务
     # 公开方法从此只是薄委托；download_mgr_test 是它的端到端对账方。
     sig_check("taskops", taskops, {
@@ -440,11 +450,14 @@ def main() -> int:
           "states.BOOTSTRAP_TRACKERS 5 条 udp tracker 不变")
     check(len(states.DOWNLOAD_STATES) == 10,
           "states.DOWNLOAD_STATES 成员数不变（10）")
-    check(all(hasattr(fetcher_mod, n) for n in
-              ("STATE_QUEUED", "STATE_DOWNLOADING", "STATE_PAUSED",
-               "STATE_COMPLETED", "STATE_FAILED", "STATE_META_FETCH",
-               "DOWNLOAD_STATES", "BOOTSTRAP_TRACKERS")),
-          "core.fetcher 仍再导出 STATE_* / DOWNLOAD_STATES / BOOTSTRAP_TRACKERS")
+    # Wave 2：states 常量的历史再导出兼容层已整体移除——调用方
+    # （download_mgr_test/session_test/proxycheck_test 等）全部直连
+    # core.states；fetcher 侧 hasattr 必须为假，防止有人「顺手」加回兼容层。
+    check(not any(hasattr(fetcher_mod, n) for n in
+                  ("STATE_QUEUED", "STATE_DOWNLOADING", "STATE_PAUSED",
+                   "STATE_COMPLETED", "STATE_FAILED", "STATE_META_FETCH",
+                   "DOWNLOAD_STATES", "BOOTSTRAP_TRACKERS")),
+          "core.fetcher 不再再导出 STATE_* / DOWNLOAD_STATES / BOOTSTRAP_TRACKERS")
     sig_check("cache_quota", cache_quota, {
         "dir_size_bytes": [("path", False)],
         "scan_preview_dirs": [("preview_root", False)],

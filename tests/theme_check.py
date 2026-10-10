@@ -22,7 +22,7 @@
 
 用法
 ----
-    .\\.venv\\Scripts\\python.exe theme_check.py
+    .\\.venv\\Scripts\\python.exe tests/theme_check.py
 
 退出码：`0` 通过 · `1` 违规 · `2` 环境/依赖异常。
 不启 libtorrent 会话、不联网，秒级完成（可放进 regression_run.py）。
@@ -34,7 +34,7 @@ import os
 import re
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UI_DIR = os.path.join(ROOT, "ui")
 THEME = "theme.py"
 

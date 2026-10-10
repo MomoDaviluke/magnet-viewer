@@ -22,7 +22,7 @@
     异常形态（实测正是后者先发生）。
 
 退出码：0=通过 1=失败 2=SKIP（依赖缺失，绝不假装通过）
-用法：python concurrency_test.py
+用法：python tests/concurrency_test.py
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import test_support as ts  # noqa: E402
@@ -590,7 +590,7 @@ def section_lock_redline(ck: ts.Checker) -> None:
     出锁落盘（`core/taskops.py` 全篇如此）。本段只作第一道机械网。
     """
     ck.section("§E 静态红线：落盘调用不得出现在锁段内（AST）")
-    root = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     scanned, violators = 0, []
     # **按目录发现**而非写死文件名：写死列表会漏掉将来新增的 core/ui 模块，
     # 让「零违规」随模块数增长而悄悄失真（2026-09-17 复审指出）。
@@ -768,7 +768,7 @@ def _scan_locked_calls_in_methods(path: str, methods: frozenset) -> list:
 
 def section_scheduler_lock(ck: ts.Checker) -> None:
     ck.section("§F R-3 调度器互斥（静态不变式 + 三线程压力）")
-    root = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     spath = os.path.join(root, "core", "scheduler.py")
 
     # --- F1 静态：锁段内不得调用会取锁的方法（Lock 不可重入） ---

@@ -92,8 +92,9 @@ def run_one(py: str, suite: str, logdir: str) -> int:
     # 与被测代码无关，极难排查。
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     t0 = time.time()
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", f"{suite}.py")
     with open(log, "wb") as f:
-        rc = subprocess.call([py, f"{suite}.py"], stdout=f, stderr=subprocess.STDOUT,
+        rc = subprocess.call([py, script], stdout=f, stderr=subprocess.STDOUT,
                              env=env)
     return rc, time.time() - t0, log
 

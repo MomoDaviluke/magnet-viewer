@@ -21,7 +21,7 @@
 
 本套件逐条断言修复后的**行为**（不是实现细节），并对同一量做改动前后对照。
 
-用法：.\\.venv\\Scripts\\python.exe wait_timeout_test.py
+用法：.\\.venv\\Scripts\\python.exe tests/wait_timeout_test.py
 退出码：0=通过 1=失败 2=SKIP（依赖缺失，绝不假装通过）
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt  # noqa: E402
@@ -485,22 +485,23 @@ def section_metacache(ck: Checker) -> None:
 
 def section_retry(ck: Checker) -> None:
     ck.section("§E 重试容错：指数退避 / 不硬性放弃 / 失败即催数据（D4）")
-    from ui.main_window import MainWindow
-    base = MainWindow.STREAM_RETRY_BASE_MS
-    cap = MainWindow.STREAM_RETRY_MAX_MS
+    # Wave 2 拆分：退避/门控常量与执行体移居 ui/stream_host.py（协作者）
+    from ui.stream_host import (StreamHost, gate_wait_timeout_reason,
+                                stream_failure_message)
+    base = StreamHost.STREAM_RETRY_BASE_MS
+    cap = StreamHost.STREAM_RETRY_MAX_MS
     seq = [min(cap, base * (2 ** min(6, n - 1))) for n in range(1, 8)]
     ck.check(seq == sorted(seq) and all(d >= base for d in seq),
              f"退避序列单调不减且起点 {base}ms：{seq}")
     ck.check(seq[0] < seq[-1] and max(seq) <= cap,
              f"指数增长并封顶 {cap}ms（末值 {seq[-1]}）")
-    ck.check(MainWindow.STREAM_RETRY_SOFT_LIMIT >= 2,
-             f"软上限 {MainWindow.STREAM_RETRY_SOFT_LIMIT}：只提示不终止重试")
+    ck.check(StreamHost.STREAM_RETRY_SOFT_LIMIT >= 2,
+             f"软上限 {StreamHost.STREAM_RETRY_SOFT_LIMIT}：只提示不终止重试")
 
     # ---- C3：开播门控必须有等待上限，且超时文案可归因 ----
-    gate_ms = MainWindow.GATE_WAIT_TIMEOUT_MS
+    gate_ms = StreamHost.GATE_WAIT_TIMEOUT_MS
     ck.check(0 < gate_ms <= 120_000,
              f"门控等待上限存在且在合理区间（{gate_ms}ms）")
-    from ui.main_window import gate_wait_timeout_reason, stream_failure_message
 
     class _F:
         size = 8 * 1024 * 1024
@@ -529,8 +530,10 @@ def section_retry(ck: Checker) -> None:
     ck.check(with_note.startswith(base_msg) and "503" in with_note,
              "有应答摘要时附加在原文案之后（C4：失败可归因）")
 
-    # ---- 接线验证：_on_gate_timeout / _last_stream_note 的**行为**
-    # 用鸭子类型宿主直接调未绑定方法：既能验行为，又不必搭整个 GUI。
+    # ---- 接线验证：on_gate_timeout / last_stream_note 的**行为**
+    # 用鸭子类型宿主直接调 StreamHost 未绑定方法（Wave 2 拆分：门控超时/
+    # 应答摘要的执行体移居 ui/stream_host.py，宿主经 win 晚绑定访问）：
+    # 既能验行为，又不必搭整个 GUI。
     class _V:
         def __init__(self):
             self.err = None
@@ -545,25 +548,27 @@ def section_retry(ck: Checker) -> None:
         def set_state(self, m):
             self.state = m
 
-    class _Host(MainWindow):
-        """只借方法实现，**故意不调 super().__init__**（不建 GUI、不占端口）。"""
+    class _Win:
+        """StreamHost 的鸭子宿主：只喂它用到的成员，**不建 GUI**。"""
 
         def __init__(self):
-            pass
+            self.preview = type("P", (), {"video": _V()})()
+            self.status_panel = _S()
+            self.cfg = type("C", (), {
+                "proxy": staticmethod(
+                    lambda: {"type": "none", "host": ""})})()
 
-    host = _Host()
-    host.preview = type("P", (), {"video": _V()})()
-    host.status_panel = _S()
-    host._pending_video = ("pair",)
-    host.cfg = type("C", (), {
-        "proxy": staticmethod(lambda: {"type": "none", "host": ""})})()
-    MainWindow._on_gate_timeout(host, _F(), st, 61.0)
-    ck.check(host._pending_video is None,
+    win = _Win()
+    host = StreamHost.__new__(StreamHost)      # 绕过 __init__（不建流服务）
+    host._win = win
+    host.pending_video = ("pair",)
+    StreamHost.on_gate_timeout(host, _F(), st, 61.0)
+    ck.check(host.pending_video is None,
              "门控超时后清掉待播状态（停止空转，用户可再点播放重试）")
-    ck.check(bool(host.preview.video.err)
-             and "等待开播数据超时" in host.preview.video.err,
-             f"超时结论上屏到播放页（{str(host.preview.video.err)[:32]}…）")
-    ck.check(host.status_panel.state == host.preview.video.err,
+    ck.check(bool(win.preview.video.err)
+             and "等待开播数据超时" in win.preview.video.err,
+             f"超时结论上屏到播放页（{str(win.preview.video.err)[:32]}…）")
+    ck.check(win.status_panel.state == win.preview.video.err,
              "状态栏与播放页文案一致（不看播放页也能看到）")
 
     class _SrvOK:
@@ -575,10 +580,10 @@ def section_retry(ck: Checker) -> None:
             raise RuntimeError("boom")
 
     host.server = _SrvOK()
-    ck.check(MainWindow._last_stream_note(host).startswith("流服务最近应答"),
+    ck.check(StreamHost.last_stream_note(host).startswith("流服务最近应答"),
              "C4：从流服务取到最近应答摘要")
     host.server = _SrvBad()
-    ck.check(MainWindow._last_stream_note(host) == "",
+    ck.check(StreamHost.last_stream_note(host) == "",
              "C4：取摘要失败时回落空串（绝不因归因失败而抛）")
 
     cache = tempfile.mkdtemp(prefix="mv_wait_retry_")

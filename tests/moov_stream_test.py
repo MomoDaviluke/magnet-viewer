@@ -10,7 +10,7 @@ FFmpeg 探测会报 `moov atom not found` / `Invalid data found when processing 
    - 仅头部 64KB（旧行为）        → 必须失败（复现用户报错）；
    - 头部 + 尾部 4MB 窗口（修复后）→ 必须成功（可边下边播）；
    - 全部下载                     → 必须成功（基线）。
-用法：python moov_stream_test.py
+用法：python tests/moov_stream_test.py
 """
 import os
 import shutil
@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.models import PieceMap  # noqa: E402
 from core.stream_server import StreamServer  # noqa: E402

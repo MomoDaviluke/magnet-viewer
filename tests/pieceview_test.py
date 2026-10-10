@@ -15,7 +15,7 @@
   §I 稳态零位图物化（核心判据）
   §J 派发层：无 view 时与纯函数逐值一致（不许悄悄改变旧路径）
 
-用法：.\\.venv\\Scripts\\python.exe pieceview_test.py
+用法：.\\.venv\\Scripts\\python.exe tests/pieceview_test.py
 退出码：0=通过 1=失败 2=SKIP（依赖缺失，绝不假装通过）
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ import random
 import sys
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt  # noqa: E402

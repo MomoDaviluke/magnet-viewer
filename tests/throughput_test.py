@@ -22,7 +22,7 @@
     （下限 5 MB/s 仅作为「链路根本没跑起来」的哨兵，防做种会话被 GC 之类的哑失败）。
 
 退出码：0=通过 1=失败 2=SKIP（依赖缺失，绝不假装通过）
-用法：python throughput_test.py
+用法：python tests/throughput_test.py
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
     import libtorrent as lt  # noqa: E402

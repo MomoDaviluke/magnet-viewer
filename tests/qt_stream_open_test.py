@@ -8,7 +8,7 @@
 - 头部 + 尾部 4MB 索引窗口（修复后） → 期望成功进入 Loaded/Buffered/Buffering；
 - 全部下载（基线）                  → 期望成功。
 
-用法：QT_QPA_PLATFORM=offscreen python qt_stream_open_test.py
+用法：QT_QPA_PLATFORM=offscreen python tests/qt_stream_open_test.py
 """
 import os
 import shutil
@@ -19,7 +19,7 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QEventLoop, QTimer, QUrl  # noqa: E402
 from PySide6.QtMultimedia import QMediaPlayer  # noqa: E402

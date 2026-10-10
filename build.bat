@@ -29,5 +29,5 @@ if errorlevel 1 (
 )
 
 echo === 3/3 verify output ===
-"%PY%" pack_check.py
+"%PY%" tests\pack_check.py
 exit /b %errorlevel%

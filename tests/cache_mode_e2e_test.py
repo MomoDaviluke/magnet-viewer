@@ -9,7 +9,7 @@ SessionManager 走真解析/真落盘/真 fastresume，验证 plan/06 迅雷式�
   local_download_rate_limit（默认 0=不限），不补设则 48MB 秒下完、看不到"未完成"窗口；
 - 目录字节和恒等于文件大小（预分配存储），不能当进度用——真进度看 file_progress。
 
-用法：.venv/Scripts/python cache_mode_e2e_test.py（退出码 0/1/2 约定同全项目）
+用法：.venv/Scripts/python tests/cache_mode_e2e_test.py（退出码 0/1/2 约定同全项目）
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import shutil
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from test_support import (Checker, WorkSpace, build_payload, dir_byte_snapshot,
                           magnet_uri, make_torrent, start_seeder, wait_until)
