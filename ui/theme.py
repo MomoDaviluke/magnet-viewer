@@ -81,7 +81,47 @@ DARK: dict = {
     "bg_compartment": "#2b313b",     # 右侧分区底（深：比面板 #1b1e24 亮一档）
 }
 
-PALETTES: dict = {"light": LIGHT, "dark": DARK}
+# ---- 主题注册表（Wave 3 任务 2.3）----
+# THEMES: 主题名 -> 调色板 dict。内置 LIGHT / DARK 经 register_theme 进表；
+# 未来用户自定义主题同样走 register_theme（即扩展接口，无需改 apply_theme）。
+# 键集要求与内置板完全一致：apply_theme 的常量同步循环与 qss() 按固定键取值，
+# 缺键会在热切换时 KeyError——所以注册入口先校验键集，把错误挡在注册点。
+THEMES: dict = {}
+
+# 调色板必须覆盖的键集（= 内置浅色板键集：qss() + apply_theme 常量同步的
+# 消费面全集；新增内置键自动进入要求集，与 theme_check R4「键集一致」同向）
+_REQUIRED_PALETTE_KEYS = frozenset(LIGHT)
+
+
+def register_theme(name: str, palette: dict) -> bool:
+    """注册一个主题（返回是否成功注册）。
+
+    - 重复名：**拒绝，首注册者胜**（与 core.config.register_config_key 同一
+      纪律——覆盖会让生效主题取决于注册顺序，隐式时序耦合更难排查）。
+    - 非法入参（非字符串名 / 非 dict / 键集不全）：抛错。这是编程错误，
+      必须在注册点炸；若放行，代价是用户点一下主题下拉就触发运行时 KeyError。
+    - 注意：箭头资源后缀仍按 LIGHT/DARK 身份判定（见 _asset_tag）——自定义
+      主题取 "light" 档雪佛龙；要第三套箭头资源时再扩展 ASSET_* 与 _asset_tag。
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"主题名必须是非空字符串：{name!r}")
+    if not isinstance(palette, dict):
+        raise TypeError(f"调色板必须是 dict：{name} -> {type(palette).__name__}")
+    missing = sorted(_REQUIRED_PALETTE_KEYS - set(palette))
+    if missing:
+        raise ValueError(f"主题 {name!r} 调色板缺键：{missing}")
+    if name in THEMES:
+        log_warning("ui.theme.register_theme",
+                    f"主题 {name!r} 已注册：拒绝重复注册（首注册者胜）")
+        return False
+    THEMES[name] = palette
+    return True
+
+
+register_theme("light", LIGHT)
+register_theme("dark", DARK)
+
+PALETTES: dict = THEMES   # 兼容别名：同一 dict 对象，既有读法不受影响
 THEME_MODES: tuple = ("light", "dark", "system")   # apply_theme 的合法值域
 DEFAULT_MODE = "light"
 
@@ -173,7 +213,9 @@ def asset_url(name: str) -> str:
 
 
 def _asset_tag(palette: dict) -> str:
-    """色板 → 资源后缀（light / dark）。qss() 只会拿到 LIGHT/DARK 本体。"""
+    """色板 → 资源后缀（light / dark）。仅 DARK 本体取深色雪佛龙；
+    自定义主题（register_theme）按浅色档处理——两套箭头描边色不同，
+    深色档要求描边与 DARK["text_muted"] 逐像素一致，不保证的板不给用。"""
     return "dark" if palette is DARK else "light"
 
 
@@ -448,11 +490,20 @@ def system_mode() -> str:
 
 
 def resolve_mode(mode: str) -> str:
-    """把 "light"/"dark"/"system"（含存量非法值）解析为实际生效的 light/dark。"""
+    """把请求模式解析为实际生效主题名（含存量非法值回退，绝不抛错）。
+
+    - "system" → 跟随系统（解析为 light/dark）；
+    - 已注册主题名（内置 light/dark，或未来 register_theme 的自定义主题）→ 原样；
+    - 其余（非法/空值）→ DEFAULT_MODE。
+    对既有 light/dark/system 三档行为逐字不变（THEME_MODES 值域是内置三档的
+    契约声明；注册表扩展后，自定义主题名同样可解析，这是 2.3 的留口）。
+    """
     m = str(mode or DEFAULT_MODE).strip().lower()
-    if m not in THEME_MODES:
+    if m == "system":
+        return system_mode()
+    if m not in THEMES:
         m = DEFAULT_MODE      # 存量非法值/空值：回退默认浅色，绝不抛错
-    return system_mode() if m == "system" else m
+    return m
 
 
 def active_mode() -> str:
@@ -462,7 +513,7 @@ def active_mode() -> str:
 
 def current_palette() -> dict:
     """当前激活色板（apply_theme 同步过的那一套）。"""
-    return PALETTES[_ACTIVE_MODE]
+    return THEMES[_ACTIVE_MODE]
 
 
 def _repaint_open_widgets(app) -> None:
@@ -494,7 +545,7 @@ def apply_theme(app, mode: str = DEFAULT_MODE) -> str:
     """
     global QSS, _ACTIVE_MODE
     name = resolve_mode(mode)
-    pal = PALETTES[name]
+    pal = THEMES[name]
     _ACTIVE_MODE = name
     g = globals()
     for key, const in _CONST_NAMES.items():

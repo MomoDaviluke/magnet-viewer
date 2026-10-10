@@ -8,10 +8,16 @@ from PySide6.QtCore import QSettings
 
 from core import secretbox
 from core.cache_mode import PREVIEW_CACHE_CONVERT
+from core.logutil import log_warning
 
 RECENT_LIMIT = 15
 
+# 键按领域分组声明（Wave 3 任务 2.2 权衡：既有键**集中声明**在本表、逐字冻结
+# ——把注册语句物理搬进 session.py 等领域模块会引入 config→领域→config 的
+# 导入环风险，且「未 import 即键缺失」的隐式时序耦合比集中声明更难排查。
+# 新增键请走 register_config_key()（领域模块启动时调用），本表只留历史契约。）
 DEFAULTS: dict = {
+    # ---- 网络 / 代理 ----
     "proxy_type": "none",          # none | socks5 | http
     "proxy_host": "",
     "proxy_port": 1080,
@@ -65,6 +71,74 @@ _TYPES: dict = {
 LT_PROXY_TYPES = {"none": 0, "socks4": 1, "socks5": 2,
                   "socks5_pw": 3, "http": 4, "http_pw": 5}
 
+# key -> callable(value) -> bool；由 register_config_key 填充。
+# 只在**读取侧**（AppConfig.get）生效：写入侧不设卡，设置面板才能把
+# 「编辑框里尚未定型的中间值」照常落盘（校验失败的值下次读到时回落默认）。
+_VALIDATORS: dict = {}
+
+
+def _infer_type(default) -> type | None:
+    """从默认值推断 QSettings 读取类型（bool 必须先判：bool 是 int 子类）。"""
+    if isinstance(default, bool):
+        return bool
+    if isinstance(default, int):
+        return int
+    if isinstance(default, str):
+        return str
+    return None
+
+
+def register_config_key(key: str, default, validator=None) -> None:
+    """注册新配置键（Wave 3 任务 2.2：领域模块启动时声明自己的键）。
+
+    - ``default`` 写入 DEFAULTS（AppConfig.get 的回落值、as_dict 的键集来源）；
+      能推断出 bool/int/str 时同步登记 _TYPES（QSettings 读取类型），
+      其余类型沿用 get 的 str 兜底——与既有未登记键行为一致。
+    - ``validator`` 可选：``value -> bool``。非法值在 get 时回落 default
+      并 log_warning（配置层容错纪律：**绝不抛异常打断 UI**）。
+    - **重复注册同键：拒绝，首注册者胜**，log_warning 留痕。理由：若允许
+      覆盖，DEFAULTS 取值将取决于领域模块的 import 顺序（隐式时序耦合），
+      同一键在不同启动路径下默认值不同——比报错更难排查；拒绝让冲突在
+      注册点显性暴露，调用方应改用新键名或复用既有键。
+    - 参数误用（空键名 / validator 不可调用）直接抛错：这是编程错误，
+      必须在注册点炸，而不是拖到每次 get 时才静默降级。
+    """
+    if not key or not isinstance(key, str):
+        raise ValueError(f"配置键名必须是非空字符串：{key!r}")
+    if key in DEFAULTS:
+        log_warning("config.register",
+                    f"配置键 {key!r} 已注册：拒绝重复注册（首注册者胜，"
+                    f"现有默认值 {DEFAULTS[key]!r} 保持不变）")
+        return
+    if validator is not None and not callable(validator):
+        raise TypeError(f"validator 必须可调用：{validator!r}")
+    DEFAULTS[key] = default
+    inferred = _infer_type(default)
+    if inferred is not None:
+        _TYPES[key] = inferred
+    if validator is not None:
+        _VALIDATORS[key] = validator
+
+
+def _validate(key: str, value, default):
+    """读取侧校验：无 validator 原样返回（既有键零行为变化）；
+    validator 拒绝或自身抛异常都回落 default 并留痕。"""
+    fn = _VALIDATORS.get(key)
+    if fn is None:
+        return value
+    try:
+        ok = bool(fn(value))
+    except Exception as e:
+        # 兜底（有意宽泛）：validator 是注册方注入的回调，异常类型不可枚举；
+        # 「校验器自己坏了」按无法确认合法处理 → 回落 default（容错纪律）
+        log_warning("config.validator", f"{key} 校验器抛异常，按非法处理：{e}")
+        return default
+    if ok:
+        return value
+    log_warning("config.validator",
+                f"{key} 值 {value!r} 被校验器拒绝，回落默认 {default!r}")
+    return default
+
 
 class AppConfig:
     """QSettings 封装：读写用户设置（Windows 下存注册表）。"""
@@ -81,8 +155,9 @@ class AppConfig:
             return default
         if key == "proxy_pass":
             # 注册表里存的是 DPAPI 密文（dpapi:v1:…），旧明文原样返回
+            # （该键不参与 validator 校验：校验密文无意义，行为逐字保留）
             return secretbox.unprotect(str(v or ""))
-        return v
+        return _validate(key, v, default)
 
     def set(self, key: str, value):
         if key == "proxy_pass":

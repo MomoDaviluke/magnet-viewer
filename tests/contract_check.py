@@ -34,11 +34,13 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from core import (cache_guard, cache_quota, models, parser, persist,
+    from core import (cache_guard, cache_quota, config, interfaces, models,
+                      parser, persist,
                       pieceview,
                       preview, registry, resolver, scheduler, session,
                       states, stream_server, taskops)
     from core import fetcher as fetcher_mod
+    from core.config import AppConfig, DEFAULTS, register_config_key
     from core.fetcher import SessionManager
 except Exception as e:          # 依赖缺失：显式 SKIP，绝不假装通过
     print(f"依赖缺失，无法执行契约自检：{e}")
@@ -475,6 +477,110 @@ def main() -> int:
           "downloaded_bytes 口径冻结（汇总/空/None→0、非法与负值容错）")
     check(cache_guard.CACHE_MARKER == ".magnet_viewer_cache",
           "CACHE_MARKER 常量值不变")
+
+    # ------------------------------------------------ [5] Wave 3 任务 2.1：Protocol 结构满足
+    # core/interfaces.py 只做「声明」；本节是满足性回归门禁——实现改名/丢方法/
+    # 改签名，这里立刻红（Protocol 不强制实现继承，只能靠结构检查守住）。
+    print("\n[5] 实现满足 core.interfaces Protocol（结构化鸭子类型，无显式继承）")
+    from core.stream_server import StreamServer as _SS
+    import ui.theme as _theme_mod
+    check(issubclass(resolver.ResolverCore, interfaces.Resolver),
+          "ResolverCore 满足 Resolver Protocol（issubclass 结构检查）")
+    check(issubclass(_SS, interfaces.StreamTransport),
+          "StreamServer 满足 StreamTransport Protocol")
+    check(issubclass(SessionManager, interfaces.CachePolicy),
+          "SessionManager 满足 CachePolicy Protocol（facade 清理策略三入口）")
+    check(isinstance(_theme_mod, interfaces.ThemeSource),
+          "ui.theme 模块满足 ThemeSource Protocol（isinstance hasattr 检查）")
+    # 签名逐字一致：Protocol 声明的方法面与实现同名方法指纹必须相等
+    # （fp 不含类型注解，参数名/可选性一致即可——与全文件指纹口径统一）
+    for proto, impl, label in (
+            (interfaces.Resolver, resolver.ResolverCore, "Resolver/ResolverCore"),
+            (interfaces.StreamTransport, _SS, "StreamTransport/StreamServer"),
+            (interfaces.CachePolicy, SessionManager, "CachePolicy/SessionManager"),
+            (interfaces.ThemeSource, _theme_mod, "ThemeSource/ui.theme")):
+        drift = []
+        for m in dir(proto):
+            if m.startswith("_"):
+                continue
+            pf, imf = fp(getattr(proto, m)), fp(getattr(impl, m, None))
+            if pf is None or pf != imf:
+                drift.append(f"{m}: 协议 {pf} vs 实现 {imf}")
+        check(not drift, f"{label} 方法签名逐字一致"
+              + ("" if not drift else f"（漂移：{drift}）"))
+
+    # ------------------------------------------------ [6] Wave 3 任务 2.2：配置注册机制
+    print("\n[6] register_config_key / validator（临时键，测后即删，不污染注册表）")
+    _rk = "wave3test_rate"
+    _cfg = AppConfig()
+    try:
+        register_config_key(_rk, 7, validator=lambda v: 0 <= int(v) <= 100)
+        check(DEFAULTS.get(_rk) == 7 and _cfg.get(_rk) == 7,
+              "注册新键后 get 返回 default（未落值时）")
+        _cfg.set(_rk, 42)
+        check(_cfg.get(_rk) == 42, "validator 放行合法值（42 原样读回）")
+        _cfg.set(_rk, 999)
+        check(_cfg.get(_rk) == 7, "validator 拒绝非法值 → 回落 default（不抛异常）")
+        register_config_key(_rk, 123)      # 重复注册同键、不同 default
+        check(DEFAULTS.get(_rk) == 7,
+              "重复注册被拒绝：首注册者胜，default 不被覆盖（防 import 顺序耦合）")
+        _raised = None
+        try:
+            register_config_key("", 1)
+        except ValueError as e:
+            _raised = type(e).__name__
+        check(_raised == "ValueError", "空键名注册直接抛 ValueError（编程错误显性化）")
+    finally:
+        DEFAULTS.pop(_rk, None)
+        config._TYPES.pop(_rk, None)
+        config._VALIDATORS.pop(_rk, None)
+        _cfg.q.remove(_rk)
+        _cfg.q.sync()
+    check(_rk not in DEFAULTS, "清理：临时键已从 DEFAULTS 移除")
+    _noval = AppConfig()
+    _nk = "wave3test_plain"
+    try:
+        register_config_key(_nk, "a")          # 无 validator 的新键
+        _noval.set(_nk, "b")
+        check(_noval.get(_nk) == "b",
+              "无 validator 的键：读值零行为变化（透传，不受校验层影响）")
+    finally:
+        DEFAULTS.pop(_nk, None)
+        config._TYPES.pop(_nk, None)
+        _noval.q.remove(_nk)
+        _noval.q.sync()
+
+    # ------------------------------------------------ [7] Wave 3 任务 2.3：主题注册表
+    print("\n[7] ui.theme 注册表（THEMES + register_theme）")
+    check(isinstance(getattr(_theme_mod, "THEMES", None), dict)
+          and _theme_mod.THEMES is _theme_mod.PALETTES
+          and _theme_mod.THEMES.get("light") is _theme_mod.LIGHT
+          and _theme_mod.THEMES.get("dark") is _theme_mod.DARK,
+          "LIGHT/DARK 经注册路径进 THEMES；PALETTES 为同一对象别名（读法不变）")
+    check(callable(getattr(_theme_mod, "register_theme", None)),
+          "register_theme(name, palette) 存在（未来自定义主题接口）")
+    _tn = "wave3test-theme"
+    try:
+        _pal = dict(_theme_mod.LIGHT)
+        _pal["bg"] = "#123456"
+        check(_theme_mod.register_theme(_tn, _pal) is True
+              and _tn in _theme_mod.THEMES,
+              "register_theme 注册自定义主题成功进表")
+        check(_theme_mod.register_theme(_tn, _theme_mod.DARK) is False
+              and _theme_mod.THEMES[_tn] is _pal,
+              "重复主题名拒绝：首注册者胜，返回 False 不覆盖")
+        _bad = None
+        try:
+            _theme_mod.register_theme("bad-pal", {"bg": "#ffffff"})
+        except ValueError as e:
+            _bad = type(e).__name__
+        check(_bad == "ValueError", "键集不全的调色板注册抛 ValueError（挡在注册点）")
+        check(_theme_mod.resolve_mode(_tn) == _tn
+              and _theme_mod.resolve_mode("garbage") == "light",
+              "resolve_mode：已注册自定义名可解析；非法值仍回退 light（行为不变）")
+    finally:
+        _theme_mod.THEMES.pop(_tn, None)
+    check(_tn not in _theme_mod.THEMES, "清理：临时主题已从 THEMES 移除")
 
     # ------------------------------------------------ 汇总
     print(f"\n=== 契约自检：OK {len(OK)} / FAIL {len(FAIL)} ===")
