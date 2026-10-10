@@ -76,6 +76,33 @@ cd android
 - 共享测试工具在 `test_support.py`（本机做种端、种子构造、磁盘快照、
   轮询等待），新测试优先复用它。
 
+### 覆盖率门槛（路线图 Phase 3.2）
+
+- **测量范围**：`.coveragerc` 限定 `source = core, ui`（branch 口径），
+  自动排除 tests/、第三方与 `main.py`（薄入口胶水）；不为凑数字扩大或
+  缩小范围。
+- **本地跑法**：
+  ```powershell
+  .venv\Scripts\python.exe coverage_run.py        # 快速集（秒级，日常循环）
+  .venv\Scripts\python.exe coverage_run.py full   # 全量 27 套（约 4 分钟，CI 口径）
+  .venv\Scripts\python.exe -m coverage report --fail-under=70   # 门禁自检
+  ```
+- **CI 门禁**：`.github/workflows/ci.yml` 在回归后跑 `coverage_run.py full`
+  + `coverage report --fail-under=70`，低于门槛即红。
+- **门槛决策**：2026-10-10 实测基线 **81%**（core/ 语句级 87.7%、ui/ 75.3%，
+  合计 branch 口径 81%）≥ 目标 70%，故直接设 70 硬门禁、无过渡期
+  （对齐 G4「实测≥目标才上调」：基线已超目标，无需「实测-2」爬坡）。
+- **爬坡方向**（覆盖率最低的 5 个模块，补测优先）：
+  | 模块 | 覆盖率 | 备注 |
+  |---|---|---|
+  | `ui/task_controller.py` | 17% | 任务操作 UI 控制器，几乎无测试触达 |
+  | `core/exceptions.py` | 0% | 异常层级实施中，随迁移补单测 |
+  | `ui/inbound_host.py` | 28% | 入站诊断 UI 壳（逻辑在 core/inbound 已 77%） |
+  | `ui/stream_host.py` | 47% | 流媒体 UI 宿主 |
+  | `ui/downloads_pane.py` | 50% | 下载列表主面板 |
+  补测建议：优先给 `task_controller` / `downloads_pane` 加假句柄驱动的
+  交互级测试（复用 persist/taskops 套件的假依赖模式），可最快抬升 ui/ 层。
+
 ---
 
 ## 三、提交规范
