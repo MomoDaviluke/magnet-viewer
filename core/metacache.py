@@ -453,8 +453,16 @@ def maybe_prune(cache_dir: str, max_files: int = META_MAX_FILES,
                                  (now + _PRUNE_RESYNC) if rescan else next_scan)
             return 0
     removed = prune_meta(cache_dir, max_files)
+    # A7 修复（2026-10-10，Phase 5.1 残留）：剪枝后的重扫计数原先写在
+    # `with _PRUNE_LOCK` 段内——_count_entries 是 scandir I/O，违反「锁内禁
+    # I/O」纪律（docs/ARCHITECTURE.md §三）。上方主 rescan 路径 2026-09-29
+    # 审计已外移，此处是同型漏修：先锁外扫描，再回锁只写结果。
+    # 竞态说明：扫描与回锁写之间若有并发增删，计数偏差一两个条目无影响
+    # （本设施「部分清理尽力而为」语义，见 docstring）；真正的删除动作在
+    # prune_meta 锁外完成，撞并发删除由 os.remove 的 OSError 静默兜住。
+    new_cnt = _count_entries(d)
     with _PRUNE_LOCK:
-        _PRUNE_STATE[key] = (_count_entries(d), time.monotonic() + _PRUNE_RESYNC)
+        _PRUNE_STATE[key] = (new_cnt, time.monotonic() + _PRUNE_RESYNC)
     return removed
 
 

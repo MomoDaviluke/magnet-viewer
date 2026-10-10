@@ -553,7 +553,8 @@ def _corner_name(node) -> str:
     return ""
 
 
-def _scan_locked_calls(path: str) -> list:
+def _scan_locked_calls(path: str, sensitive: tuple = _SENSITIVE,
+                       lock_names: set = _LOCK_NAMES) -> list:
     with open(path, "r", encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=path)
     hits: list = []
@@ -563,13 +564,13 @@ def _scan_locked_calls(path: str) -> list:
             if isinstance(child, ast.With):
                 inner = locks + [_corner_name(it.context_expr)
                                  for it in child.items]
-                walk(child, [n for n in inner if n in _LOCK_NAMES])
+                walk(child, [n for n in inner if n in lock_names])
                 continue
             if isinstance(child, ast.Call):
                 fn = child.func
                 name = fn.attr if isinstance(fn, ast.Attribute) else (
                     fn.id if isinstance(fn, ast.Name) else "")
-                if name in _SENSITIVE:
+                if name in sensitive:
                     hits.append((child.lineno, name, list(locks)))
             walk(child, locks)
 
@@ -621,6 +622,16 @@ def section_lock_redline(ck: ts.Checker) -> None:
              f"发现失败不会退化成「零违规」的假绿")
     ck.check(not violators,
              f"核心模块内无「持锁落盘」调用点（违规 {violators or '无'}）")
+    # A7（Phase 5.1）同型断言扩展到 metacache 私有剪枝锁：`_count_entries`
+    # 是 scandir I/O，绝不允许出现在 `with _PRUNE_LOCK` 段内（锁内禁 I/O，
+    # docs/ARCHITECTURE.md §三）。2026-09-29 审计外移了主 rescan 路径，
+    # 剪枝后重扫是漏修点——本断言把两处一起钉死，防再犯。
+    mc_hits = _scan_locked_calls(
+        os.path.join(root, "core", "metacache.py"),
+        sensitive=("_count_entries",), lock_names={"_PRUNE_LOCK"})
+    ck.check(not [h for h in mc_hits if h[2]],
+             f"metacache 剪枝锁内无 scandir（违规 "
+             f"{[f'L{h[0]}' for h in mc_hits if h[2]] or '无'}）")
     # 反向自检：扫描器本身要能识别出锁段（否则「零违规」恒真、护栏是空的）
     probe = os.path.join(tempfile.gettempdir(), "mv_ast_probe.py")
     with open(probe, "w", encoding="utf-8") as f:
