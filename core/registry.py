@@ -37,7 +37,7 @@ from .states import STATE_META_FETCH, STATE_READY
 
 DOWNLOADS_SUBDIR = "downloads"
 PREVIEW_SUBDIR = ".preview"
-METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种（fetcher 再导出，兼容）
+METADATA_TIMEOUT = 90.0  # 秒，超时判定为资源无做种（Wave 2 起 fetcher 不再再导出）
 
 # hash_key 兜底临时键的单调序号（审计 2026-09-29：替代可复用的 id(handle)）
 _TMP_KEY_SEQ = itertools.count()

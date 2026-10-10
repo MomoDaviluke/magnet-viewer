@@ -14,51 +14,63 @@ alert 归属按 info_hash 查注册表，元数据看门狗按任务独立计时
 
 重构阶段 1：任务持久化已整体迁入 ``core.persist``（``TaskPersistence``，
 依赖以 getter/回调注入，不反向依赖本模块），本类对应方法降级为薄委托；
-任务生命周期常量与 bootstrap tracker 下沉到 ``core.states``（本模块再导出，
-``from core.fetcher import STATE_*`` 的历史写法不受影响）。
+任务生命周期常量与 bootstrap tracker 下沉到 ``core.states``。
+
+facade 契约（Wave 2 瘦身，docs/ARCHITECTURE.md §2.2 / ADR-0002）：本模块是
+UI 唯一直接触达的 core 入口，对外只承诺 ``SessionManager``（见 ``__all__``）
+与其公开方法/薄委托。历史「再导出」兼容层已全部移除——``STATE_*`` /
+``STATE_NAMES`` / ``DOWNLOAD_STATES`` / ``BOOTSTRAP_TRACKERS`` 从
+``core.states`` import，``TaskRecord`` / ``METADATA_TIMEOUT`` / ``*_SUBDIR``
+从 ``core.registry`` import，``load_tasks`` / ``save_tasks`` 等从
+``core.taskstore`` import。仅保留两类例外：① ``persist_*`` /
+``registry_*`` / ``resolver_*`` 注入别名（本模块委托方法体在用，且
+persist_test/resolver_test 以「monkeypatch fetcher 模块属性」验证委托
+路由，属依赖注入实用，非兼容层）；② ``cache_mode`` 两常量经本模块
+再导出（UI 预览缓存模式文案/校验的唯一取值来源）。
 """
 from __future__ import annotations
 
 import os
 import threading
+from typing import TYPE_CHECKING
 
 import libtorrent as lt
 
-from . import proxycheck
-from .cache_guard import ensure_cache_dir, sweep_tmp_files
-from .cache_mode import PREVIEW_CACHE_CONVERT
+# cache_guard 标记常量 + 四函数：ensure_cache_dir/sweep_tmp_files 本模块
+# __init__/start 在用；其余三符号（CACHE_MARKER/clear_cache_contents/
+# guard_ok_for_cleanup）是 facade 给 UI 的再导出（§2.2 白名单）——它们接受
+# **显式 path** 参数（设置面板作用于「编辑框里尚未保存的新目录」），语义上
+# 不是 SessionManager 的成员操作，故以模块级再导出而非委托方法暴露，
+# 绑定 self.cache_dir 反而错。
+from .cache_guard import (  # noqa: F401  CACHE_MARKER 等 = facade 再导出
+    CACHE_MARKER, clear_cache_contents, ensure_cache_dir,
+    guard_ok_for_cleanup, sweep_tmp_files)
+# cache_mode 两常量：PREVIEW_CACHE_CONVERT 本模块 stop_preview 分支在用；
+# PREVIEW_CACHE_MODES 供 UI（设置面板下拉值域）经 facade 取用——§2.2 规定
+# ui/* 只准 import core.models / core.config / core.fetcher / core.logutil，
+# 常量再导出在此是 facade 契约的一部分，不是历史兼容层。
+from .cache_mode import (PREVIEW_CACHE_CONVERT,  # noqa: F401
+                         PREVIEW_CACHE_MODES)
 from .logutil import log_exception, log_warning
-from .models import ParseResult, TorrentFile
+from .persist import (PersistDeps, TaskPersistence,
+                      is_within as persist_is_within,
+                      safe_task_save_path as persist_safe_task_save_path,
+                      save_subdir_of as persist_save_subdir_of,
+                      task_dir as persist_task_dir)
 from .preview import PreviewCore
-from .preview import STATE_NAMES  # noqa: F401  再导出（历史兼容）
-from .registry import (DOWNLOADS_SUBDIR, METADATA_TIMEOUT,  # noqa: F401
-                       PREVIEW_SUBDIR, TaskRecord, TaskRegistry)
-from .persist import PersistDeps, TaskPersistence
-from .persist import is_within as persist_is_within
-from .persist import safe_task_save_path as persist_safe_task_save_path
-from .persist import save_subdir_of as persist_save_subdir_of
-from .persist import task_dir as persist_task_dir
+from .registry import (DOWNLOADS_SUBDIR, PREVIEW_SUBDIR, TaskRecord,
+                       TaskRegistry, hash_key as registry_hash_key,
+                       ih_from_params as registry_ih_from_params)
+from .resolver import (ResolverCore,
+                       result_from_torrent_info as resolver_result_from_ti)
 from .scheduler import PreviewScheduler
 from .session import DHT_STATE_FILE, SessionCore, SessionDeps
-# 再导出：历史写法 from core.fetcher import TaskRecord / METADATA_TIMEOUT /
-# *_SUBDIR 仍须可用（persist_test/session_test/registry_test 在用）；本体已
-# 下沉 core.registry（R-2：TaskRecord 是注册表行结构，寄居 fetcher 是历史债）。
-from .registry import hash_key as registry_hash_key
-from .registry import ih_from_params as registry_ih_from_params
-from .resolver import ResolverCore
-from .resolver import result_from_torrent_info as resolver_result_from_ti
 from .taskops import TaskOps
-# 再导出：历史写法 from core.fetcher import STATE_* 仍须可用（download_mgr_test
-# 在用）；常量本体已下沉到 core.states，避免 fetcher → persist → fetcher 环。
-from .states import (BOOTSTRAP_TRACKERS, DOWNLOAD_STATES,  # noqa: F401
-                     STATE_COMPLETED, STATE_DELETED, STATE_DOWNLOADING,
-                     STATE_FAILED, STATE_META_FETCH, STATE_PAUSED,
-                     STATE_QUEUED, STATE_READY, STATE_SEEDING, STATE_STOPPED,
-                     STATE_VALIDATE)
-# 再导出 load_tasks（历史写法）；save_tasks/task_from_result/upsert_task 为
-# 上游 seek 渐进服务修复所用（merge upstream/main f58bfa1）。
-from .taskstore import (load_tasks, save_tasks,  # noqa: F401
-                        task_from_result, upsert_task)
+
+if TYPE_CHECKING:
+    # 仅类型注解使用（__future__ annotations 下注解惰性求值，运行时不导入；
+    # 移出顶部 import 面是 Wave 2 「相对 import ≤10」瘦身的组成部分）
+    from .models import ParseResult, TorrentFile
 
 
 
@@ -157,9 +169,7 @@ class SessionManager:
             tasks_set=lambda v: setattr(self, "_tasks", v),
             hash_key=registry_hash_key, find_record=self._registry.find_record,
             current_record=self._registry.current_record,
-            tasks_loader=lambda: load_tasks(
-                self.cache_dir,
-                warn=lambda m: log_warning("fetcher.restore.tasks", m)),
+            tasks_loader=self._load_tasks_for_restore,
             restore_task=self._restore_task,
             thread_factory=lambda target: threading.Thread(
                 target=target, daemon=True),
@@ -180,7 +190,9 @@ class SessionManager:
             listen_interface=self._cfg_listen_interface(),
             # 代理自检（D-2026-09-18 加固）：注真实探测函数——只有生产侧走
             # 网络探测，测试替身不传该字段即保持「不探测、不额外报错」。
-            proxy_probe=proxycheck.probe,
+            # 经 _proxy_probe 薄委托延迟导入 proxycheck（Wave 2 facade 瘦身：
+            # 顶部相对 import ≤10，proxycheck 只在探测线程里真正用到）。
+            proxy_probe=self._proxy_probe,
             dht_state_path=os.path.join(self.cache_dir, DHT_STATE_FILE)))
 
         # 任务 CRUD（阶段 4 抽出）：允许直接持 registry/persist 引用（无环
@@ -286,6 +298,28 @@ class SessionManager:
 
     # ---------- 生命周期 ----------
 
+    @staticmethod
+    def _proxy_probe(px, t):
+        """代理可达性探测（session 后台线程调用）。
+
+        proxycheck 延迟到调用点导入：Wave 2 facade 瘦身把顶部相对 import
+        压到 ≤10 行，而 proxycheck 在本模块仅此一处运行时引用（探测在
+        session 的探测线程里执行，构造期不触发导入）。
+        """
+        from . import proxycheck
+        return proxycheck.probe(px, t)
+
+    def _load_tasks_for_restore(self):
+        """启动恢复读任务清单（session.tasks_loader 注入点）。
+
+        taskstore 延迟到调用点导入（同上，Wave 2 瘦身；调用时机是
+        SessionCore.start 的恢复段，非构造期）。
+        """
+        from .taskstore import load_tasks
+        return load_tasks(
+            self.cache_dir,
+            warn=lambda m: log_warning("fetcher.restore.tasks", m))
+
     def start(self, proxy: dict | None = None,
               metadata_timeout: float | None = None):
         """启动会话。proxy 见 core.config.lt_proxy_settings 的输入格式。
@@ -384,6 +418,70 @@ class SessionManager:
         实现见 core.registry.TaskRegistry.protected_dirs。
         """
         return self._registry.protected_dirs()
+
+    # ---------- UI facade 委托（§2.2：ui/* 只准 import models/config/
+    # fetcher/logutil，cache_guard/cache_mode/cache_quota/proxycheck/
+    # stream_server/inbound 的调用面全部经本段收敛） ----------
+
+    def preview_root(self) -> str:
+        """预览缓存根目录 ``<cache_dir>/.preview``（UI 配额/清理路径入料）。"""
+        return os.path.join(self.cache_dir, PREVIEW_SUBDIR)
+
+    def enforce_preview_cache_limit(self, limit_mb: int, keep_dirs,
+                                    warn=None) -> tuple[int, int]:
+        """预览缓存配额执行（薄委托 core.cache_quota.enforce_preview_limit）。
+
+        ``keep_dirs`` 透传集合或零参回调（TOCTOU 逐条复核语义由 cache_quota
+        决定，本层不掺逻辑）。
+        """
+        from .cache_quota import enforce_preview_limit
+        return enforce_preview_limit(self.preview_root(), limit_mb,
+                                     keep_dirs, warn=warn)
+
+    def preview_downloaded_bytes(self) -> int:
+        """当前任务已下载字节（file_progress 汇总；薄委托 cache_quota +
+        本类 status()，UI 状态栏「缓存占用」的唯一口径来源）。"""
+        from .cache_quota import downloaded_bytes
+        st = self.status()
+        return downloaded_bytes((st or {}).get("file_progress") or [])
+
+    def proxy_hint(self, proxy: dict | None) -> str:
+        """已配置代理时的错误提示文案（薄委托 proxycheck.hint_text）。
+
+        纯文案、不联网不阻塞——UI 的等待超时/失败提示拼接用。
+        """
+        from .proxycheck import hint_text
+        return hint_text(proxy)
+
+    def inbound_selfcheck(self, listen_port: int | None = None,
+                          timeout: float = 3.0) -> dict:
+        """入站能力自检报告（薄委托 core.inbound.inbound_report）。
+
+        阻塞约 timeout 秒，调用方（UI）必须放后台线程。core.inbound 延迟
+        导入：探测失败/模块异常经 ImportError 冒泡给调用方兜底（与 UI 既有
+        except Exception 语义一致），构造期不引入该依赖。
+        """
+        from . import inbound
+        port = (int(listen_port) if listen_port is not None
+                else int(self.listen_port or 6881))
+        return inbound.inbound_report(listen_port=port, timeout=timeout)
+
+    def inbound_hint_text(self, report: dict) -> str:
+        """入站报告 -> 可读文案（薄委托 core.inbound.format_hint）。"""
+        from . import inbound
+        return inbound.format_hint(report)
+
+    def create_stream_server(self, pieces_cb=None, demand_cb=None):
+        """构造本地流服务（薄委托 core.stream_server.StreamServer 工厂）。
+
+        多根：cache_dir + 本会话 download_dir（配置在缓存外时下载任务文件
+        仍可服务）。返回实例由调用方持有并负责 start/shutdown——UI 生命周期
+        语义不变，本模块不注册它（会话停机顺序由 UI 编排）。
+        """
+        from .stream_server import StreamServer
+        return StreamServer(self.cache_dir, pieces_cb=pieces_cb,
+                            demand_cb=demand_cb,
+                            bases=[self._download_dir])
 
     def shutdown(self):
         """停会话：落盘任务清单与 fastresume，再清全部句柄，最后 join 线程。
@@ -775,3 +873,20 @@ class SessionManager:
                 # 兜底：UI 线程回调边界（Qt signal emit，异常类型不可枚举），
                 # 回调失败不得打断告警线程
                 log_exception("fetcher.emit_error", e)
+
+
+# facade 对外契约（ADR-0002 决策 2-②：把「facade 暴露什么」从隐式变显式）。
+# 列的是 UI（§2.2 唯一外部消费者）实际经 core.fetcher 取用的符号全集：
+# SessionManager 是主入口；cache_mode 两常量 + cache_guard 三函数/标记是
+# 「路径参数化」的守卫/清理能力——settings_dialog 校验「编辑框里尚未保存的
+# 新目录」、main_window 在 SessionManager 构造前就要 ensure_cache_dir，都
+# 无法走绑定 self.cache_dir 的委托方法，故以模块级再导出提供（见上方 import
+# 注释）。内部注入别名（persist_*/registry_*/resolver_*）与子系统类
+# （SessionCore/TaskRegistry 等）不进 __all__——只在组装逻辑与测试白盒断言
+# 里出现，不是 facade API。
+__all__ = [
+    "SessionManager",
+    "CACHE_MARKER", "clear_cache_contents", "ensure_cache_dir",
+    "guard_ok_for_cleanup",
+    "PREVIEW_CACHE_CONVERT", "PREVIEW_CACHE_MODES",
+]

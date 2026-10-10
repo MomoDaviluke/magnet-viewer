@@ -5,9 +5,10 @@
 ``taskops`` 使用。若继续留在 fetcher，会出现 ``fetcher → persist → fetcher``
 的循环导入，因此下沉到本模块。
 
-兼容保证：``core.fetcher`` 以 ``from .states import ...`` 再导出，既有写法
-``from core.fetcher import STATE_DOWNLOADING``（download_mgr_test 在用）
-不受影响。
+兼容保证（Wave 2 更新）：``core.fetcher`` 的历史再导出已移除，本模块是
+``STATE_*`` / ``DOWNLOAD_STATES`` / ``BOOTSTRAP_TRACKERS`` 的唯一权威来源，
+调用方（download_mgr_test / session_test / proxycheck_test 等）一律
+``from core.states import ...`` 直连。
 """
 from __future__ import annotations
 
