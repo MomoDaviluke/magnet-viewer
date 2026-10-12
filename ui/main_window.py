@@ -594,8 +594,10 @@ class MainWindow(QMainWindow):
         try:
             self.session.start_preview(f)
             self._preview_file = f
-        except Exception:
-            pass
+        except Exception as e:
+            # S-10：与 _open_preview（视频路径 :549）同模式——启动失败必须给用户
+            # 反馈，不再静默吞掉；失败时保持原 _preview_file 不变（赋值未执行）。
+            QMessageBox.warning(self, "预览失败", str(e))
 
     # ---------- 流服务回调兼容薄委托（逻辑在 StreamCallbacks） ----------
 
@@ -833,6 +835,6 @@ class MainWindow(QMainWindow):
         try:
             if self._shutdown_timer is not None:
                 self._shutdown_timer.stop()
-        except Exception:
-            pass
+        except RuntimeError:
+            pass  # 关窗竞态：Qt 底层 C++ 对象可能已销毁（wrapped C/C++ object deleted）
         self.close()
