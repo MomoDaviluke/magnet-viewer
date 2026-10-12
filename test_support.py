@@ -201,3 +201,41 @@ class WorkSpace:
 
     def __exit__(self, *exc) -> None:
         self.cleanup()
+
+
+def sweep_stale_temp_dirs(prefix: str = "mv_", max_age_hours: int = 24) -> int:
+    """清扫历史泄漏的测试临时目录（P2-22 根因收口，2026-10-12）。
+
+    背景：约 20 个套件用裸 tempfile.mkdtemp(prefix="mv_*") 建临时目录，
+    清理只写在各文件主流程尾部——FAIL/SKIP 提前退出的路径来不及清，
+    实测一次全量回归可净增十余个（曾累积 100 个 / 238MB）。
+
+    修法取舍：逐散点补 try/finally 侵入面太大且易漏，故在运行器入口做
+    守卫式清扫——只删「目录名以 prefix 开头且 mtime 早于 max_age_hours」
+    的目录，绝不触碰在跑套件（其目录都是刚建的）。返回删除数；
+    单项失败忽略不阻断（清扫是卫生措施，不是测试前置条件）。
+    """
+    import time
+
+    root = tempfile.gettempdir()
+    cutoff = time.time() - max_age_hours * 3600
+    removed = 0
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return 0
+    for name in entries:
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            if os.path.getmtime(path) > cutoff:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.exists(path):
+                removed += 1
+        except OSError:
+            continue
+    return removed

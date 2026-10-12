@@ -40,6 +40,14 @@ def main() -> int:
         print("coverage 未安装：pip install coverage 后重试")
         return 2
     py = sys.executable
+    # P2-22 根因收口：与 regression_run 同款守卫式清扫（>24h 才删）
+    try:
+        import test_support
+        _n = test_support.sweep_stale_temp_dirs()
+        if _n:
+            print(f"（已清扫历史泄漏临时目录 {_n} 个）")
+    except Exception as e:
+        print(f"（临时目录清扫跳过：{e}）")
     for f in glob.glob(os.path.join(HERE, ".coverage*")):
         if not f.endswith(".coveragerc") and os.path.basename(f) != ".coverage":
             os.remove(f)

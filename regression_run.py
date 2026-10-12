@@ -101,6 +101,15 @@ def run_one(py: str, suite: str, logdir: str) -> int:
 
 def main() -> int:
     py = sys.executable
+    # P2-22 根因收口：运行前清扫历史泄漏的测试临时目录（>24h 才删，
+    # 绝不触碰在跑套件；实现见 test_support.sweep_stale_temp_dirs）。
+    try:
+        import test_support
+        _n = test_support.sweep_stale_temp_dirs()
+        if _n:
+            print(f"（已清扫历史泄漏临时目录 {_n} 个）", flush=True)
+    except Exception as e:
+        print(f"（临时目录清扫跳过：{e}）", flush=True)
     filt = [s for s in SUITES if not sys.argv[1:] or s.startswith(sys.argv[1])]
     if not filt:
         print(f"未匹配到测试：{sys.argv[1]!r}（可选：{' '.join(SUITES)}）")
