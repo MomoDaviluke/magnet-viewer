@@ -41,8 +41,12 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest 自带 Android SDK（/usr/local/lib/android/sdk），无需 setup-android 装机。
+      # android-actions/setup-android@v3 在 2026-10 的 runner 镜像上必红（两次实跑实证）：
+      # 镜像新增 Android XR 等 SDK 许可证 → sdkmanager --licenses 弹交互式 (y/N) 复核，
+      # 非交互环境退出码 1。故只保留许可证预接受这一必要动作（yes 管道应答，失败不阻断）。
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       # 注：CI 不装 NDK —— AGP 找不到 llvm-strip 时只告警（.so 原样打包，只影响体积），
       # 不会让构建红。想让 CI 产物也剥符号，把 "ndk;29.0.14206865" 加进
