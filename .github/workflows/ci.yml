@@ -26,7 +26,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.lock imageio-ffmpeg coverage==7.16.0
 
-      - name: Run 16-suite regression
+      - name: Run 27-suite regression
         run: python regression_run.py
 
       - name: Coverage gate (core+ui, fail-under=70)
