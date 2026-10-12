@@ -405,3 +405,32 @@
 
 **R-8 门禁状态**：release_check 全绿 → v1.0.0 tag 合法。执行 `git tag v1.0.0 && git push origin v1.0.0`
 触发 release.yml 挂桌面 Release（exe + portable zip；APK 走本地构建+release_check 交付链，不经 Release）。
+
+### 2026-10-12 Phase 5c 收口（当日 16:15~16:20）：v1.1.0 正式发布 ✅ 全方案闭环
+
+**版本事实修正**：`v1.0.0` 已于 09-10 发布占用（远端 tag b096ec5 + GitHub Release 含旧 exe/zip）——
+方案「打 v1.0.0」基于过时假设，**事实顺延 v1.1.0**（552b705，附注 tag，ls-remote 验证）。
+
+**正式发布结果**：
+- workflow_dispatch 演练 run（b77d163）先行 **success**（打包链路 runner 实证）。
+- 正式 Release run 38222156230 **completed success**。
+- **GitHub Release v1.1.0 已挂出**：`MagnetViewer-v1.1.0-win64.exe` + `MagnetViewer-win64-portable.zip`。
+- Regression @ 552b705 随 tag push 触发（发布提交的全量回归护航）。
+
+**五阶段门控全部关闭**：Phase 0 基线备份 ✅ → Phase 1+2 主干统一+安卓救援 ✅ → Phase 3 缺口收割+
+安卓验证 ✅ → Phase 4 CI 核验+文档同步 ✅（mypy 基线环境阻塞遗留 D-4）→ Phase 5 技术债+签名+发布 ✅。
+遗留项：D-4 mypy 基线（网络可用后补）、临时目录泄漏根因修复（已清淤）、正式 keystore 口令请转存口令管理器。
+
+### 2026-10-12 收尾完成（当日 17:47~18:05）：三项遗留全部关闭 ✅ 方案完全收官
+
+| 遗留项 | 结果 |
+|--------|------|
+| 护航回归 @ 552b705 | ✅ success（v1.1.0 发布提交的全量回归护航绿） |
+| 临时目录泄漏根因（P2-22） | ✅ **根因修复**：test_support 新增 `sweep_stale_temp_dirs`（mv_* 且 mtime>24h 才删，绝不碰在跑套件）+ regression_run/coverage_run 入口接线；独立验证删旧留新通过；全量回归 27/27 绿（98bb512）。逐散点补 try/finally 因侵入面大被否，守卫式清扫为最小修法 |
+| D-4 mypy 基线 | ✅ **阻塞破除 + 基线产出**：pip 索引通道异常改走「curl 拉 pypi JSON→wheel→--no-index 离线安装」（mypy 2.4.0 全家桶 5 wheel，含新依赖 librt/ast-serialize）；基线 = **88 errors / 18 files**（attr-defined 66 大头，Top6 文件集中 63 个）；报告 plan/mypy_baseline_2026-10-12.md（1123124）。**建议暂不设硬门禁**，三步爬坡：CI 非门禁报告步骤 → 治理 <20 → 硬门禁；是否先入报告步骤由 PM 定 |
+
+提交：98bb512（清扫根因修复）+ 1123124（mypy 基线报告）已推送，ls-remote 验证 origin/main=1123124。
+推送过程遭遇代理 502 三连（curl 测得 github.com 主机级间歇阻断），重试窗口内成功。
+
+**至此《REMEDIATION_PLAN_2026-10-12.md》全部工作项关闭。** 未决项仅剩两项软决策（均不阻塞）：
+① D-4 是否先在 CI 挂非门禁 mypy 报告步骤；② 正式 keystore 口令转存口令管理器（用户手上）。
