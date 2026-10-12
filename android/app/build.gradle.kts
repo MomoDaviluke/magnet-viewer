@@ -49,8 +49,11 @@ android {
         applicationId = "com.bitseed.magnetviewer"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // 版本参数化（2026-10-12）：-PappVersionName / -PappVersionCode 可覆盖，
+        // 供 android/tools/publish_apk.py 发版链使用；不传时保持历史默认。
+        // versionCode 必须逐发版递增，否则真机会拒绝覆盖安装（升级包语义的硬前提）。
+        versionCode = (project.findProperty("appVersionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("appVersionName") as String?) ?: "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // ABI 按构建类型给（见 buildTypes）：真机 arm64 + 模拟器 x86_64（debug），
         // release 只出 arm64-v8a。放在 buildType 里是因为 defaultConfig 的 abiFilters
