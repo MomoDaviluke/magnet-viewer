@@ -57,3 +57,21 @@ SDK 管理用新的 `android` CLI（2026 版已废弃 `sdkmanager`）：
 
 - 按计划 Task 0.0 读 LibreTorrent 构建配置，产出 `android/NOTES-libtorrent4j.md`（含 libtorrent4j 符号核对表）。
 - 按计划 Task 0.3/0.5/0.6 跑三道可行性闸门（会话能否起、ExoPlayer 能否播增长文件、灭屏能否继续）。
+
+## 怎么发升级包（2026-10-12 起，一键链）
+
+仓库根目录执行：
+
+    android\build_release.bat 1.1.1 v1.1.1
+
+等价于 `python android/tools/publish_apk.py --version-name 1.1.1 --tag v1.1.1`。链路：
+gradle 正式签名构建（-PappVersionName / -PappVersionCode 注入，versionCode 缺省=commit 计数，
+单调递增）→ release_check.py **硬门禁**（无 --allow-dev-cert，红了即停）→ 刷
+dist/MagnetViewer-<ver>-android-arm64.apk → curl 上传 GitHub Release（同名先删后传，可重跑）。
+
+前置条件：
+- `android/magnetviewer-release.jks` + `android/app/keystore.properties` 在位
+  （备份：Desktop/magnet-viewer-backup-release-keystore-20261012/；**口令务必转存口令管理器**）；
+- 目标 tag 已推送（Release 的桌面件由 CI release.yml 建立，APK 由本脚本补挂到同一 Release）；
+- 本机 GitHub 凭据在 Windows 凭据管理器（脚本经 git credential fill 取 token，keystore 不出本机）。
+

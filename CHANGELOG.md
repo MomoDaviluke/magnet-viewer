@@ -41,6 +41,15 @@ technical_roadmap Phase 0.1）。变更记录自 `git log` 提炼。
 - 回归 27/27 全绿 ×3（ff 后、S-10 后本机、CI runner @ f31a454）；coverage 81% ≥70；
   contract_check 208/208；推送均经 ls-remote 验证。
 
+### 发布后补强（同日 2026-10-12 晚）
+- **安卓升级链闭环**：`versionCode`/`versionName` 参数化（`-PappVersionName`/`-PappVersionCode`
+  覆盖，缺省=历史值/commit 计数）+ `android/tools/publish_apk.py` 一键发版链
+  （gradle 正式签名构建 → release_check 硬门禁 → 刷 dist → curl 上传 GitHub Release，
+  同名资产先删后传可重跑）+ `android/build_release.bat` 壳。三缺口清零：Release 页此前
+  不挂 APK、versionCode 硬编码 1 永拒覆盖安装、发包全手工。
+- Release v1.1.0 已补挂正式签名 `MagnetViewer-v1.1.0-android-arm64.apk`
+  （versionName 1.1.0，sha256 `5177ed0f…`），与桌面件同页分发。
+
 ---
 
 ## [Unreleased] — 架构重构 Wave 2 / Wave 3 / Wave 4 / Wave 5（arch/roadmap-2026q4）
