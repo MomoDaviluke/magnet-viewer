@@ -120,7 +120,8 @@ def _write(level: int, tag: str, msg: str, exc_info: bool = False) -> None:
             return
         log.log(level, f"[{tag}] {msg}", exc_info=exc_info)
     except Exception:
-        pass      # 兜底：日志器自身（handler emit/格式化/滚动）绝不影响主流程
+        pass      # S-10 唯一豁免：日志器自身故障（handler emit/格式化/滚动/磁盘满）
+                  # 绝不影响主流程——任何异常类型都可能，语义上不可收窄。
 
 
 def log_exception(tag: str, exc: BaseException | None = None) -> None:
