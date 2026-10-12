@@ -27,6 +27,11 @@ technical_roadmap Phase 0.1）。变更记录自 `git log` 提炼。
   gui_feature 计数 126→275（实测）；`regression_run.py`/`coverage_run.py`/`ci.yml`
   套件计数口径统一为 27；`technical_roadmap` 状态收口；`ARCHITECTURE` 待产出注删除；
   `contract_snapshot` 补最新核对日期。
+- **D-3 正式签名落地**：生成正式 keystore（CN=MagnetViewer，RSA-2048/PKCS12，有效期
+  10000 天）并切换 `android/app/keystore.properties`（gitignored，不入库）；重签 release
+  APK 后 `release_check.py` **无放行全绿**（R1 正式凭据 / R2 16KB 对齐 / R3 ABI 收窄 /
+  R4 产物对账）。交付副本 `dist/MagnetViewer-1.0-android-arm64.apk` 更新为正式签名版
+  （sha256 `c32dee75…`），开发签名版存档；凭据资产备份于仓库外目录。
 - **CI 修复**：`android.yml` 的 `android-actions/setup-android@v3` 在 2026-10 runner
   镜像上因新增 SDK 许可证交互式复核必红（两次实跑实证），替换为 `yes | sdkmanager
   --licenses` 预接受步。首推 run 的 `local_torrent_test` 磁盘一致性断言单点抖动
