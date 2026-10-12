@@ -8,6 +8,36 @@ technical_roadmap Phase 0.1）。变更记录自 `git log` 提炼。
 
 ---
 
+## [2026-10-12] — 主干统一与工程收敛（W1~W3）
+
+### 变更
+- **主干统一**：`main` 以 `--ff-only` 快进至 `arch/roadmap-2026q4` 尖端（2b9021c，
+  +120 提交 / 47→272 受控文件），安卓端 141 文件（95 `.kt`）随树入库——`*.jks` /
+  `keystore.properties` / `local.properties` 经 `android/.gitignore` 排除，0 真实私钥入库
+  （唯一 keystore 匹配为有意入库的占位符模板 `keystore.properties.example`）。
+- **缺口收割**：G2 六项缺口复核——S-1~S-6 随合并自动闭合（fetcher 891 行、限速/缓存/日志
+  三接线、流服务限流、UI 封装违规 0 命中）；S-10 静默吞异常清零（见下）。
+- **S-10**：`ui/main_window.py` 两处 `except Exception: pass` 修复（画廊预览失败改
+  `QMessageBox` 反馈对齐视频路径模式；关窗计时器收窄 `RuntimeError`）；
+  `core/logutil.py` 日志器自守卫注释登记为唯一豁免。
+- **安卓验证**：现有 release APK 免重编判定（时序实证：最后 android 提交早于构建时刻）+
+  R8 mapping/dex 混淆名回查等价证据链 + `zipalign -P 16` 通过；dist 安卓交付副本刷新
+  （09-29 版字节数与 10-11 版相同但内容差 12 天提交，旧版存档 `*-20260929.bak.apk`）。
+- **文档同步**：README 结构树补齐 core/ui/根目录缺失条目、契约项数 169→208、
+  gui_feature 计数 126→275（实测）；`regression_run.py`/`coverage_run.py`/`ci.yml`
+  套件计数口径统一为 27；`technical_roadmap` 状态收口；`ARCHITECTURE` 待产出注删除；
+  `contract_snapshot` 补最新核对日期。
+- **CI 修复**：`android.yml` 的 `android-actions/setup-android@v3` 在 2026-10 runner
+  镜像上因新增 SDK 许可证交互式复核必红（两次实跑实证），替换为 `yes | sdkmanager
+  --licenses` 预接受步。首推 run 的 `local_torrent_test` 磁盘一致性断言单点抖动
+  （同树本机两轮全绿 + 后续 run 复绿），已重跑核验。
+
+### 验证
+- 回归 27/27 全绿 ×3（ff 后、S-10 后本机、CI runner @ f31a454）；coverage 81% ≥70；
+  contract_check 208/208；推送均经 ls-remote 验证。
+
+---
+
 ## [Unreleased] — 架构重构 Wave 2 / Wave 3 / Wave 4 / Wave 5（arch/roadmap-2026q4）
 
 ### 新增

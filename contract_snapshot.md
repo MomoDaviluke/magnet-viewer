@@ -1,6 +1,8 @@
 # 契约快照（单句柄 → 多任务改造前）· Contract Snapshot
 
 > 快照时间：2026-09-03（改造前基线，git 工作区即快照现场）
+> **最新核对：2026-10-12**——contract_check 208/208 通过；本文件中的行数注为快照时值，
+> 不作现状依据（现状以 `docs/ARCHITECTURE.md` 与实测为准）。
 > 用途：**回归比对基准**。下载管理模块验收（download_mgr_test.py）与 7 套旧测试
 > （smoke / local_magnet / local_torrent / single_file / gui_feature / moov / qt）
 > 依赖以下接口；改造中接口契约保持不变，仅实现内部换为 task 注册表。

@@ -122,7 +122,7 @@ magnet-viewer/
 ├── main.py               # 入口
 ├── core/
 │   ├── parser.py         # bencode 编解码（含大小/深度/整数 DoS 上限）+ .torrent / magnet 解析
-│   ├── fetcher.py        # SessionManager Facade：组装下述 6 服务 + 薄委托 + 兼容别名
+│   ├── fetcher.py        # SessionManager Facade：组装下述各协作服务 + 薄委托 + 兼容别名
 │   ├── registry.py       # 任务注册表与单锁归属：TaskRecord / 锁 / torrents+tasks / 当前别名组
 │   ├── session.py        # libtorrent 会话生命周期：配置构造/端口回退/代理限速热更新/告警循环/per-task 超时看门狗/退出清理
 │   ├── resolver.py       # 解析编排：resolve 两入口/换代防竞态/connect_peer/元数据就绪与完成告警链
@@ -134,6 +134,16 @@ magnet-viewer/
 │   ├── cache_quota.py    # 预览缓存配额（超限按 LRU 清理，仅动 .preview/）
 │   ├── persist.py        # 任务持久化：.tasks.json 原子写 / fastresume 读写与退出落盘 / 启动恢复（依赖注入，不反向依赖 fetcher）
 │   ├── states.py         # 任务生命周期常量层（STATE_* / DOWNLOAD_STATES / BOOTSTRAP_TRACKERS）
+│   ├── exceptions.py     # core 异常层级（收窄宽泛 except）
+│   ├── interfaces.py     # 契约层：Resolver/StreamTransport/CachePolicy/ThemeSource Protocol
+│   ├── metacache.py      # 元数据缓存（冷解析→热解析，磁力链免重拉元数据）
+│   ├── pieceview.py      # 增量可用性视图（按需 have + 前缀增量）
+│   ├── inbound.py        # 入站连接接入（ui/inbound_host 的后端）
+│   ├── proxycheck.py     # 代理自检（TCP + 真 SOCKS5 握手）
+│   ├── resume.py         # fastresume 归一化（save_info_dict 元组兼容）
+│   ├── cache_mode.py     # 缓存模式（会话缓存策略切换）
+│   ├── secretbox.py      # 敏感配置加密存取
+│   ├── taskstore.py      # 任务清单 .tasks.json 存储后端
 │   ├── logutil.py        # 统一日志（滚动 1MB×3，可关闭，绝不因日志抛异常）
 │   ├── models.py         # 数据模型
 │   └── config.py         # QSettings 持久化 + 代理/历史映射
@@ -146,15 +156,27 @@ magnet-viewer/
 │   ├── gallery.py        # 图片画廊
 │   ├── downloads_pane.py # 下载管理页（任务列表 + 详情）
 │   ├── status_panel.py   # 状态面板
-│   ├── settings_dialog.py# 设置对话框（代理 / 超时 / 缓存）
-│   └── add_download_dialog.py # 添加下载对话框
-├── REVIEW.md             # 上一轮全面审查报告（含修复记录）
-├── audit_report.md       # 本轮团队全面审查报告与修复进度
+│   ├── settings_dialog.py# 设置对话框（代理 / 超时 / 缓存上限 / 限速 / 日志开关）
+│   ├── add_download_dialog.py # 添加下载对话框
+│   ├── stream_host.py    # 流服务宿主桥（回调薄委托）
+│   ├── cache_host.py     # 缓存配额宿主桥
+│   ├── inbound_host.py   # 入站接入宿主桥
+│   ├── task_controller.py# 任务操作控制器（UI 动作 → taskops）
+│   └── style.py          # 样式辅助（theme token 消费侧）
+├── REVIEW.md             # 上一轮全面审查报告（历史归档，最新见 REVIEW-2026-09.md）
+├── audit_report.md       # 更早轮审查报告（历史归档）
+├── CHANGELOG.md          # 更新日志（Keep a Changelog 格式）
+├── CONTRIBUTING.md       # 贡献指南（含覆盖率爬坡计划）
+├── technical_roadmap.md  # 架构演进路线图（Wave 0-5 已执行完）
+├── docs/                 # ARCHITECTURE + ADR-0001~0007 + 行为契约 contract_spec
+├── plan/                 # 各专项方案与验收计划（01~11）
+├── shared/task-schema.json # 跨端共享任务 schema
 ├── ui_shot.py            # UI 截图工具（offscreen 四张 PNG，改造前后人工对照）
 ├── regression_run.py     # 一键回归（27 套；套件脚本在 tests/，reg_*.log 写本目录）
 ├── coverage_run.py       # 覆盖率报告（快速集/全量，只报告不设门禁）
 ├── test_support.py       # 测试共享基建（本机做种端、种子构造、磁盘快照、轮询等待）
 ├── magnet-viewer.spec    # PyInstaller 打包配置（onedir，产物 dist/MagnetViewer/）
+├── magnet-viewer-onefile.spec # PyInstaller onefile 打包（release.yml 发布用）
 ├── build.bat             # 一键打包（清旧产物 → 构建 → tests/pack_check 自检）
 ├── tests/                # 回归测试套件（regression_run.py 的 SUITES 逐一在此）
 │   ├── contract_check.py     # 对外契约自检（秒级，重构 fetcher 的安全网）
@@ -211,7 +233,7 @@ magnet-viewer/
 
 | 验证项 | 结果 |
 |--------|------|
-| `contract_check.py`：对外契约自检（23 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist·session·registry·taskops·resolver·preview 签名 / states·registry 常量取值 / TaskRecord 字段集 / fetcher 别名全 property 结构 / R-4 UI 无私有直写 / CACHE_MARKER 常量）—— **169 项通过** | 通过（秒级，不启会话） |
+| `contract_check.py`：对外契约自检（23 个公开接口签名 / 3 个属性 / 9 项实例兼容属性 / models·parser·scheduler·stream_server·cache_guard·cache_quota·persist·session·registry·taskops·resolver·preview 签名 / states·registry 常量取值 / TaskRecord 字段集 / fetcher 别名全 property 结构 / R-4 UI 无私有直写 / CACHE_MARKER 常量）—— **208 项通过**（2026-10-12 实测） | 通过（秒级，不启会话） |
 | `theme_check.py`：**主题门禁**（R1 `ui/*.py`（除 theme.py）零 hex 色值 / R2 零 `setStyleSheet` 调用 / R3 theme.py 导出约定 token 与非空 QSS） | 通过（5 项，秒级；故意破坏时退出码 1） |
 | `close_lag_test.py`：**关窗异步化与硬超时**（实测 51 项 0 FAIL）——首次 `close()` <200ms 且窗口仍可见 / 遮罩可见 / 后台收尾各一次且 **C1 快照确取自 shutdown 之前**（关前登记活任务目录 + 替身 shutdown 复刻「清空注册表」，事后取必空）/ **硬超时自动触发**（`SHUTDOWN_HARD_TIMEOUT_MS` 实例覆盖 300ms，仅驱动事件循环即关窗）/ 停机窗口内 **22 个入口与桥回调全部守卫早退**（含源码 AST 清点表）/ **遮罩像素级绘制断言**（采样点 RGB 20,22,26→12,14,18）+ 随 resize 跟动 / `closeEvent` 逆常回退（遮罩/线程抛异常仍能关窗）/ 窗口期内重复关闭幂等 | 通过（约 6s，offscreen；7 项关键实现各做过「先红」反向验证） |
 | `ui_shot.py`：UI 截图工具（offscreen，四张 PNG 供改造前后人工对照） | 通过（01-empty / 02-files / 03-preview / 04-downloads） |
@@ -226,7 +248,7 @@ magnet-viewer/
 | `moov_stream_test.py`（ffprobe/ffmpeg 实测，需 imageio-ffmpeg，缺失时退出码 2=SKIP） | 通过：A 仅头部→打不开（复现 moov not found）；B 头+尾+**按需补拉**→可探测；C 全量→可探测 |
 | `qt_stream_open_test.py`（QMediaPlayer FFmpeg 后端 offscreen 实测，依赖同上） | 通过：A 仅头部→`FormatError`（即用户遇到的 moov atom not found）；B 头+尾+按需补拉→`LoadedMedia` 成功开播；C 全量→成功 |
 | GUI 无头启动 | 通过（主窗口构造、会话与流服务启动、退出码 0） |
-| `gui_feature_test.py`（offscreen 实测 126 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume/.meta/.dht_state 不误删）** / **画廊按 save_subdir 隔离路径加载大图** / **评审 P0 防回归（添加下载对话框 priority() 可调用 · 下载页 700ms 刷新后选中与详情保持）** / **播放器 seek 防抖·预取·缓冲分段着色** |
+| `gui_feature_test.py`（offscreen 实测 275 项） | 通过：主窗口实例化 / **设置接线（默认下载目录·并发数生效、流服务多根）** / 拖放接受·拒绝 / 输入历史（置顶去重、上限 15、持久化读回、**测试后恢复不污染用户注册表**）/ 文件树（嵌套目录三级展开、无折叠、无 `.pad`、叶子数与可见文件数一致）/ **磁盘路径映射键为绝对路径且可命中** / **清理缓存保留名单（downloads/.tasks.json/.resume/.meta/.dht_state 不误删）** / **画廊按 save_subdir 隔离路径加载大图** / **评审 P0 防回归（添加下载对话框 priority() 可调用 · 下载页 700ms 刷新后选中与详情保持）** / **播放器 seek 防抖·预取·缓冲分段着色** |
 | `single_file_test.py`：单文件种子 × 本地种子/磁力链两条入口 | 通过（12/12）：路径层级、`file_disk_path` 落点、流服务按 `f.path` 供给 206（目录隔离后断言随 `.preview/<ih>/` 布局更新，接口未变） |
 | `local_torrent_test.py`：本地 .torrent 闭环 | 通过（9/9）：`cache_dir` 注入、路径映射键为绝对路径、流服务联动返回字节与磁盘一致（同上随布局更新） |
 | `hybrid_v2_test.py`：**入口矩阵混合 v2 列补齐**（P0-2/P1-1 防回归）：默认产种（meta version=2）× 本地 .torrent / 磁力链两条入口 | 通过（19/19）：造种自检 parser hash==lt.info_hash()（SHA-256 截断 20 字节）、两入口 info_hash 与造种端一致、多文件层级 root/inner、预览下载完成、流服务 206、纯 v2 明确 ValueError（剥 files 键构造）|

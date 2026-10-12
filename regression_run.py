@@ -1,4 +1,4 @@
-"""25 套测试回归运行器：一键全量回归，汇总退出码。
+"""27 套测试回归运行器：一键全量回归，汇总退出码。
 
 依据 README.md 退出码约定与 t4_acceptance_plan.md 回归契约（D4）：
 - 下载管理模块改造后必须保证 8 套旧测试全绿（0=通过 / 1=失败 / 2=SKIP）。
@@ -12,15 +12,15 @@ shutdown 之前）、硬超时**自动**触发关窗、停机窗口内 22 个入
 拆分 `core/fetcher.py` 期间用它守住 23 个公开接口与协作模块签名）；
 其后 8 套为旧测试兼容契约（解析/流媒体/GUI，含混合 v2 入口矩阵）；
 `download_mgr_test` 为下载管理模块验收（约 2 分钟，含本机做种闭环）；
-末 4 套为专项护栏，按立项时间序（`perf_cache` → `wait_timeout` →
-`pieceview` → `throughput` → `concurrency`），各自对应 plan/ 下的一篇方案。
+末段为专项护栏，按立项时间序（`perf_cache` → `wait_timeout` →
+`pieceview` → `throughput` → `concurrency` 等），各自对应 plan/ 下的一篇方案。
 
 SKIP 判定（REVIEW-2026-09 P0-3）：部分套件因依赖缺失显式跳过（退出码 2）
 不视为失败，但 **全部跳过 = 失败**——那意味着环境崩坏或导入段被误吞，
 绝不能打印「回归全绿」。
 
 用法：
-    python regression_run.py            # 全量 25 套
+    python regression_run.py            # 全量 27 套
     python regression_run.py smoke      # 单套（按名字前缀匹配）
 
 退出码：任一测试 FAIL(1) → 本脚本退出 1；全部通过(0) → 0；

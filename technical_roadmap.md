@@ -2,7 +2,7 @@
 
 > 制定日期：2026-10-09  
 > 依据：architecture_review_report.md（综合评分 2.8/5）+ full_audit_report_2026-09-29.md（P0×3/P1×3/P2×11/P3×16）  
-> 状态：待用户批准后启动执行
+> 状态：已执行完毕（Wave 0-5 于 2026-10-11 终态；主干统一与缺口收割 2026-10-12 完成，见 CHANGELOG 与 REMEDIATION_PLAN_2026-10-12.md）
 
 ---
 
@@ -231,11 +231,11 @@ Wave 5 [串行]  集成验收：全量回归 + build.bat 出包 + gradle 出 APK
 
 ## 八、启动检查清单
 
-- [ ] 用户批准本路线图（含 Wave 4 方案 A/B 倾向）
-- [ ] `git status` 确认 78 个未提交文件清单，确认提交策略
-- [ ] 创建分支 `arch/roadmap-2026q4`（或按用户偏好在 main 上小步提交）
-- [ ] 记录基线指标快照（行数/import 数/except 数）入「执行日志」
-- [ ] 启动 A1 执行 Wave 0
+- [x] 用户批准本路线图（含 Wave 4 方案 A/B 倾向）
+- [x] `git status` 确认 78 个未提交文件清单，确认提交策略
+- [x] 创建分支 `arch/roadmap-2026q4`（或按用户偏好在 main 上小步提交）
+- [x] 记录基线指标快照（行数/import 数/except 数）入「执行日志」
+- [x] 启动 A1 执行 Wave 0
 
 ---
 

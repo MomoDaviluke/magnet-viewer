@@ -306,7 +306,7 @@ StorageError）已入库（554385b）。纪律：收窄的是**捕获侧**；既
 **一致性保障**：跨语言对拍夹具（`android/tools/gen_parity_fixtures.py`，
 当前夹具 `android/app/src/test/resources/parity/parity.json` 实测 14 组/156 条，
 2026-10-10 复核；初版 523fd1c 为 13 组/155 条，S6/S8 审计修复后新增分组成员）
-冻结 PieceMap/连续前缀语义；Phase 4 行为契约文档（`docs/contract_spec.md`，待产出）
+冻结 PieceMap/连续前缀语义；Phase 4 行为契约文档（`docs/contract_spec.md`，已产出）
 覆盖 6 大核心流程。双轨策略的取舍见 ADR-0004。
 
 ---
