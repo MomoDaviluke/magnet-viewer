@@ -40,10 +40,13 @@ DEFAULTS: dict = {
     "ui_theme": "light",           # 界面主题：light（默认浅色）| dark | system（跟随系统）
                                    # 保存设置即热切换（ui.theme.apply_theme），无需重启
     # 入站能力（诊断 D-2026-09-18：下载慢 + 做种报错）
-    "port_mapping": False,         # UPnP/NAT-PMP 端口映射。默认关闭（只收不做种，
-                                   # 减暴露面）；需做种或需要入站连接时开启——无
-                                   # 入站端口会连不上同为 NAT 后的 peer，且做种时
-                                   # 无人能连入而报错。保存设置即热生效。
+    "port_mapping": True,          # UPnP/NAT-PMP 端口映射。**默认开启**（2026-10-13
+                                   # 性能实测裁决）：关闭时连不上同为 NAT 后的 peer
+                                   # （swarm 里占比很高），实测同一冷门种子前 66s 仅
+                                   # 1–10KB/s、开映射后 69s 起跳到 1.5MB/s——入站可达
+                                   # 是下载速率的第一瓶颈。主流 BT 客户端（qBittorrent/
+                                   # BitTorrent）亦默认开启。隐私敏感用户在设置面板关闭。
+                                   # 保存设置即热生效。
     "listen_interface": "",        # 出口网卡 IP（多网卡/VPN 环境显式绑定，防
                                    # libtorrent 从虚拟网卡绕行出境）。空 = 0.0.0.0
                                    # 全网卡监听；该值在会话启动时固定，需重启生效。
