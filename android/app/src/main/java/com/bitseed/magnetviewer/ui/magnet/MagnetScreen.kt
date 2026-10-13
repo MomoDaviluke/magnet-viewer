@@ -1,6 +1,8 @@
 package com.bitseed.magnetviewer.ui.magnet
 
 import android.Manifest
+import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,6 +44,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,6 +60,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -84,6 +92,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.res.stringResource
 import com.bitseed.magnetviewer.R
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** 拖动条的可访问名（uiautomator 也能按它拿到坐标）。 */
 private const val SEEK_SLIDER_DESC = "预览跳转条"
@@ -223,6 +233,93 @@ internal fun MagnetContent(
   val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
   var pendingDelete by remember { mutableStateOf<Pair<String, String>?>(null) } // (infoHash, name)
   val listState = rememberLazyListState()
+
+  // ================================================================ Wave B 横竖屏/全屏
+  // 播放器的**实例提升到本作用域**：横屏全屏覆盖层与竖屏内嵌卡片共享同一个 ExoPlayer。
+  // 若在两个分支各自 remember，切换分支时旧实例随 DisposableEffect 释放 → 正在播的流
+  // 中断（商用播放器横竖屏切换绝不重新加载，这是底线）。
+  val ctx = LocalContext.current
+  val activity = ctx as? Activity
+  val exoPlayer = remember {
+    val http = DefaultHttpDataSource.Factory()
+      .setConnectTimeoutMs(STREAM_CONNECT_TIMEOUT_MS)
+      .setReadTimeoutMs(STREAM_READ_TIMEOUT_MS)
+    ExoPlayer.Builder(ctx)
+      .setMediaSourceFactory(DefaultMediaSourceFactory(http))
+      .build()
+  }
+  DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
+
+  // 媒体装载与 seek（player 实例共享，url/seek 由状态驱动；与旧 VideoPlayer 语义一致）。
+  LaunchedEffect(state.streamUrl) {
+    if (state.streamUrl.isNotEmpty()) {
+      exoPlayer.setMediaItem(MediaItem.fromUri(state.streamUrl))
+      exoPlayer.prepare()
+      exoPlayer.playWhenReady = true
+    }
+  }
+  // 预览结束（previewIndex 复位）→ 停掉播放器并清队列：共享实例不再随组合销毁，
+  // 不主动停的话它会一直缓冲已死流的残余数据。
+  LaunchedEffect(state.previewIndex) {
+    if (state.previewIndex < 0) {
+      exoPlayer.stop()
+      exoPlayer.clearMediaItems()
+    }
+  }
+  LaunchedEffect(state.seekSeq) {
+    if (state.seekSeq > 0) {
+      val duration = exoPlayer.duration
+      if (duration > 0 && duration != C.TIME_UNSET) {
+        exoPlayer.seekTo((duration * state.seekFraction).toLong())
+      }
+    }
+  }
+
+  // 重力感应自动横竖屏：播放中把方向交给**全传感器**（含倒置），转手机即触发
+  // landscape 变化 → 覆盖层/内嵌自动切换；停止播放恢复系统默认（不锁向）。
+  // 注意 configChanges 已在 Manifest 声明，旋转不重建 Activity，player 与播放进度都在。
+  LaunchedEffect(state.previewIndex) {
+    activity?.requestedOrientation =
+      if (state.previewIndex >= 0) ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+      else ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+  }
+  // 退出播放时把方向复位（本作用域销毁 = 预览结束，交还系统）。
+  DisposableEffect(Unit) {
+    onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+  }
+
+  // 全屏（横屏覆盖层）时沉浸：隐藏状态栏 + 导航栏，让视频铺满整块屏；退出即恢复。
+  DisposableEffect(landscape && state.previewIndex >= 0) {
+    val window = activity?.window ?: return@DisposableEffect onDispose { }
+    val controller = WindowCompat.getInsetsController(window, window.decorView)
+    val immersive = landscape && state.previewIndex >= 0
+    if (immersive) {
+      controller.systemBarsBehavior =
+        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+      controller.hide(WindowInsetsCompat.Type.systemBars())
+    } else {
+      controller.show(WindowInsetsCompat.Type.systemBars())
+    }
+    onDispose { controller.show(WindowInsetsCompat.Type.systemBars()) }
+  }
+
+  // 横屏全屏态下返回键 = 先退全屏（转竖屏），而非直接退出预览/页面（商用播放器惯例）。
+  val uiScope = rememberCoroutineScope()
+  // rememberUpdatedState：exitFullscreen 的协程在 delay 之后才读 previewIndex，
+  // 直接捕获组合期的 state 快照会拿到旧值（Compose 经典坑）；取"最新值"引用才正确。
+  val currentPreviewIndex by rememberUpdatedState(state.previewIndex)
+  // 退出全屏的统一实现：强制竖屏 → 短暂延迟后把方向交还 FULL_SENSOR。
+  // 直接交还（不延迟）会让"横持手机点退出"失效（传感器仍横向，立刻又转回横屏）；
+  // 永久锁 PORTRAIT 又会杀死播放期间的重力感应（需求要求自动横竖屏），故取折中。
+  val exitFullscreen: () -> Unit = {
+    val act = activity
+    act?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    uiScope.launch {
+      delay(600)
+      if (currentPreviewIndex >= 0) act?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+    }
+  }
+  BackHandler(enabled = landscape && state.previewIndex >= 0) { exitFullscreen() }
 
   // D-02（设备实测 2026-09-15）：播放卡是页面的第 6 块内容，竖屏下它的控件行（暂停/停止预览）
   // 会落在首屏之外（实测 y≈2309-2358，屏高 2400），**必须先滚动才能操作**。
@@ -395,10 +492,13 @@ internal fun MagnetContent(
           }
         }
       }
-      if (state.previewIndex >= 0) {
+      if (state.previewIndex >= 0 && !landscape) {
         item(key = "preview") {
-          // D-02：播放卡固定结构（状态文/控件同一行内排，不挤出）
+          // D-02：播放卡固定结构（状态文/控件同一行内排，不挤出）。
+          // 横屏时本卡不渲染（由全屏覆盖层接管，见 Box 末尾）；竖屏/横屏切换
+          // 共享同一个 exoPlayer 实例，播放不中断。
           PreviewPane(
+            player = exoPlayer,
             streamUrl = state.streamUrl,
             title = state.previewTitle,
             note = state.previewNote,
@@ -413,6 +513,12 @@ internal fun MagnetContent(
             onPause = onPausePreview,
             onResume = onResumePreview,
             onStop = onStopPreview,
+            // Wave B：竖屏手动全屏按钮 → 强制横屏（覆盖层随 landscape 出现）。
+            // FULL_SENSOR 下竖持不会自动转横，所以手动按钮用显式 LANDSCAPE 指令；
+            // 之后重力感应仍由 LaunchedEffect(state.previewIndex) 的 FULL_SENSOR 接管。
+            onEnterFullscreen = {
+              activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            },
           )
         }
       }
@@ -429,6 +535,22 @@ internal fun MagnetContent(
           )
         }
       }
+    }
+    // ---- Wave B：横屏全屏覆盖层（播放中且横屏时接管视频，铺满整块屏）----
+    // 与竖屏内嵌 PreviewPane 共享同一个 exoPlayer 实例，切换方向播放不中断。
+    if (landscape && state.previewIndex >= 0) {
+      FullscreenPlayer(
+        player = exoPlayer,
+        streamUrl = state.streamUrl,
+        title = state.previewTitle,
+        note = state.previewNote,
+        bufferText = state.bufferText,
+        paused = state.previewPaused,
+        onExit = exitFullscreen,
+        onPause = onPausePreview,
+        onResume = onResumePreview,
+        onStop = onStopPreview,
+      )
     }
     // ---- Snackbar 宿主（B-03：重复解析提示；底部悬浮）----
     SnackbarHost(
@@ -514,6 +636,7 @@ private val RoundedCornerShape4 = androidx.compose.foundation.shape.RoundedCorne
 
 @Composable
 private fun PreviewPane(
+  player: ExoPlayer,
   streamUrl: String,
   title: String,
   note: String,
@@ -528,11 +651,26 @@ private fun PreviewPane(
   onPause: () -> Unit,
   onResume: () -> Unit,
   onStop: () -> Unit,
+  onEnterFullscreen: () -> Unit,
 ) {
   val pal = LocalPal.current
   val shapes = LocalShapes.current
   PanelCard(shapes = shapes) {
-    Text(title, style = MaterialTheme.typography.labelLarge, color = pal.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(
+        title,
+        modifier = Modifier.weight(1f),
+        style = MaterialTheme.typography.labelLarge,
+        color = pal.text,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      // Wave B：竖屏手动全屏按钮（点击进入横屏全屏，与重力感应殊途同归）。
+      TextButton(
+        modifier = Modifier.heightIn(min = 44.dp),
+        onClick = onEnterFullscreen,
+      ) { Text("全屏", style = MaterialTheme.typography.bodySmall, color = pal.accent) }
+    }
     Spacer(Modifier.height(8.dp))
     Box(
       // 视频区保持 200dp（D-02 不改视觉尺寸：可达性由「打开预览自动滚到播放卡」解决，
@@ -540,9 +678,11 @@ private fun PreviewPane(
       modifier = Modifier.fillMaxWidth().height(200.dp).clip(shapes.shapeCard).background(Color.Black),
       contentAlignment = Alignment.Center,
     ) {
-      if (streamUrl.isNotEmpty()) {
-        VideoPlayer(url = streamUrl, seekFraction = seekFraction, seekSeq = seekSeq)
-      } else {
+      // 共享 player 实例（MagnetContent 作用域 remember）；横竖屏切换不重建、不中断。
+      StreamPlayerSurface(player = player)
+      // 占位条件用 **streamUrl**（Compose 快照状态，变化即重组）；
+      // player.currentMediaItem 不是快照状态，读它不会触发重组（会停在旧值）。
+      if (streamUrl.isEmpty()) {
         Text(note.ifEmpty { "正在准备索引块…" }, style = MaterialTheme.typography.bodySmall, color = pal.videoPlaceholder)
       }
     }
@@ -585,6 +725,105 @@ private fun PreviewPane(
   }
 }
 
+/**
+ * Wave B：横屏全屏播放覆盖层。
+ *
+ * 与竖屏内嵌 [PreviewPane] 共享同一个 [player] 实例（在 MagnetContent 作用域 remember），
+ * 因此旋转触发本覆盖层出现时，视频**继续播放、进度不丢**——这正是 Manifest 加
+ * `configChanges`（旋转不重建 Activity）与「实例提升」两处设计共同保证的底线。
+ *
+ * 控制条走 Media3 `PlayerView.useController`（系统级播放/暂停/seek/时长，商用播放器同款），
+ * 叠加自绘的「退出全屏 / 停止预览」按钮（左上/右上，半透明胶囊，不遮挡画面主体）。
+ */
+@Composable
+private fun FullscreenPlayer(
+  player: ExoPlayer,
+  streamUrl: String,
+  title: String,
+  note: String,
+  bufferText: String,
+  paused: Boolean,
+  onExit: () -> Unit,
+  onPause: () -> Unit,
+  onResume: () -> Unit,
+  onStop: () -> Unit,
+) {
+  val pal = LocalPal.current
+  Box(
+    modifier = Modifier
+      .fillMaxSize()
+      .background(Color.Black),
+  ) {
+    // 视频主体：PlayerView 自带控制条（横屏下 useController 体验最接近系统播放器）。
+    StreamPlayerSurface(player = player)
+    if (streamUrl.isEmpty()) {
+      // 索引块尚未就绪：覆盖层中央给占位文案（与竖屏内嵌同语义）。
+      Text(
+        note.ifEmpty { "正在准备索引块…" },
+        modifier = Modifier.align(Alignment.Center),
+        style = MaterialTheme.typography.bodyMedium,
+        color = pal.videoPlaceholder,
+      )
+    }
+    // ---- 顶部控制条：标题 + 退出/停止（半透明底，浮于画面之上）----
+    // statusBarsPadding：edge-to-edge 下避开状态栏；全屏沉浸态系统栏已隐藏，padding 自然为 0。
+    Row(
+      modifier = Modifier
+        .align(Alignment.TopStart)
+        .fillMaxWidth()
+        .statusBarsPadding()
+        .background(androidx.compose.ui.graphics.Color(0x66000000))
+        .padding(horizontal = 12.dp, vertical = 8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        title,
+        modifier = Modifier.weight(1f),
+        style = MaterialTheme.typography.bodyMedium,
+        color = Color.White,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      // 缓冲态短提示（有则显，无则不占位）。
+      if (bufferText.isNotEmpty()) {
+        Text(bufferText, style = MaterialTheme.typography.labelMedium, color = Color(0xCCFFFFFF))
+        Spacer(Modifier.width(12.dp))
+      }
+      // 暂停/继续（与竖屏同一组语义：冻结预览调度，不动 player 本身）。
+      TextButton(onClick = if (paused) onResume else onPause) {
+        Text(if (paused) "继续" else "暂停", style = MaterialTheme.typography.bodySmall, color = Color.White)
+      }
+      TextButton(onClick = onStop) {
+        Text("退出播放", style = MaterialTheme.typography.bodySmall, color = Color(0xFFFF8A75))
+      }
+      TextButton(onClick = onExit) {
+        Text("退出全屏", style = MaterialTheme.typography.bodySmall, color = Color.White)
+      }
+    }
+  }
+}
+
+/**
+ * 共享的 ExoPlayer 渲染面（PlayerView + useController）。
+ *
+ * 单独抽出来是因为竖屏内嵌与横屏全屏两处要渲染**同一个** player 实例——
+ * AndroidView 的 factory 只在首次组合执行，更新靠 update 块重绑 player 引用。
+ */
+@Composable
+private fun StreamPlayerSurface(player: ExoPlayer) {
+  AndroidView(
+    modifier = Modifier.fillMaxSize(),
+    factory = { ctx ->
+      PlayerView(ctx).apply {
+        this.player = player
+        useController = true
+        setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+      }
+    },
+    update = { view -> view.player = player },
+  )
+}
+
 /** 跳转条（0..1 = 文件比例）。**只在拖动结束时**回调 [onSeek]（D-03 与提示共用同一取整 [TaskCardLogic.percentOf]）。 */
 @Composable
 private fun SeekBar(fraction: Float, onSeek: (Float) -> Unit) {
@@ -621,41 +860,6 @@ private fun SeekBar(fraction: Float, onSeek: (Float) -> Unit) {
  */
 internal const val STREAM_CONNECT_TIMEOUT_MS = 5_000
 internal const val STREAM_READ_TIMEOUT_MS = 25_000
-
-/** Media3/ExoPlayer 播放本地流（http://127.0.0.1:port/…?t=token）。 */
-@Composable
-private fun VideoPlayer(url: String, seekFraction: Float, seekSeq: Int) {
-  val context = LocalContext.current
-  val player = remember {
-    val http = DefaultHttpDataSource.Factory()
-      .setConnectTimeoutMs(STREAM_CONNECT_TIMEOUT_MS)
-      .setReadTimeoutMs(STREAM_READ_TIMEOUT_MS)
-    ExoPlayer.Builder(context)
-      .setMediaSourceFactory(DefaultMediaSourceFactory(http))
-      .build()
-  }
-  DisposableEffect(player) { onDispose { player.release() } }
-  LaunchedEffect(url) {
-    player.setMediaItem(MediaItem.fromUri(url))
-    player.prepare()
-    player.playWhenReady = true
-  }
-  LaunchedEffect(seekSeq) {
-    if (seekSeq > 0) {
-      val duration = player.duration
-      if (duration > 0 && duration != C.TIME_UNSET) player.seekTo((duration * seekFraction).toLong())
-    }
-  }
-  AndroidView(
-    modifier = Modifier.fillMaxSize(),
-    factory = { ctx ->
-      PlayerView(ctx).apply {
-        this.player = player
-        useController = true
-      }
-    },
-  )
-}
 
 /** 自绘细进度条（缓冲比例）。 */
 @Composable

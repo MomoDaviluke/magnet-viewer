@@ -25,7 +25,11 @@
         android:theme="@style/Theme.MagnetViewer">
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+            <!-- configChanges（Wave B 横竖屏）：旋转/尺寸变化**不重建 Activity**。
+                 没有它时旋转会走「销毁→重建」生命周期，内嵌的 ExoPlayer 实例
+                 随之释放，正在播的流直接中断（商用播放器均避免此行为）。 -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
