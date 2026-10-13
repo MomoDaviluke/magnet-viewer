@@ -11,13 +11,13 @@ pause/resume/remove/priority↑↓/opendir/openpreview。
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QItemSelectionModel, Signal
-from PySide6.QtGui import (QColor, QPalette, QStandardItem,
+from PySide6.QtCore import Qt, QRect, QItemSelectionModel, Signal
+from PySide6.QtGui import (QColor, QPainter, QStandardItem,
                            QStandardItemModel)
 from PySide6.QtWidgets import (QApplication, QLabel, QMenu, QMessageBox,
                                QSplitter, QStackedWidget, QStyle,
-                               QStyledItemDelegate, QStyleOptionProgressBar,
-                               QTreeView, QVBoxLayout, QWidget)
+                               QStyledItemDelegate, QTreeView, QVBoxLayout,
+                               QWidget)
 
 import ui.theme as theme          # 状态色在**调用时**读（双主题热切换需跟随）
 from core.models import human_size
@@ -88,7 +88,18 @@ def format_eta(eta) -> str:
 
 
 class ProgressDelegate(QStyledItemDelegate):
-    """进度列：以系统进度条样式绘制，分块颜色随任务状态（绿=完成/灰=暂停/红=失败）。"""
+    """进度列：自绘「圆角轨道 + 状态色填充 + 右侧百分比数字」。
+
+    为什么自绘而不用 `QStyleOptionProgressBar`（系统进度条样式）：
+    系统样式把百分比**居中叠在条上**，半满时文字正好压在填充/未填充交界，
+    深色文字对深蓝填充对比度不足、且窄列（150px）下会被裁切（实测截图可见）。
+    商用下载管理器（qBittorrent / IDM）的一致做法是「条 + 右侧独立数字」，
+    数字永远落在纯色轨道底上、可读性稳定。这里照此重绘：
+      - 轨道占左侧、留右侧约 42px 给百分比文字；
+      - 填充色随任务状态（绿=完成 / 灰=暂停·停止 / 红=失败 / 蓝=下载中）；
+      - 数字色用 text_muted，选中行下仍清晰（选中底是浅蓝，不构成冲突）。
+    颜色一律在 paint 时现读 `ui.theme` 模块属性，保证深浅主题热切换跟随。
+    """
 
     def paint(self, painter, option, index):
         if index.column() != COL_PROGRESS:
@@ -98,35 +109,52 @@ class ProgressDelegate(QStyledItemDelegate):
             value = float(index.data(Qt.UserRole) or 0.0)
         except (TypeError, ValueError):
             value = 0.0
+        value = max(0.0, min(100.0, value))
         task = index.siblingAtColumn(COL_NAME).data(Qt.UserRole) or {}
         state = str(task.get("state", "")).upper()
 
-        opt = QStyleOptionProgressBar()
-        opt.rect = option.rect.adjusted(6, 4, -6, -4)
-        opt.minimum, opt.maximum = 0, 100
-        opt.progress = int(max(0, min(100, value)))
-        opt.text = f"{value:.0f}%"
-        opt.textVisible = True
-        opt.state = QStyle.State_Enabled
-        # 选中底色先铺（进度条外边距 6/4 就是留给它的外沿）：必须在 drawControl
-        # **之前**——旧顺序把整块矩形盖在进度条与百分比文字上，选中行看不到进度。
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 选中行底先铺（与自绘条/文字都不冲突，必须在绘制内容之前）
         if option.state & QStyle.State_Selected:
-            # 选中行底：用**主题色板**的 bg_selected（改造前取 Qt 默认调色板的
-            # highlight，不随深浅主题走，深色下会突兀发蓝）。绘制时现读
-            # ui.theme 模块属性 → 热切换跟随（同 STATE_META 的取色约定）。
             painter.fillRect(option.rect, QColor(theme.BG_SELECTED))
-        pal = QPalette(option.palette)
+
+        rect = option.rect
+        text_w = 42
+        # 轨道：左侧留 8px 内边距、右侧留 text_w+8 给百分比；垂直居中、高 12px
+        h = 12
+        top = rect.top() + (rect.height() - h) // 2
+        track = QRect(rect.left() + 8, top,
+                      rect.width() - 8 - (text_w + 8), h)
+        radius = h / 2
+
+        # 轨道底（未填充）：用 border 色描出的浅槽
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(theme.BORDER))
+        painter.drawRoundedRect(track, radius, radius)
+
+        # 填充：状态色
         if state == "COMPLETED":
-            pal.setBrush(QPalette.Highlight, QColor(theme.OK))
+            fill_color = QColor(theme.OK)
         elif state in ("PAUSED", "STOPPED"):
-            pal.setBrush(QPalette.Highlight, QColor(theme.TEXT_DIM))
+            fill_color = QColor(theme.TEXT_DIM)
         elif state == "FAILED":
-            pal.setBrush(QPalette.Highlight, QColor(theme.DANGER))
+            fill_color = QColor(theme.DANGER)
         else:
-            pal.setBrush(QPalette.Highlight, QColor(theme.ACCENT))
-        opt.palette = pal
-        QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter,
-                                         self.parent())
+            fill_color = QColor(theme.ACCENT)
+        if value > 0:
+            fill_w = max(h, int(track.width() * value / 100.0))
+            fill = track.adjusted(0, 0, fill_w - track.width(), 0)
+            painter.setBrush(fill_color)
+            painter.drawRoundedRect(fill, radius, radius)
+
+        # 右侧百分比数字（落在纯色背景上，对比度稳定）
+        painter.setPen(QColor(theme.TEXT_MUTED))
+        text_rect = rect.adjusted(rect.width() - text_w, 0, -8, 0)
+        painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter,
+                         f"{value:.0f}%")
+        painter.restore()
 
 
 class DownloadsPane(QWidget):
