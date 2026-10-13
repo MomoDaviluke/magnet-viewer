@@ -15,7 +15,7 @@ import org.junit.Test
  *
  * 覆盖段：
  * - §A 两个布尔恒等 —— 「只开 UPnP 不开 NAT-PMP」这类漂移是静默失效的根源；
- * - §B 默认关闭 = 桌面 `DEFAULTS["port_mapping"]`，老行为不变；
+ * - §B 默认开启 = 桌面 `DEFAULTS["port_mapping"]`（2026-10-13 性能实测裁决）；
  * - §C 文案把「蜂窝网络下映射多会失败」讲成预期，避免用户误报为故障；
  * - §D 设置层往返（`AppSettings.portMapping` 默认值与保存）。
  */
@@ -58,12 +58,13 @@ class PortMappingTest {
     assertNotEquals(portMappingPlan(true), portMappingPlan(false))
   }
 
-  // ------------------------------------------------------------ §B 默认关闭
+  // ------------------------------------------------------------ §B 默认开启
 
   @Test
-  fun defaultIsDisabled_matchingDesktop() {
-    assertFalse(
-      "默认必须关闭 —— 桌面 DEFAULTS[\"port_mapping\"] = False（只收不做种，减暴露面）",
+  fun defaultIsEnabled_matchingDesktop() {
+    assertTrue(
+      "默认必须开启 —— 桌面 DEFAULTS[\"port_mapping\"] = True（2026-10-13 性能实测裁决：" +
+        "关闭时连不上 NAT 后的 peer，是下载速率第一瓶颈；主流 BT 客户端亦默认开启）",
       AppSettings().portMapping,
     )
   }

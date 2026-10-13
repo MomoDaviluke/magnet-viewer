@@ -316,9 +316,10 @@ class BtEngine(private val listener: Listener) : EngineControl {
 
   /**
    * 端口映射开关（诊断 D-2026-09-18）：会话启动时决定 `enable_upnp`/`enable_natpmp`，
-   * 运行中经 [applyPortMapping] 热更新。默认 false = 桌面 `DEFAULTS["port_mapping"]` 同款。
+   * 运行中经 [applyPortMapping] 热更新。默认 true = 桌面 `DEFAULTS["port_mapping"]` 同款
+   * （2026-10-13 性能实测裁决：关闭时连不上 NAT 后的 peer，是下载速率第一瓶颈）。
    */
-  @Volatile private var lastPortMapping: Boolean = false
+  @Volatile private var lastPortMapping: Boolean = true
 
   /**
    * 兜底 tracker 开关（诊断 D-2026-09-18）：**加种时**决定注入 5 条还是 10 条
@@ -433,6 +434,21 @@ class BtEngine(private val listener: Listener) : EngineControl {
       "tick_interval" -> org.libtorrent4j.swig.settings_pack.int_types.tick_interval
       "auto_manage_interval" -> org.libtorrent4j.swig.settings_pack.int_types.auto_manage_interval
       "max_peerlist_size" -> org.libtorrent4j.swig.settings_pack.int_types.max_peerlist_size
+      // 第二批（等待超时专项，2026-10-13 补齐）
+      "aio_threads" -> org.libtorrent4j.swig.settings_pack.int_types.aio_threads
+      "hashing_threads" -> org.libtorrent4j.swig.settings_pack.int_types.hashing_threads
+      "max_out_request_queue" -> org.libtorrent4j.swig.settings_pack.int_types.max_out_request_queue
+      "request_queue_time" -> org.libtorrent4j.swig.settings_pack.int_types.request_queue_time
+      "max_failcount" -> org.libtorrent4j.swig.settings_pack.int_types.max_failcount
+      "min_reconnect_time" -> org.libtorrent4j.swig.settings_pack.int_types.min_reconnect_time
+      "peer_connect_timeout" -> org.libtorrent4j.swig.settings_pack.int_types.peer_connect_timeout
+      // 第三批（千兆吞吐专项，2026-10-13 补齐）
+      "recv_socket_buffer_size" -> org.libtorrent4j.swig.settings_pack.int_types.recv_socket_buffer_size
+      "send_socket_buffer_size" -> org.libtorrent4j.swig.settings_pack.int_types.send_socket_buffer_size
+      "send_buffer_watermark" -> org.libtorrent4j.swig.settings_pack.int_types.send_buffer_watermark
+      "send_buffer_watermark_factor" ->
+        org.libtorrent4j.swig.settings_pack.int_types.send_buffer_watermark_factor
+      "send_buffer_low_watermark" -> org.libtorrent4j.swig.settings_pack.int_types.send_buffer_low_watermark
       else -> null
     }
 
@@ -443,6 +459,13 @@ class BtEngine(private val listener: Listener) : EngineControl {
         org.libtorrent4j.swig.settings_pack.bool_types.prioritize_partial_pieces
       "dht_aggressive_lookups" ->
         org.libtorrent4j.swig.settings_pack.bool_types.dht_aggressive_lookups
+      // 2026-10-13 补齐：与桌面 THROUGHPUT_SETTINGS 对齐
+      "piece_extent_affinity" ->
+        org.libtorrent4j.swig.settings_pack.bool_types.piece_extent_affinity
+      "announce_to_all_trackers" ->
+        org.libtorrent4j.swig.settings_pack.bool_types.announce_to_all_trackers
+      "announce_to_all_tiers" ->
+        org.libtorrent4j.swig.settings_pack.bool_types.announce_to_all_tiers
       else -> null
     }
 
@@ -487,6 +510,11 @@ class BtEngine(private val listener: Listener) : EngineControl {
         org.libtorrent4j.swig.settings_pack.bool_types.enable_natpmp.swigValue(), pm.enableNatpmp
       )
       settings.listenInterfaces(LISTEN_INTERFACES)
+      // DHT bootstrap 多节点冗余（对齐桌面 PEER_DISCOVERY_SETTINGS，2026-10-13 补齐）：
+      // libtorrent4j 默认只有 dht.libtorrent.org **一个**引导节点，受限网络里一旦不可达，
+      // DHT 路由表从零爬、磁力链 peer 发现退化成「只等 tracker」。多写几个公共 router：
+      // 任何一个通，路由表就能起步（启动期并发 bootstrap，先应答者胜）。
+      settings.setDhtBootstrapNodes(DHT_BOOTSTRAP_NODES)
       settings.connectionsLimit(EngineTuning.CONNECTIONS_LIMIT)
       settings.alertQueueSize(5000)
       settings.setMaxMetadataSize(MAX_METADATA_SIZE)
@@ -515,6 +543,8 @@ class BtEngine(private val listener: Listener) : EngineControl {
           org.libtorrent4j.swig.settings_pack.bool_types.enable_natpmp.swigValue(), pm.enableNatpmp
         )
         settings.listenInterfaces("0.0.0.0:0")
+        // 回退分支同样下发多节点 bootstrap（与主分支同源，避免两处漂移）
+        settings.setDhtBootstrapNodes(DHT_BOOTSTRAP_NODES)
         settings.connectionsLimit(EngineTuning.CONNECTIONS_LIMIT)
         settings.setMaxMetadataSize(MAX_METADATA_SIZE)
         applyTuning(settings) // 性能专项 P-2：随机端口回退分支同样要带吞吐参数
@@ -3003,5 +3033,16 @@ class BtEngine(private val listener: Listener) : EngineControl {
     const val FGS_TIMEOUT_TEXT = "前台服务已到系统时限，下载已暂停"
     /** fastresume 周期脏写间隔（对齐桌面 core/session.py:39 `RESUME_SWEEP_INTERVAL=60`）。 */
     const val RESUME_SWEEP_INTERVAL_MS: Long = 60_000L
+
+    /**
+     * DHT 引导节点（逗号分隔，对齐桌面 `core/session.py::DHT_BOOTSTRAP_NODES`）。
+     * libtorrent4j 默认只有 dht.libtorrent.org 一个节点；多写几个公共 router，
+     * 任何一个通路由表就能起步，冗余本身即收益（受限网络里单点不可达是常态）。
+     * 注意 `router.bitcomet.com` 桌面有但本机 DNS 解析失败——保留不影响启动
+     * （bootstrap 逐条并发、失败静默），与桌面清单逐值一致优先。
+     */
+    const val DHT_BOOTSTRAP_NODES: String =
+      "dht.libtorrent.org:25401,dht.transmissionbt.com:6881,router.bittorrent.com:6881," +
+        "router.utorrent.com:6881,dht.aelitis.com:6881,router.bitcomet.com:6881"
   }
 }

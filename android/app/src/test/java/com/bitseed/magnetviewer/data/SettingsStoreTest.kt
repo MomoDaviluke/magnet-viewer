@@ -51,10 +51,10 @@ class SettingsStoreTest {
     assertEquals(PREVIEW_CACHE_CONVERT, d.previewCacheMode)
     assertEquals(THEME_LIGHT, d.uiTheme)
     assertTrue(d.loggingEnabled)
-    // 诊断 D-2026-09-18：两项默认关闭，与桌面 DEFAULTS 一致
-    // （port_mapping=False 保持「只收不做种、减暴露面」；extra_trackers=False
-    //  保持既有 5 条 udp 的行为与相关断言不变）。
-    assertFalse("桌面 DEFAULTS: port_mapping = False", d.portMapping)
+    // 诊断 D-2026-09-18 + 2026-10-13 性能实测裁决：
+    // （port_mapping=True 开启入站可达——关闭时连不上 NAT 后的 peer，实测是下载
+    //   速率第一瓶颈；extra_trackers=False 保持既有 5 条 udp 的行为与相关断言不变）。
+    assertTrue("桌面 DEFAULTS: port_mapping = True", d.portMapping)
     assertFalse("桌面 DEFAULTS: extra_trackers = False", d.extraTrackers)
   }
 

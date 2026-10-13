@@ -172,12 +172,13 @@ data class AppSettings(
   val uiTheme: String = THEME_LIGHT,
   val loggingEnabled: Boolean = true,
   /**
-   * UPnP/NAT-PMP 端口映射（诊断 D-2026-09-18）。默认 false —— 与桌面
-   * `DEFAULTS["port_mapping"]` 一致：本应用默认只「收」不做种，端口映射徒增暴露面。
-   * 关闭时会连不上同为 NAT 后的 peer（swarm 里占比很高），做种时也无人能连入。
+   * UPnP/NAT-PMP 端口映射（诊断 D-2026-09-18）。**默认 true**（2026-10-13 性能实测裁决）：
+   * 关闭时连不上同为 NAT 后的 peer（swarm 里占比很高），实测同一冷门种子前 66s 仅
+   * 1–10KB/s、开映射后 69s 起跳到 1.5MB/s——入站可达是下载速率的第一瓶颈。
+   * 主流 BT 客户端（qBittorrent/BitTorrent）亦默认开启。隐私敏感用户可关闭。
    * 保存设置即热生效（`BtEngine.applyPortMapping`）。
    */
-  val portMapping: Boolean = false,
+  val portMapping: Boolean = true,
   /**
    * 追加 HTTP/HTTPS 兜底 tracker（诊断 D-2026-09-18）。默认 false —— 与桌面
    * `DEFAULTS["extra_trackers"]` 一致：默认路径仍是既有 5 条 udp。
