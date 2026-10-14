@@ -52,6 +52,34 @@ technical_roadmap Phase 0.1）。变更记录自 `git log` 提炼。
 
 ---
 
+## [2026-10-14] — v1.1.1：性能实测优化 + 安卓播放器横竖屏/全屏 + UI 精修
+
+### 变更（v1.1.1，提交 `543a1a2`/`dbf6f20`/`533e847`/`a53174c`）
+- **性能（实测驱动，指定种子 `ae0157c0…` 定位）**：
+  - `port_mapping` 双端默认**开启**（桌面 `core/config.py` + 安卓 `SettingsStore`/
+    `BtEngine`）：实测关闭时前 66s 仅 1–10KB/s（连不上 NAT 后做种端），开启后产品栈
+    预览峰值 3MB/s、peers 2→28——入站可达是下载速率第一瓶颈；对齐主流 BT 客户端默认。
+  - 安卓 `EngineTuning` 补齐桌面第二/三批吞吐参数（recv/send socket 缓冲、
+    aio/hashing 线程、max_out_request_queue、request_queue_time、重连节奏、
+    piece_extent_affinity、announce_to_all_*；全部键经 javap 核对 libtorrent4j
+    2.1.0-39 存在）；`BtEngine` 补 `setDhtBootstrapNodes` 6 节点冗余（对齐桌面）。
+- **新增（安卓播放器横竖屏/全屏）**：Manifest `configChanges` 防旋转重建；ExoPlayer
+  实例提升到内容作用域共享（横屏覆盖层与竖屏内嵌卡同一实例，切换播放不中断）；
+  FULL_SENSOR 重力感应自动横竖屏 + 竖屏「全屏」按钮 + 沉浸系统栏 + 顶部控制条
+  （暂停/退出播放/退出全屏）+ 返回键分级退出。模拟器（mv-demo）实测：旋转 pid 恒定、
+  requestedOrientation 链路正确、覆盖层渲染、沉浸生效。
+- **UI 精修（桌面下载页）**：进度条自绘重做——旧系统样式百分比压条、窄列裁切，
+  改「圆角轨道 + 右侧独立百分比」（对齐 qBittorrent/IDM 惯例），paint 现读
+  `ui.theme` 跟随深浅主题热切换。
+
+### 验证
+- 桌面回归 27/27 全绿；安卓单测 364/364 全绿；release APK 构建 + lintVital 通过。
+- 产品级真实磁力端到端（SessionManager 栈）：元数据 1.2–12.6s、预览峰值 3MB/s。
+- 回环吞吐 T4（千兆口径）：本程序栈峰值 78.3MB/s（≥60MB/s 判据）、首字节 0.10s、
+  UI 轮询中位 0.49ms 零拖累——软件栈无瓶颈。
+
+---
+
 ## [Unreleased] — 架构重构 Wave 2 / Wave 3 / Wave 4 / Wave 5（arch/roadmap-2026q4）
 
 ### 新增
